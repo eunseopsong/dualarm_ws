@@ -17,8 +17,6 @@ public:
     void JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
     void ContactForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetJointCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
-    
-    // Trigger 서비스 콜백
     void ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                              std::shared_ptr<std_srvs::srv::Trigger::Response> response);
 
@@ -30,14 +28,18 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr contact_force_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_joint_sub_;
+    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr mode_service_;
     
     rclcpp::TimerBase::SharedPtr print_timer_;
     rclcpp::TimerBase::SharedPtr control_timer_;
 
     std::string current_control_mode_ = "idle";
-    Eigen::VectorXd q_l_c_, q_r_c_, q_l_h_c_, q_r_h_c_;
-    Eigen::VectorXd q_l_t_, q_r_t_, q_l_h_t_, q_r_h_t_;
+    std::vector<std::string> joint_names_; // Isaac Sim 조인트 이름 저장용
+
+    // Arm & Hand Vectors
+    Eigen::VectorXd q_l_c_, q_r_c_, q_l_t_, q_r_t_;
+    Eigen::VectorXd q_l_h_c_, q_r_h_c_, q_l_h_t_, q_r_h_t_;
     Eigen::Vector3d f_l_c_, f_r_c_, f_l_t_, f_r_t_;
     Eigen::VectorXd f_l_h_c_, f_r_h_c_, f_l_h_t_, f_r_h_t_;
 
