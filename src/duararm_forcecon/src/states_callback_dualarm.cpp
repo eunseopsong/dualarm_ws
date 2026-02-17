@@ -1,8 +1,7 @@
 #include "DualArmForceControl.h"
 #include <cstdio>
 
-void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
-{
+void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
     for (size_t i = 0; i < msg->name.size(); ++i) {
         std::string n = msg->name[i]; double p = msg->position[i];
         if (n == "left_joint_1") q_l_c_(0) = p;
@@ -17,17 +16,37 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
         else if (n == "right_joint_4") q_r_c_(3) = p;
         else if (n == "right_joint_5") q_r_c_(4) = p;
         else if (n == "right_joint_6") q_r_c_(5) = p;
-        // Hand Mapping (Joint 1-4)
-        else if (n.find("baby_joint") != std::string::npos) { int idx = (n[5]=='b')?0:0; /* logic simplified for brevity */ }
-        // ... (생략된 매핑 로직은 이전과 동일하게 n.find를 통해 q_h_c_에 저장)
     }
 }
 
-void DualArmForceControl::ContactForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
-{
+void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+    if (msg->data.size() < 12) return;
+    for(int i=0; i<6; i++) {
+        q_l_t_(i) = msg->data[i];
+        q_r_t_(i) = msg->data[i+6];
+    }
+    if (msg->data.size() >= 52) {
+        for(int i=0; i<20; i++) {
+            q_l_h_t_(i) = msg->data[i+12];
+            q_r_h_t_(i) = msg->data[i+32];
+        }
+    }
+}
+
+// Trigger 호출 시 모드 토글 (idle <-> forward)
+void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                                               std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+    (void)request;
+    current_control_mode_ = (current_control_mode_ == "idle") ? "forward" : "idle";
+    
+    response->success = true;
+    response->message = "Switched to " + current_control_mode_ + " mode";
+}
+
+void DualArmForceControl::ContactForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
     if (msg->data.size() < 6) return;
     f_l_c_ << msg->data[0], msg->data[1], msg->data[2];
-    f_r_c_ << msg->data[6], msg->data[7], msg->data[8]; // Arm Force만 추출
+    f_r_c_ << msg->data[3], msg->data[4], msg->data[5];
 }
 
 void DualArmForceControl::PrintDualArmStates()
@@ -35,7 +54,8 @@ void DualArmForceControl::PrintDualArmStates()
     if (!is_initialized_) return;
     printf("\033[H");
     printf("================================================================================\n");
-    printf("   Dual Arm (6-DOF) & Hand (20-DOF) Monitor | [Cyan: Curr, Yellow: Targ]        \n");
+    // 상단 헤더에 현재 제어 모드 표시 추가
+    printf("   Dual Arm & Hand Monitor | Mode: [\033[1;32m%-7s\033[0m] | [Cyan: Curr, Yellow: Targ]\n", current_control_mode_.c_str());
     printf("================================================================================\n");
 
     // --- ARM SECTION ---
