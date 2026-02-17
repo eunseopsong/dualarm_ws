@@ -3,13 +3,11 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
-#include "std_msgs/msg/float64_multi_array.hpp"
-#include "geometry_msgs/msg/wrench.hpp"
+#include "std_msgs/msg/float64_multi_array.hpp" // [수정] Wrench 대신 사용
 #include <Eigen/Dense>
 #include <memory>
 #include <string>
 #include <vector>
-#include <array>
 
 class DualArmForceControl : public std::enable_shared_from_this<DualArmForceControl>
 {
@@ -18,46 +16,48 @@ public:
     ~DualArmForceControl();
 
     // ========================================================================
-    // Callbacks (states_callback_dualarm.cpp에 구현됨)
+    // Callbacks (states_callback_dualarm.cpp에 구현)
     // ========================================================================
-    // [수정] Arm + Hand 전체 관절 콜백
+    // Arm + Hand 전체 관절 콜백
     void JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
-    
-    // Force/Torque Sensor 콜백
-    // void ftSensorCallback(const geometry_msgs::msg::Wrench::SharedPtr msg);
+
+    // [수정] Contact Force 콜백 (Float64MultiArray)
+    void ContactForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
 
     // ========================================================================
     // Member Variables
     // ========================================================================
 public:
-    // 로봇 자유도 설정
-    static const int ARM_DOF = 7;    // Arm: 7축
-    static const int HAND_DOF = 15;  // Hand: 15축 (Thumb 3 + Index 3 + Middle 3 + Ring 3 + Pinky 3)
+    // 로봇 자유도
+    static const int ARM_DOF = 7;
+    static const int HAND_DOF = 15;
 
 private:
     std::shared_ptr<rclcpp::Node> node_;
 
     // Subscribers
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::Wrench>::SharedPtr ftsensor_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr ftsensor_sub_; // [수정] 타입 변경
 
     // ------------------------------------------------------------------------
     // Robot States
     // ------------------------------------------------------------------------
     // Arm Joint Positions
-    Eigen::VectorXd q_left_;   // Size: ARM_DOF
-    Eigen::VectorXd q_right_;  // Size: ARM_DOF
+    Eigen::VectorXd q_left_;
+    Eigen::VectorXd q_right_;
 
     // Hand Joint Positions
-    Eigen::VectorXd q_left_hand_;  // Size: HAND_DOF
-    Eigen::VectorXd q_right_hand_; // Size: HAND_DOF
+    Eigen::VectorXd q_left_hand_;
+    Eigen::VectorXd q_right_hand_;
 
-    // Contact Forces (Wrench)
-    Eigen::Vector3d teleop_force_; // Fx, Fy, Fz
-    double contact_force;          // Force Magnitude or Z-force
-    bool teleop_force_valid_ = false;
+    // Contact Forces (Left)
+    Eigen::Vector3d force_left_;   // Fx, Fy, Fz
+    Eigen::Vector3d torque_left_;  // Tx, Ty, Tz
 
-    // 기타 상태 변수들 (필요시 추가)
+    // Contact Forces (Right)
+    Eigen::Vector3d force_right_;  // Fx, Fy, Fz
+    Eigen::Vector3d torque_right_; // Tx, Ty, Tz
+
     bool is_initialized_ = false;
 };
 
