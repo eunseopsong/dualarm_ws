@@ -4,7 +4,7 @@
   <name>dualarm_forcecon</name>
   <version>0.0.1</version>
   <description>Dual Arm Force Control Package</description>
-  <maintainer email="user@todo.todo">user</maintainer>
+  <maintainer email="lexondms1@g.skku.edu">user</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
