@@ -17,7 +17,7 @@ int main(int argc, char* argv[])
     rclcpp::executors::MultiThreadedExecutor executor;
     executor.add_node(node);
 
-    RCLCPP_INFO(node->get_logger(), "DualArm Control Node Started.");
+    // RCLCPP_INFO(node->get_logger(), "DualArm Control Node Started.");
     executor.spin();
 
     rclcpp::shutdown();
