@@ -1,25 +1,60 @@
 #include "DualArmForceControl.h"
+#include <chrono>
+#include <functional>
+#include <memory>
 
-// 생성자
-DualArmForceControl::DualArmForceControl(const rclcpp::Node::SharedPtr& node)
-: node_(node)
+using namespace std::chrono_literals;
+
+DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
+    : node_(node)
 {
     RCLCPP_INFO(node_->get_logger(), "DualArmForceControl Class Created.");
+
+    // QoS 설정 (Sensor Data용 Best Effort)
+    auto sensor_qos = rclcpp::QoS(rclcpp::KeepLast(10));
+    sensor_qos.best_effort();
+    sensor_qos.durability_volatile();
+
+    // 일반 QoS
+    auto qos = rclcpp::QoS(rclcpp::KeepLast(10));
+    qos.reliable();
+    qos.durability_volatile();
+
+    // ========================================================================
+    // 1. Subscriber 생성
+    // ========================================================================
     
-    // 나중에 여기에 Subscriber/Publisher 생성 코드가 들어갑니다.
+    // [수정] Joint States Subscriber (Callback 이름 변경: JointsCallback)
+    // Topic: /isaac_joint_states
+    joint_states_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
+        "/isaac_joint_states", sensor_qos, 
+        std::bind(&DualArmForceControl::JointsCallback, this, std::placeholders::_1));
+
+    // FT Sensor Subscriber
+    // Topic: /isaac_contact_states
+    // ftsensor_sub_ = node_->create_subscription<geometry_msgs::msg::Wrench>(
+    //     "/isaac_contact_states", qos, 
+    //     std::bind(&DualArmForceControl::ftSensorCallback, this, std::placeholders::_1));
+
+    // ========================================================================
+    // 2. 변수 초기화
+    // ========================================================================
+    q_left_.setZero(ARM_DOF);
+    q_right_.setZero(ARM_DOF);
+    q_left_hand_.setZero(HAND_DOF);
+    q_right_hand_.setZero(HAND_DOF);
+    
+    teleop_force_.setZero();
+    contact_force = 0.0;
+    
+    is_initialized_ = true;
 }
 
-// 소멸자
 DualArmForceControl::~DualArmForceControl()
 {
     RCLCPP_INFO(node_->get_logger(), "DualArmForceControl Class Destroyed.");
 }
 
-// 메인 루프 (껍데기)
-void DualArmForceControl::CalculateAndPublishJoint()
-{
-    if (!running_) return;
-
-    // 나중에 여기에 제어 로직이 들어갑니다.
-    // RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000, "Control Loop Running...");
-}
+// 참고: 
+// JointsCallback()과 ftSensorCallback()의 구현 내용은 
+// src/states_callback_dualarm.cpp 파일에 있습니다.
