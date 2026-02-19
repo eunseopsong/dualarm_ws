@@ -2,7 +2,7 @@
 <package format="3">
   <name>dualarm_forcecon</name>
   <version>0.0.0</version>
-  <description>Dual Arm Force Control - std_srvs version</description>
+  <description>Dual Arm Force Control - Inverse Kinematics version</description>
   <maintainer email="eunseop@todo.todo">eunseop</maintainer>
   <license>Apache License 2.0</license>
 
@@ -13,6 +13,13 @@
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>libeigen-dev</depend>
+  
+  <depend>kdl_parser</depend>
+  <depend>orocos_kdl</depend>
+  <depend>urdf</depend>
+  <depend>tf2_kdl</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
