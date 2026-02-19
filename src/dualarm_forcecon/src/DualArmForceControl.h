@@ -19,8 +19,8 @@
 // include/ kinematics
 #include "dualarm_forcecon/Kinematics/arm_forward_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/arm_inverse_kinematics.hpp"
-#include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"
-#include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"  // parseHandJointName()
+#include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"   // <-- pinocchio 버전으로 교체됨
+#include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"          // parseHandJointName()
 
 class DualArmForceControl : public std::enable_shared_from_this<DualArmForceControl> {
 public:
@@ -29,7 +29,14 @@ public:
 
     // Callbacks
     void JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
+
+    // ✅ 분할: wrapper(기존 subscription 유지용)
     void PositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
+
+    // ✅ 분할된 실제 처리
+    void ArmPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
+    void HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
+
     void TargetPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void ContactForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetJointCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
@@ -57,12 +64,12 @@ private:
 
     // Params
     std::string urdf_path_;
-    std::array<double,3> world_base_xyz_{0.0, 0.0, 0.306};           // z offset 기본
+    std::array<double,3> world_base_xyz_{0.0, 0.0, 0.306};
     std::array<double,3> world_base_euler_xyz_deg_{0.0, 0.0, 0.0};
 
-    std::string ik_targets_frame_ = "base"; // base/world
-    std::string ik_euler_conv_    = "rpy";  // rpy/xyz
-    std::string ik_angle_unit_    = "rad";  // rad/deg/auto
+    std::string ik_targets_frame_ = "base";
+    std::string ik_euler_conv_    = "rpy";
+    std::string ik_angle_unit_    = "rad";
 
     // mode
     std::string current_control_mode_ = "idle";

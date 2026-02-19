@@ -1,98 +1,143 @@
 #ifndef HAND_FORWARD_KINEMATICS_HPP
 #define HAND_FORWARD_KINEMATICS_HPP
 
-#include <kdl/tree.hpp>
-#include <kdl/chain.hpp>
-#include <kdl/chainfksolverpos_recursive.hpp>
-#include <kdl_parser/kdl_parser.hpp>
-
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/point.hpp>
+
+#include <Eigen/Dense>
+
+#include <pinocchio/parsers/urdf.hpp>
+#include <pinocchio/algorithm/kinematics.hpp>
+#include <pinocchio/algorithm/frames.hpp>
 
 #include <vector>
 #include <string>
 #include <map>
 #include <memory>
 #include <iostream>
-
-#include <Eigen/Dense>
+#include <algorithm>
 
 class HandForwardKinematics {
 public:
+    // v7 시그니처 유지: (urdf_path, hand_base_link, finger_tips)
+    // finger_tips: frame(link) names (ex: link4_thumb, ...)
     HandForwardKinematics(const std::string& urdf_path,
                           const std::string& hand_base_link,
                           const std::vector<std::string>& finger_tips)
-    : ok_(false), hand_base_link_(hand_base_link), finger_tips_(finger_tips)
+    : ok_(false),
+      urdf_path_(urdf_path),
+      hand_base_link_(hand_base_link),
+      finger_tips_(finger_tips)
     {
-        KDL::Tree tree;
-        if (!kdl_parser::treeFromFile(urdf_path, tree)) {
-            std::cerr << "[HandFK Error] Failed to parse URDF: " << urdf_path << std::endl;
+        try {
+            // fixed-base model
+            pinocchio::urdf::buildModel(urdf_path_, model_);
+            data_ = pinocchio::Data(model_);
+        } catch (const std::exception& e) {
+            std::cerr << "[HandFK Error] Pinocchio buildModel failed: " << e.what() << std::endl;
             return;
         }
 
-        int built = 0;
-        for (const auto& tip : finger_tips_) {
-            KDL::Chain chain;
-            if (tree.getChain(hand_base_link_, tip, chain)) {
-                solvers_[tip] = std::make_shared<KDL::ChainFkSolverPos_recursive>(chain);
-                num_jnts_[tip] = chain.getNrOfJoints();
-                built++;
-            } else {
-                std::cerr << "[HandFK Warn] Chain not found: " << hand_base_link_ << " -> " << tip << std::endl;
-            }
+        // infer side from base link string
+        side_prefix_ = inferSidePrefix(hand_base_link_);
+        if (side_prefix_.empty()) {
+            std::cerr << "[HandFK Warn] Cannot infer side from base_link='"
+                      << hand_base_link_ << "'. "
+                      << "Expecting it contains 'left' or 'right'.\n";
         }
 
+        // base frame id
+        base_fid_ = model_.getFrameId(hand_base_link_);
+        if (base_fid_ == (pinocchio::FrameIndex)(-1)) {
+            std::cerr << "[HandFK Error] Base frame not found in model: " << hand_base_link_ << std::endl;
+            return;
+        }
+
+        // tip frame ids
+        tip_fids_.clear();
+        int built = 0;
+        for (const auto& tip : finger_tips_) {
+            auto fid = model_.getFrameId(tip);
+            if (fid == (pinocchio::FrameIndex)(-1)) {
+                std::cerr << "[HandFK Warn] Tip frame not found: " << tip << std::endl;
+                continue;
+            }
+            tip_fids_.push_back(fid);
+            built++;
+        }
+
+        // hand joint ids (20 dof): (thumb4, index4, middle4, ring4, baby4)
+        buildHandJointIds();
+
         ok_ = (built > 0);
-        std::cout << "[HandFK Info] base=" << hand_base_link_
+        std::cout << "[HandFK Info] Pinocchio OK?=" << ok_
+                  << " base=" << hand_base_link_
                   << " tips_in=" << finger_tips_.size()
-                  << " solvers_built=" << built << std::endl;
+                  << " tips_found=" << built
+                  << " side=" << side_prefix_
+                  << std::endl;
     }
 
     bool isOk() const { return ok_; }
 
-    // v8: 생성자에서 받은 finger_tips_를 그대로 사용 (하드코딩 제거)
     // hand_q: 20 dof, order = (thumb4, index4, middle4, ring4, baby4)
-    std::map<std::string, geometry_msgs::msg::Pose> computeFingertips(const std::vector<double>& hand_q) const {
+    // return: tip pose expressed in hand_base_link frame
+    std::map<std::string, geometry_msgs::msg::Pose> computeFingertips(const std::vector<double>& hand_q) const
+    {
         std::map<std::string, geometry_msgs::msg::Pose> results;
         if (!ok_) return results;
 
-        constexpr int DOF_PER_FINGER = 4;
-        const int expected = static_cast<int>(finger_tips_.size()) * DOF_PER_FINGER;
-        if (static_cast<int>(hand_q.size()) < expected) {
-            // 부족하면 0으로 패딩해서라도 계산 시도
-            // (여기서 return하면 print가 고정되어 보이기 쉬움)
+        // q full
+        Eigen::VectorXd q = pinocchio::neutral(model_);
+
+        // write hand joints into q
+        // 부족하면 0 padding
+        const int expected = 20;
+        for (int i = 0; i < expected; ++i) {
+            if (i >= (int)hand_joint_ids_.size()) break;
+            const auto jid = hand_joint_ids_[i];
+            if (jid == 0) continue; // not found
+            const int idx_q = model_.joints[jid].idx_q();
+            const double v = (i < (int)hand_q.size()) ? hand_q[i] : 0.0;
+            // 대부분 1DoF revolute -> nq=1
+            q[idx_q] = v;
         }
 
+        // FK
+        pinocchio::forwardKinematics(model_, data_, q);
+        pinocchio::updateFramePlacements(model_, data_);
+
+        const pinocchio::SE3& oMbase = data_.oMf[base_fid_];
+
+        // each tip: rel = base^{-1} * tip
         for (size_t i = 0; i < finger_tips_.size(); ++i) {
-            const std::string& tip = finger_tips_[i];
-            const int start_idx = static_cast<int>(i) * DOF_PER_FINGER;
+            const std::string& tip_name = finger_tips_[i];
 
-            auto it = solvers_.find(tip);
-            if (it == solvers_.end()) continue;
+            // tip fid 찾기(입력 tip list 기준)
+            auto fid = model_.getFrameId(tip_name);
+            if (fid == (pinocchio::FrameIndex)(-1)) continue;
 
-            const unsigned int nj = num_jnts_.at(tip);
-            KDL::JntArray jnt_pos(nj);
+            const pinocchio::SE3& oMtip = data_.oMf[fid];
+            pinocchio::SE3 baseMtip = oMbase.inverse() * oMtip;
 
-            for (unsigned int j = 0; j < nj; ++j) {
-                const int idx = start_idx + static_cast<int>(j);
-                jnt_pos(j) = (idx >= 0 && idx < static_cast<int>(hand_q.size())) ? hand_q[idx] : 0.0;
-            }
+            geometry_msgs::msg::Pose p;
+            p.position.x = baseMtip.translation()(0);
+            p.position.y = baseMtip.translation()(1);
+            p.position.z = baseMtip.translation()(2);
 
-            KDL::Frame frame;
-            if (it->second->JntToCart(jnt_pos, frame) >= 0) {
-                geometry_msgs::msg::Pose p;
-                p.position.x = frame.p.x();
-                p.position.y = frame.p.y();
-                p.position.z = frame.p.z();
-                frame.M.GetQuaternion(p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w);
-                results[tip] = p;
-            }
+            Eigen::Quaterniond qtip(baseMtip.rotation());
+            p.orientation.x = qtip.x();
+            p.orientation.y = qtip.y();
+            p.orientation.z = qtip.z();
+            p.orientation.w = qtip.w();
+
+            results[tip_name] = p;
         }
 
         return results;
     }
 
-    // base(world) pose + relative pose -> world point
+    // base(world) pose + relative pose -> world point (v7 유지)
     static geometry_msgs::msg::Point combinePosePoint(const geometry_msgs::msg::Pose& base_world,
                                                       const geometry_msgs::msg::Pose& rel_in_base)
     {
@@ -120,12 +165,60 @@ public:
     }
 
 private:
+    static std::string inferSidePrefix(const std::string& s)
+    {
+        std::string low = s;
+        std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+        if (low.find("left") != std::string::npos)  return "left";
+        if (low.find("right") != std::string::npos) return "right";
+        return "";
+    }
+
+    void buildHandJointIds()
+    {
+        hand_joint_ids_.assign(20, 0);
+
+        // naming convention: "<side>_<finger>_joint<1..4>"
+        const std::vector<std::string> fingers = {"thumb","index","middle","ring","baby"};
+
+        int k = 0;
+        for (int f = 0; f < 5; ++f) {
+            for (int j = 1; j <= 4; ++j) {
+                std::string jn;
+                if (!side_prefix_.empty()) {
+                    jn = side_prefix_ + "_" + fingers[f] + "_joint" + std::to_string(j);
+                } else {
+                    // side 못 잡히면 그래도 한번 시도(URDF가 side prefix 없이 있을 수도 있으니)
+                    jn = fingers[f] + "_joint" + std::to_string(j);
+                }
+
+                pinocchio::JointIndex jid = model_.getJointId(jn);
+                if (jid == 0) {
+                    // 없으면 경고만(빌드/실행은 계속)
+                    // std::cerr << "[HandFK Warn] Joint not found: " << jn << std::endl;
+                }
+                if (k < 20) hand_joint_ids_[k] = jid;
+                k++;
+            }
+        }
+    }
+
+private:
     bool ok_;
+    std::string urdf_path_;
     std::string hand_base_link_;
     std::vector<std::string> finger_tips_;
 
-    std::map<std::string, std::shared_ptr<KDL::ChainFkSolverPos_recursive>> solvers_;
-    std::map<std::string, unsigned int> num_jnts_;
+    std::string side_prefix_;
+
+    pinocchio::Model model_;
+    mutable pinocchio::Data data_;
+
+    pinocchio::FrameIndex base_fid_{(pinocchio::FrameIndex)(-1)};
+    std::vector<pinocchio::FrameIndex> tip_fids_;
+
+    // size 20, JointIndex (0 means not found)
+    std::vector<pinocchio::JointIndex> hand_joint_ids_;
 };
 
 #endif

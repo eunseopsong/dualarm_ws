@@ -29,7 +29,7 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
         else if (n=="right_joint_6") q_r_c_(5)=p;
 
         else {
-            // v8: robust hand parsing (suffix-based)
+            // v8 robust hand parsing (suffix-based)
             auto hj = dualarm_forcecon::kin::parseHandJointName(n);
             if (!hj.ok) continue;
 
@@ -43,12 +43,26 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
 }
 
 // --------------------
-// PositionCallback
+// PositionCallback (WRAPPER)
 // --------------------
 void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
     (void)msg;
     if (!is_initialized_) return;
-    if (!arm_fk_ || !hand_fk_l_ || !hand_fk_r_) return;
+
+    // ✅ 순서 중요: arm pose 먼저 계산 -> hand combinePosePoint에 사용
+    ArmPositionCallback(msg);
+    HandPositionCallback(msg);
+}
+
+// --------------------
+// ArmPositionCallback
+//  - current_pose_l_/r_ 계산
+//  - mode에 따른 target_pose_l_/r_ 유지/갱신
+// --------------------
+void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
+    (void)msg;
+    if (!is_initialized_) return;
+    if (!arm_fk_) return;
 
     // current FK (arms)
     std::vector<double> jl(6), jr(6);
@@ -69,6 +83,18 @@ void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::S
         target_pose_l_ = arm_fk_->getLeftFK(jl_t);
         target_pose_r_ = arm_fk_->getRightFK(jr_t);
     }
+}
+
+// --------------------
+// HandPositionCallback
+//  - fingertip world(cur/target) 계산
+//  - v7과 동일한 변수들(f_l_thumb_, t_f_l_thumb_ ...) 업데이트
+//  - Hand FK는 pinocchio 기반 HandForwardKinematics 사용
+// --------------------
+void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
+    (void)msg;
+    if (!is_initialized_) return;
+    if (!hand_fk_l_ || !hand_fk_r_) return;
 
     // ---------- helper: default point = wrist position ----------
     auto wristPoint = [&](const geometry_msgs::msg::Pose& p)->geometry_msgs::msg::Point{
@@ -94,6 +120,7 @@ void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::S
 
     std::vector<double> hl(20), hr(20);
     for (int i=0;i<20;i++){ hl[i]=q_l_h_c_(i); hr[i]=q_r_h_c_(i); }
+
     auto tl = hand_fk_l_->computeFingertips(hl);
     auto tr = hand_fk_r_->computeFingertips(hr);
 
@@ -144,6 +171,7 @@ void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::S
 
         std::vector<double> hl_t(20), hr_t(20);
         for (int i=0;i<20;i++){ hl_t[i]=q_l_h_t_(i); hr_t[i]=q_r_h_t_(i); }
+
         auto tl_t = hand_fk_l_->computeFingertips(hl_t);
         auto tr_t = hand_fk_r_->computeFingertips(hr_t);
 
@@ -269,7 +297,7 @@ void DualArmForceControl::ContactForceCallback(const std_msgs::msg::Float64Multi
 }
 
 // ============================================================================
-// PrintDualArmStates (최하단)
+// PrintDualArmStates (v7 그대로 유지)
 // ============================================================================
 void DualArmForceControl::PrintDualArmStates() {
     if (!is_initialized_) return;
