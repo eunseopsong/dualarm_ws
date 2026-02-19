@@ -10,9 +10,10 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+
+find_package(eigen3_cmake_module REQUIRED)
 find_package(Eigen3 REQUIRED)
 
-# v5 추가 라이브러리 로드
 find_package(kdl_parser REQUIRED)
 find_package(orocos_kdl REQUIRED)
 find_package(urdf REQUIRED)
@@ -20,21 +21,13 @@ find_package(tf2_kdl REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 
-# include 폴더 경로 추가 (이 안에 있는 헤더 파일들을 참조할 수 있게 함)
-# 회원님이 만드신 Kinematics 폴더도 여기서 자동으로 인식됩니다.
-include_directories(
-  include
-  ${orocos_kdl_INCLUDE_DIRS}
-)
-
-# 헤더 온리(.hpp) 방식을 사용하므로 src 폴더에 있는 기존 파일 3개만 빌드합니다.
-add_executable(dualarm_ctrl
+add_executable(dualarm_forcecon_node
   src/node_dualarm_main.cpp
   src/DualArmForceControl.cpp
   src/states_callback_dualarm.cpp
 )
 
-ament_target_dependencies(dualarm_ctrl
+ament_target_dependencies(dualarm_forcecon_node
   rclcpp
   sensor_msgs
   std_msgs
@@ -47,13 +40,20 @@ ament_target_dependencies(dualarm_ctrl
   nav_msgs
 )
 
-target_link_libraries(dualarm_ctrl Eigen3::Eigen)
+target_link_libraries(dualarm_forcecon_node Eigen3::Eigen)
 
-install(TARGETS dualarm_ctrl DESTINATION lib/${PROJECT_NAME})
+target_include_directories(dualarm_forcecon_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
 
-# include 폴더 설치 규칙 (다른 패키지에서 헤더를 참조할 경우 대비)
-install(DIRECTORY include/
-  DESTINATION include
+install(TARGETS dualarm_forcecon_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# include/dualarm_forcecon/** 를 install/include/dualarm_forcecon/** 로 유지
+install(DIRECTORY include/${PROJECT_NAME}/
+  DESTINATION include/${PROJECT_NAME}
 )
 
 ament_package()
