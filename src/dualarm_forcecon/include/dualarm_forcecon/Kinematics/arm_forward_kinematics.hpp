@@ -6,98 +6,168 @@
 #include <vector>
 #include <memory>
 
-// KDL 및 URDF 관련 헤더
 #include <kdl/chain.hpp>
 #include <kdl/chainfksolverpos_recursive.hpp>
 #include <kdl/frames.hpp>
 #include <kdl_parser/kdl_parser.hpp>
 #include <urdf/model.h>
 
-// ROS 2 메시지 (End-Effector Pose 반환용)
 #include <geometry_msgs/msg/pose.hpp>
+
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
 
 class ArmForwardKinematics {
 public:
-    // 생성자: URDF 파일 경로와 링크 이름들을 받아 KDL 트리를 구성합니다.
     ArmForwardKinematics(const std::string& urdf_path,
                          const std::string& base_link,
                          const std::string& left_tip_link,
-                         const std::string& right_tip_link) 
+                         const std::string& right_tip_link)
+    : world_T_base_(Eigen::Affine3d::Identity())
     {
-        // 1. URDF 파일 로드
         urdf::Model robot_model;
         if (!robot_model.initFile(urdf_path)) {
             std::cerr << "[FK Error] Failed to parse URDF file at: " << urdf_path << std::endl;
+            ok_ = false;
             return;
         }
 
-        // 2. KDL 트리 생성
         KDL::Tree kdl_tree;
         if (!kdl_parser::treeFromUrdfModel(robot_model, kdl_tree)) {
             std::cerr << "[FK Error] Failed to construct KDL tree from URDF." << std::endl;
+            ok_ = false;
             return;
         }
 
-        // 3. 양팔의 Chain(관절/링크 연결 구조) 추출
         if (!kdl_tree.getChain(base_link, left_tip_link, left_chain_)) {
-            std::cerr << "[FK Error] Failed to get left arm chain from " << base_link << " to " << left_tip_link << std::endl;
+            std::cerr << "[FK Error] Failed to get left arm chain from " << base_link
+                      << " to " << left_tip_link << std::endl;
+            ok_ = false;
+            return;
         }
         if (!kdl_tree.getChain(base_link, right_tip_link, right_chain_)) {
-            std::cerr << "[FK Error] Failed to get right arm chain from " << base_link << " to " << right_tip_link << std::endl;
+            std::cerr << "[FK Error] Failed to get right arm chain from " << base_link
+                      << " to " << right_tip_link << std::endl;
+            ok_ = false;
+            return;
         }
 
-        // 4. FK 솔버 초기화
-        left_fk_solver_ = std::make_shared<KDL::ChainFkSolverPos_recursive>(left_chain_);
+        left_fk_solver_  = std::make_shared<KDL::ChainFkSolverPos_recursive>(left_chain_);
         right_fk_solver_ = std::make_shared<KDL::ChainFkSolverPos_recursive>(right_chain_);
-        
+
+        ok_ = true;
         std::cout << "[FK Info] Arm Forward Kinematics initialized successfully!" << std::endl;
     }
 
-    // 왼팔의 현재 Pose 계산
-    geometry_msgs::msg::Pose getLeftFK(const std::vector<double>& joint_positions) {
-        return computeFK(left_chain_, left_fk_solver_, joint_positions);
+    bool isOk() const { return ok_; }
+
+    // World_T_base 설정 (Isaac UI와 동일한 World 기준 출력용)
+    void setWorldBaseTransformXYZEulerDeg(const std::vector<double>& xyz_m,
+                                         const std::vector<double>& euler_xyz_deg)
+    {
+        if (xyz_m.size() < 3 || euler_xyz_deg.size() < 3) return;
+
+        double rx = deg2rad(euler_xyz_deg[0]);
+        double ry = deg2rad(euler_xyz_deg[1]);
+        double rz = deg2rad(euler_xyz_deg[2]);
+
+        Eigen::AngleAxisd ax(rx, Eigen::Vector3d::UnitX());
+        Eigen::AngleAxisd ay(ry, Eigen::Vector3d::UnitY());
+        Eigen::AngleAxisd az(rz, Eigen::Vector3d::UnitZ());
+
+        // Isaac UI: rotateXYZ => R = Rx * Ry * Rz
+        Eigen::Matrix3d R = (ax * ay * az).toRotationMatrix();
+
+        world_T_base_ = Eigen::Affine3d::Identity();
+        world_T_base_.linear() = R;
+        world_T_base_.translation() = Eigen::Vector3d(xyz_m[0], xyz_m[1], xyz_m[2]);
     }
 
-    // 오른팔의 현재 Pose 계산
-    geometry_msgs::msg::Pose getRightFK(const std::vector<double>& joint_positions) {
-        return computeFK(right_chain_, right_fk_solver_, joint_positions);
+    // base 기준 FK
+    geometry_msgs::msg::Pose getLeftFKBase(const std::vector<double>& joint_positions) {
+        return computeFKBase(left_chain_, left_fk_solver_, joint_positions);
     }
+    geometry_msgs::msg::Pose getRightFKBase(const std::vector<double>& joint_positions) {
+        return computeFKBase(right_chain_, right_fk_solver_, joint_positions);
+    }
+
+    // world 기준 FK (World_T_base * base_T_tip)
+    geometry_msgs::msg::Pose getLeftFKWorld(const std::vector<double>& joint_positions) {
+        auto p_base = getLeftFKBase(joint_positions);
+        return applyWorldBase(p_base);
+    }
+    geometry_msgs::msg::Pose getRightFKWorld(const std::vector<double>& joint_positions) {
+        auto p_base = getRightFKBase(joint_positions);
+        return applyWorldBase(p_base);
+    }
+
+    const Eigen::Affine3d& world_T_base() const { return world_T_base_; }
 
 private:
+    bool ok_{false};
+
     KDL::Chain left_chain_;
     KDL::Chain right_chain_;
     std::shared_ptr<KDL::ChainFkSolverPos_recursive> left_fk_solver_;
     std::shared_ptr<KDL::ChainFkSolverPos_recursive> right_fk_solver_;
 
-    // 공통 FK 계산 로직 (KDL -> geometry_msgs::msg::Pose 변환)
-    geometry_msgs::msg::Pose computeFK(const KDL::Chain& chain,
-                                       std::shared_ptr<KDL::ChainFkSolverPos_recursive> solver,
-                                       const std::vector<double>& joint_positions) 
+    Eigen::Affine3d world_T_base_;
+
+    static double deg2rad(double d) { return d * M_PI / 180.0; }
+
+    static Eigen::Affine3d poseToAffine(const geometry_msgs::msg::Pose& p) {
+        Eigen::Quaterniond q(p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z);
+        Eigen::Affine3d T = Eigen::Affine3d::Identity();
+        T.linear() = q.toRotationMatrix();
+        T.translation() = Eigen::Vector3d(p.position.x, p.position.y, p.position.z);
+        return T;
+    }
+
+    static geometry_msgs::msg::Pose affineToPose(const Eigen::Affine3d& T) {
+        geometry_msgs::msg::Pose p;
+        p.position.x = T.translation().x();
+        p.position.y = T.translation().y();
+        p.position.z = T.translation().z();
+        Eigen::Quaterniond q(T.linear());
+        p.orientation.x = q.x();
+        p.orientation.y = q.y();
+        p.orientation.z = q.z();
+        p.orientation.w = q.w();
+        return p;
+    }
+
+    geometry_msgs::msg::Pose applyWorldBase(const geometry_msgs::msg::Pose& base_pose) {
+        Eigen::Affine3d T_base_tip = poseToAffine(base_pose);
+        Eigen::Affine3d T_world_tip = world_T_base_ * T_base_tip;
+        return affineToPose(T_world_tip);
+    }
+
+    geometry_msgs::msg::Pose computeFKBase(const KDL::Chain& chain,
+                                          const std::shared_ptr<KDL::ChainFkSolverPos_recursive>& solver,
+                                          const std::vector<double>& joint_positions)
     {
         geometry_msgs::msg::Pose pose_msg;
 
-        // 조인트 개수 안전성 검사 (보통 6축 로봇이면 6개여야 함)
+        if (!ok_ || !solver) {
+            std::cerr << "[FK Error] FK solver not ready." << std::endl;
+            return pose_msg;
+        }
+
         if (joint_positions.size() != chain.getNrOfJoints()) {
-            std::cerr << "[FK Error] Joint size mismatch! Expected: " << chain.getNrOfJoints() 
+            std::cerr << "[FK Error] Joint size mismatch! Expected: " << chain.getNrOfJoints()
                       << ", Got: " << joint_positions.size() << std::endl;
             return pose_msg;
         }
 
-        // std::vector 를 KDL::JntArray 로 변환
         KDL::JntArray q_current(chain.getNrOfJoints());
-        for (size_t i = 0; i < joint_positions.size(); ++i) {
-            q_current(i) = joint_positions[i];
-        }
+        for (size_t i = 0; i < joint_positions.size(); ++i) q_current(i) = joint_positions[i];
 
         KDL::Frame end_effector_pose;
-        // JntToCart 연산 수행 (성공 시 0 이상의 값 반환)
         if (solver->JntToCart(q_current, end_effector_pose) >= 0) {
-            // 위치(Position) 저장
             pose_msg.position.x = end_effector_pose.p.x();
             pose_msg.position.y = end_effector_pose.p.y();
             pose_msg.position.z = end_effector_pose.p.z();
 
-            // 회전(Orientation - Quaternion) 저장
             double x, y, z, w;
             end_effector_pose.M.GetQuaternion(x, y, z, w);
             pose_msg.orientation.x = x;
