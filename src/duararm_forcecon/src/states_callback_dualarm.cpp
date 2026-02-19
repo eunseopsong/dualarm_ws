@@ -1,8 +1,8 @@
 #include "DualArmForceControl.h"
 #include <cstdio>
+#include <string>
 
 void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
-    // 최초 실행 시 조인트 이름 리스트 동기화
     if (joint_names_.empty()) {
         joint_names_ = msg->name;
         is_initialized_ = true;
@@ -12,6 +12,7 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
         std::string n = msg->name[i];
         double p = msg->position[i];
 
+        // [안전 구역 1] 팔(Arm) 상태 업데이트 - 기존 코드 100% 유지
         if (n == "left_joint_1") q_l_c_(0) = p;
         else if (n == "left_joint_2") q_l_c_(1) = p;
         else if (n == "left_joint_3") q_l_c_(2) = p;
@@ -24,6 +25,29 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
         else if (n == "right_joint_4") q_r_c_(3) = p;
         else if (n == "right_joint_5") q_r_c_(4) = p;
         else if (n == "right_joint_6") q_r_c_(5) = p;
+
+        // [추가 구역] 손가락(Hand) 상태 업데이트
+        else {
+            int f_idx = -1;
+            if (n.find("thumb") != std::string::npos) f_idx = 0;
+            else if (n.find("index") != std::string::npos) f_idx = 4;
+            else if (n.find("middle") != std::string::npos) f_idx = 8;
+            else if (n.find("ring") != std::string::npos) f_idx = 12;
+            else if (n.find("baby") != std::string::npos) f_idx = 16;
+
+            if (f_idx != -1) {
+                int j_idx = -1;
+                if (n.find("1") != std::string::npos) j_idx = 0;
+                else if (n.find("2") != std::string::npos) j_idx = 1;
+                else if (n.find("3") != std::string::npos) j_idx = 2;
+                else if (n.find("4") != std::string::npos) j_idx = 3;
+
+                if (j_idx != -1) {
+                    if (n.find("left") != std::string::npos) q_l_h_c_(f_idx + j_idx) = p;
+                    else if (n.find("right") != std::string::npos) q_r_h_c_(f_idx + j_idx) = p;
+                }
+            }
+        }
     }
 }
 

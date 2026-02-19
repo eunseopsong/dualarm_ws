@@ -40,7 +40,7 @@ void DualArmForceControl::ControlLoop() {
     cmd.name = joint_names_; // Isaac Sim의 순서 그대로 사용
 
     for (const auto& name : joint_names_) {
-        // Arm 매핑
+        // [안전 구역 1] 팔(Arm) 매핑 - 기존 작동 코드 100% 유지
         if (name == "left_joint_1") cmd.position.push_back(q_l_t_(0));
         else if (name == "left_joint_2") cmd.position.push_back(q_l_t_(1));
         else if (name == "left_joint_3") cmd.position.push_back(q_l_t_(2));
@@ -53,10 +53,35 @@ void DualArmForceControl::ControlLoop() {
         else if (name == "right_joint_4") cmd.position.push_back(q_r_t_(3));
         else if (name == "right_joint_5") cmd.position.push_back(q_r_t_(4));
         else if (name == "right_joint_6") cmd.position.push_back(q_r_t_(5));
-        // 몸체 및 기타 조인트는 0.0 고정
         else if (name == "yaw_joint" || name == "pitch_joint") cmd.position.push_back(0.0);
-        // 핸드 조인트 (이름 패턴에 따라 추가 가능)
-        else cmd.position.push_back(0.0); 
+        
+        // [추가 구역] 손가락(Hand) 매핑 - stoi 에러 없이 키워드만 검색
+        else {
+            int f_idx = -1;
+            if (name.find("thumb") != std::string::npos) f_idx = 0;
+            else if (name.find("index") != std::string::npos) f_idx = 4;
+            else if (name.find("middle") != std::string::npos) f_idx = 8;
+            else if (name.find("ring") != std::string::npos) f_idx = 12;
+            else if (name.find("baby") != std::string::npos) f_idx = 16;
+
+            if (f_idx != -1) {
+                int j_idx = -1;
+                if (name.find("1") != std::string::npos) j_idx = 0;
+                else if (name.find("2") != std::string::npos) j_idx = 1;
+                else if (name.find("3") != std::string::npos) j_idx = 2;
+                else if (name.find("4") != std::string::npos) j_idx = 3;
+
+                if (j_idx != -1) {
+                    if (name.find("left") != std::string::npos) cmd.position.push_back(q_l_h_t_(f_idx + j_idx));
+                    else if (name.find("right") != std::string::npos) cmd.position.push_back(q_r_h_t_(f_idx + j_idx));
+                    else cmd.position.push_back(0.0);
+                } else {
+                    cmd.position.push_back(0.0);
+                }
+            } else {
+                cmd.position.push_back(0.0); 
+            }
+        }
     }
 
     joint_command_pub_->publish(cmd);
