@@ -73,12 +73,6 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node) : n
     arm_ik_l_ = std::make_shared<ArmInverseKinematics>(urdf_path_, "base_link", "left_link_6");
     arm_ik_r_ = std::make_shared<ArmInverseKinematics>(urdf_path_, "base_link", "right_link_6");
 
-    // World_T_base 설정 (FK world 출력과 IK world 입력 변환에 사용)
-    if (arm_fk_ && arm_fk_->isOk()) {
-        arm_fk_->setWorldBaseTransformXYZEulerDeg(world_base_xyz, world_base_euler_xyz_deg);
-        T_world_base_ = arm_fk_->world_T_base();
-    }
-
     // Hand FK (기존 유지)
     std::vector<std::string> tips = {"link4_thumb", "link4_index", "link4_middle", "link4_ring", "link4_baby"};
     hand_fk_l_ = std::make_shared<HandForwardKinematics>(urdf_path_, "left_hand_base_link", tips);
