@@ -204,60 +204,121 @@ void DualArmForceControl::ContactForceCallback(const std_msgs::msg::Float64Multi
 void DualArmForceControl::PrintDualArmStates() {
     if (!is_initialized_) return;
 
-    auto printArm = [&](const char* side,
-                        const geometry_msgs::msg::Pose& cur,
-                        const geometry_msgs::msg::Pose& tar,
-                        const Eigen::Vector3d& fcur,
-                        const Eigen::Vector3d& ftar)
-    {
-        double cr, cp, cy;
-        double tr, tp, ty;
-        ArmForwardKinematics::quatToEulerXYZDeg_Isaac(cur.orientation, cr, cp, cy);
-        ArmForwardKinematics::quatToEulerXYZDeg_Isaac(tar.orientation, tr, tp, ty);
+    // ===== ANSI Colors (4개 모두 서로 다른 색) =====
+    // Curr Position: Cyan
+    // Targ Position: Yellow
+    // Curr Force   : Green
+    // Targ Force   : Magenta
+    constexpr const char* C_RESET   = "\033[0m";
+    constexpr const char* C_CUR_POS = "\033[1;36m"; // bright cyan
+    constexpr const char* C_TAR_POS = "\033[1;33m"; // bright yellow
+    constexpr const char* C_CUR_F   = "\033[1;32m"; // bright green
+    constexpr const char* C_TAR_F   = "\033[1;35m"; // bright magenta
+    constexpr const char* C_TITLE   = "\033[1;37m"; // bright white
+    constexpr const char* C_DIM     = "\033[0;37m"; // dim gray-ish
 
-        printf("[%s ARM] Curr Position: %8.4f %8.4f %8.4f   %8.2f %8.2f %8.2f\n",
-               side, cur.position.x, cur.position.y, cur.position.z, cr, cp, cy);
-        printf("        Targ Position: %8.4f %8.4f %8.4f   %8.2f %8.2f %8.2f\n",
-               tar.position.x, tar.position.y, tar.position.z, tr, tp, ty);
-        printf("        Curr Force   : %8.3f %8.3f %8.3f\n", fcur(0), fcur(1), fcur(2));
-        printf("        Targ Force   : %8.3f %8.3f %8.3f\n", ftar(0), ftar(1), ftar(2));
+    auto fmtArmLine = [&](const char* tag,
+                          const geometry_msgs::msg::Pose& pose,
+                          const Eigen::Vector3d& f,
+                          const char* c_pos,
+                          const char* c_f)
+    {
+        double r_deg, p_deg, y_deg;
+        ArmForwardKinematics::quatToEulerXYZDeg_Isaac(pose.orientation, r_deg, p_deg, y_deg);
+
+        // 한 줄에 Position + Force
+        // Position unit: m / deg, Force unit: N
+        printf("  %-4s %sP[m,deg]=(%7.4f %7.4f %7.4f | %7.2f %7.2f %7.2f)%s   "
+               "%sF[N]=(%7.3f %7.3f %7.3f)%s\n",
+               tag,
+               c_pos,
+               pose.position.x, pose.position.y, pose.position.z,
+               r_deg, p_deg, y_deg,
+               C_RESET,
+               c_f,
+               f(0), f(1), f(2),
+               C_RESET);
     };
 
-    auto printFinger = [&](const char* name,
-                           const geometry_msgs::msg::Point& cpos,
-                           const geometry_msgs::msg::Point& tpos,
-                           const Eigen::RowVector3d& cf,
-                           const Eigen::RowVector3d& tf)
+    auto fmtFingerLine = [&](const char* tag,
+                             const geometry_msgs::msg::Point& p,
+                             const Eigen::RowVector3d& f,
+                             const char* c_pos,
+                             const char* c_f)
     {
-        printf("  %-6s Curr Position: %8.4f %8.4f %8.4f\n", name, cpos.x, cpos.y, cpos.z);
-        printf("         Targ Position: %8.4f %8.4f %8.4f\n",       tpos.x, tpos.y, tpos.z);
-        printf("         Curr Force   : %8.3f %8.3f %8.3f\n",       cf(0), cf(1), cf(2));
-        printf("         Targ Force   : %8.3f %8.3f %8.3f\n",       tf(0), tf(1), tf(2));
+        // 손가락은 position만 (m) + force (N)
+        printf("  %-4s %sP[m]=(%7.4f %7.4f %7.4f)%s   "
+               "%sF[N]=(%7.3f %7.3f %7.3f)%s\n",
+               tag,
+               c_pos,
+               p.x, p.y, p.z,
+               C_RESET,
+               c_f,
+               f(0), f(1), f(2),
+               C_RESET);
     };
 
+    // clear screen
     printf("\033[2J\033[H");
-    printf("============================================================================================================\n");
-    printf("   Dual Arm & Hand Monitor v6 | Mode: [\033[1;32m%-7s\033[0m] | Cyan: Curr, Yel: Targ\n", current_control_mode_.c_str());
-    printf("============================================================================================================\n");
 
-    printArm("L", current_pose_l_, target_pose_l_, f_l_c_, f_l_t_);
-    printf("------------------------------------------------------------------------------------------------------------\n");
-    printArm("R", current_pose_r_, target_pose_r_, f_r_c_, f_r_t_);
+    printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
+    printf("%s   Dual Arm & Hand Monitor v6 | Mode: [%s%-7s%s] | Colors: %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+           C_TITLE,
+           "\033[1;32m", current_control_mode_.c_str(), C_TITLE,
+           C_CUR_POS, C_RESET,
+           C_TAR_POS, C_RESET,
+           C_CUR_F,   C_RESET,
+           C_TAR_F,   C_RESET,
+           C_RESET);
+    printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 
-    printf("============================================================================================================\n");
-    printf("[L HAND]\n");
-    printFinger("THUMB",  f_l_thumb_,  t_f_l_thumb_,  f_l_hand_c_.row(0), f_l_hand_t_.row(0));
-    printFinger("INDEX",  f_l_index_,  t_f_l_index_,  f_l_hand_c_.row(1), f_l_hand_t_.row(1));
-    printFinger("MIDDLE", f_l_middle_, t_f_l_middle_, f_l_hand_c_.row(2), f_l_hand_t_.row(2));
-    printFinger("RING",   f_l_ring_,   t_f_l_ring_,   f_l_hand_c_.row(3), f_l_hand_t_.row(3));
-    printFinger("BABY",   f_l_baby_,   t_f_l_baby_,   f_l_hand_c_.row(4), f_l_hand_t_.row(4));
+    // ---------------- ARM ----------------
+    printf("%s[L ARM]%s\n", C_TITLE, C_RESET);
+    fmtArmLine("CUR", current_pose_l_, f_l_c_, C_CUR_POS, C_CUR_F);
+    fmtArmLine("TAR", target_pose_l_,  f_l_t_, C_TAR_POS, C_TAR_F);
 
-    printf("------------------------------------------------------------------------------------------------------------\n");
-    printf("[R HAND]\n");
-    printFinger("THUMB",  f_r_thumb_,  t_f_r_thumb_,  f_r_hand_c_.row(0), f_r_hand_t_.row(0));
-    printFinger("INDEX",  f_r_index_,  t_f_r_index_,  f_r_hand_c_.row(1), f_r_hand_t_.row(1));
-    printFinger("MIDDLE", f_r_middle_, t_f_r_middle_, f_r_hand_c_.row(2), f_r_hand_t_.row(2));
-    printFinger("RING",   f_r_ring_,   t_f_r_ring_,   f_r_hand_c_.row(3), f_r_hand_t_.row(3));
-    printFinger("BABY",   f_r_baby_,   t_f_r_baby_,   f_r_hand_c_.row(4), f_r_hand_t_.row(4));
-    printf("============================================================================================================\n");
+    printf("%s------------------------------------------------------------------------------------------------------------%s\n", C_DIM, C_RESET);
+
+    printf("%s[R ARM]%s\n", C_TITLE, C_RESET);
+    fmtArmLine("CUR", current_pose_r_, f_r_c_, C_CUR_POS, C_CUR_F);
+    fmtArmLine("TAR", target_pose_r_,  f_r_t_, C_TAR_POS, C_TAR_F);
+
+    printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
+
+    // ---------------- HAND ----------------
+    printf("%s[L HAND]%s\n", C_TITLE, C_RESET);
+    fmtFingerLine("THMB", f_l_thumb_,  f_l_hand_c_.row(0), C_CUR_POS, C_CUR_F);
+    fmtFingerLine("THMB", t_f_l_thumb_, f_l_hand_t_.row(0), C_TAR_POS, C_TAR_F);
+
+    fmtFingerLine("INDX", f_l_index_,  f_l_hand_c_.row(1), C_CUR_POS, C_CUR_F);
+    fmtFingerLine("INDX", t_f_l_index_, f_l_hand_t_.row(1), C_TAR_POS, C_TAR_F);
+
+    fmtFingerLine("MIDL", f_l_middle_,  f_l_hand_c_.row(2), C_CUR_POS, C_CUR_F);
+    fmtFingerLine("MIDL", t_f_l_middle_, f_l_hand_t_.row(2), C_TAR_POS, C_TAR_F);
+
+    fmtFingerLine("RING", f_l_ring_,  f_l_hand_c_.row(3), C_CUR_POS, C_CUR_F);
+    fmtFingerLine("RING", t_f_l_ring_, f_l_hand_t_.row(3), C_TAR_POS, C_TAR_F);
+
+    fmtFingerLine("BABY", f_l_baby_,  f_l_hand_c_.row(4), C_CUR_POS, C_CUR_F);
+    fmtFingerLine("BABY", t_f_l_baby_, f_l_hand_t_.row(4), C_TAR_POS, C_TAR_F);
+
+    printf("%s------------------------------------------------------------------------------------------------------------%s\n", C_DIM, C_RESET);
+
+    printf("%s[R HAND]%s\n", C_TITLE, C_RESET);
+    fmtFingerLine("THMB", f_r_thumb_,  f_r_hand_c_.row(0), C_CUR_POS, C_CUR_F);
+    fmtFingerLine("THMB", t_f_r_thumb_, f_r_hand_t_.row(0), C_TAR_POS, C_TAR_F);
+
+    fmtFingerLine("INDX", f_r_index_,  f_r_hand_c_.row(1), C_CUR_POS, C_CUR_F);
+    fmtFingerLine("INDX", t_f_r_index_, f_r_hand_t_.row(1), C_TAR_POS, C_TAR_F);
+
+    fmtFingerLine("MIDL", f_r_middle_,  f_r_hand_c_.row(2), C_CUR_POS, C_CUR_F);
+    fmtFingerLine("MIDL", t_f_r_middle_, f_r_hand_t_.row(2), C_TAR_POS, C_TAR_F);
+
+    fmtFingerLine("RING", f_r_ring_,  f_r_hand_c_.row(3), C_CUR_POS, C_CUR_F);
+    fmtFingerLine("RING", t_f_r_ring_, f_r_hand_t_.row(3), C_TAR_POS, C_TAR_F);
+
+    fmtFingerLine("BABY", f_r_baby_,  f_r_hand_c_.row(4), C_CUR_POS, C_CUR_F);
+    fmtFingerLine("BABY", t_f_r_baby_, f_r_hand_t_.row(4), C_TAR_POS, C_TAR_F);
+
+    printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 }
