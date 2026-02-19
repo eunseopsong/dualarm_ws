@@ -5,9 +5,13 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_srvs/srv/trigger.hpp"
+#include <geometry_msgs/msg/pose.hpp>
 #include <Eigen/Dense>
 #include <string>
 #include <vector>
+
+// Forward Kinematics 헤더 포함
+#include "dualarm_forcecon/Kinematics/arm_forward_kinematics.hpp"
 
 class DualArmForceControl : public std::enable_shared_from_this<DualArmForceControl> {
 public:
@@ -15,6 +19,7 @@ public:
     ~DualArmForceControl();
 
     void JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
+    void PositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg); // 새로 추가됨
     void ContactForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetJointCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
@@ -26,11 +31,12 @@ public:
 private:
     std::shared_ptr<rclcpp::Node> node_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr position_sub_; // 새로 추가됨
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr contact_force_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_joint_sub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr mode_service_;
-
+    
     rclcpp::TimerBase::SharedPtr print_timer_;
     rclcpp::TimerBase::SharedPtr control_timer_;
 
@@ -44,6 +50,11 @@ private:
     Eigen::VectorXd f_l_h_c_, f_r_h_c_, f_l_h_t_, f_r_h_t_;
 
     bool is_initialized_ = false;
-    bool idle_synced_ = false; // [추가] idle 모드 진입 시 1회만 고정하기 위한 플래그
+    bool idle_synced_ = false;
+
+    // FK 객체 및 현재 Pose 저장 변수
+    std::shared_ptr<ArmForwardKinematics> arm_fk_;
+    geometry_msgs::msg::Pose current_pose_l_;
+    geometry_msgs::msg::Pose current_pose_r_;
 };
 #endif

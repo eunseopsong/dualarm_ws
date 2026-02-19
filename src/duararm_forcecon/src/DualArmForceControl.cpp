@@ -8,8 +8,14 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node) : n
 
     joint_states_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
         "/isaac_joint_states", qos, std::bind(&DualArmForceControl::JointsCallback, this, std::placeholders::_1));
+        
+    // FK 연산을 위한 PositionCallback 구독자
+    position_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
+        "/isaac_joint_states", qos, std::bind(&DualArmForceControl::PositionCallback, this, std::placeholders::_1));
+
     contact_force_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/isaac_contact_states", qos, std::bind(&DualArmForceControl::ContactForceCallback, this, std::placeholders::_1));
+        
     target_joint_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/forward_joint_targets", qos, std::bind(&DualArmForceControl::TargetJointCallback, this, std::placeholders::_1));
 
@@ -22,6 +28,10 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node) : n
     f_l_c_.setZero(); f_r_c_.setZero(); f_l_t_.setZero(); f_r_t_.setZero();
     f_l_h_c_.setZero(15); f_r_h_c_.setZero(15); f_l_h_t_.setZero(15); f_r_h_t_.setZero(15);
 
+    // Forward Kinematics 객체 초기화
+    std::string urdf_path = "/home/eunseop/isaac/isaac_save/dualarm/dualarm_description/urdf/aidin_dsr_dualarm.urdf";
+    arm_fk_ = std::make_shared<ArmForwardKinematics>(urdf_path, "base_link", "left_link6", "right_link6");
+
     print_timer_ = node_->create_wall_timer(500ms, std::bind(&DualArmForceControl::PrintDualArmStates, this));
     control_timer_ = node_->create_wall_timer(10ms, std::bind(&DualArmForceControl::ControlLoop, this));
 }
@@ -29,7 +39,6 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node) : n
 void DualArmForceControl::ControlLoop() {
     if (!is_initialized_ || joint_names_.empty()) return;
 
-    // [수정] idle 모드일 때 최초 1회만 타겟을 고정하여 흘러내림(Drift) 방지
     if (current_control_mode_ == "idle") {
         if (!idle_synced_) {
             q_l_t_ = q_l_c_; q_r_t_ = q_r_c_;
@@ -37,12 +46,12 @@ void DualArmForceControl::ControlLoop() {
             idle_synced_ = true;
         }
     } else {
-        idle_synced_ = false; // forward 모드일 때는 플래그 초기화
+        idle_synced_ = false;
     }
 
     auto cmd = sensor_msgs::msg::JointState();
     cmd.header.stamp = node_->now();
-    cmd.name = joint_names_;
+    cmd.name = joint_names_; 
 
     for (const auto& name : joint_names_) {
         if (name == "left_joint_1") cmd.position.push_back(q_l_t_(0));

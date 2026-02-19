@@ -48,6 +48,17 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
     }
 }
 
+void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
+    (void)msg; // 경고 방지
+    if (!arm_fk_ || !is_initialized_) return;
+
+    std::vector<double> jl(q_l_c_.data(), q_l_c_.data() + q_l_c_.size());
+    std::vector<double> jr(q_r_c_.data(), q_r_c_.data() + q_r_c_.size());
+    
+    current_pose_l_ = arm_fk_->getLeftFK(jl);
+    current_pose_r_ = arm_fk_->getRightFK(jr);
+}
+
 void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
     if (msg->data.size() < 12) return;
     for(int i=0; i<6; i++) { q_l_t_(i) = msg->data[i]; q_r_t_(i) = msg->data[i+6]; }
@@ -59,7 +70,7 @@ void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiA
 void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req, std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
     (void)req;
     current_control_mode_ = (current_control_mode_ == "idle") ? "forward" : "idle";
-    if (current_control_mode_ == "idle") idle_synced_ = false; // 플래그 초기화
+    if (current_control_mode_ == "idle") idle_synced_ = false;
     res->success = true;
     res->message = "Mode: " + current_control_mode_;
 }
@@ -72,23 +83,23 @@ void DualArmForceControl::ContactForceCallback(const std_msgs::msg::Float64Multi
 
 void DualArmForceControl::PrintDualArmStates() {
     if (!is_initialized_) return;
-
-    // 화면 초기화 및 헤더
+    
     printf("\033[2J\033[H");
     printf("========================================================================================\n");
     printf("   Dual Arm & Hand Monitor | Mode: [\033[1;32m%-7s\033[0m] | Cyan: Curr, Yel: Targ\n", current_control_mode_.c_str());
     printf("========================================================================================\n");
 
-    // 1. ARM Force 추가 출력
-    auto print_arm = [&](const char* side, Eigen::VectorXd& c, Eigen::VectorXd& t, Eigen::Vector3d& fc, Eigen::Vector3d& ft) {
+    auto print_arm = [&](const char* side, Eigen::VectorXd& c, Eigen::VectorXd& t, Eigen::Vector3d& fc, Eigen::Vector3d& ft, geometry_msgs::msg::Pose& pose) {
         printf("[%s ARM] Joints: \033[1;36m%5.2f %5.2f %5.2f %5.2f %5.2f %5.2f\033[0m | F_C: \033[1;36m%5.1f %5.1f %5.1f\033[0m\n", 
                side, c(0),c(1),c(2),c(3),c(4),c(5), fc(0),fc(1),fc(2));
         printf("        Target: \033[1;33m%5.2f %5.2f %5.2f %5.2f %5.2f %5.2f\033[0m | F_T: \033[1;33m%5.1f %5.1f %5.1f\033[0m\n", 
                t(0),t(1),t(2),t(3),t(4),t(5), ft(0),ft(1),ft(2));
+        printf("        \033[1;35m-> Curr Pose(XYZ): [%5.3f, %5.3f, %5.3f]\033[0m\n", 
+               pose.position.x, pose.position.y, pose.position.z);
     };
 
-    print_arm("L", q_l_c_, q_l_t_, f_l_c_, f_l_t_);
-    print_arm("R", q_r_c_, q_r_t_, f_r_c_, f_r_t_);
+    print_arm("L", q_l_c_, q_l_t_, f_l_c_, f_l_t_, current_pose_l_);
+    print_arm("R", q_r_c_, q_r_t_, f_r_c_, f_r_t_, current_pose_r_);
     
     printf("----------------------------------------------------------------------------------------\n");
     printf("[HAND]    | Joints: Curr(C) / Targ(Y)             | Forces: Curr(C) / Targ(Y)\n");
@@ -96,7 +107,6 @@ void DualArmForceControl::PrintDualArmStates() {
 
     const char* f_names[] = {"Thumb", "Index", "Middle", "Ring", "Baby"};
     
-    // 2. LEFT HAND (Joint & Force)
     for(int i=0; i<5; i++) {
         int q_idx = i * 4;
         int f_idx = i * 3;
@@ -108,9 +118,8 @@ void DualArmForceControl::PrintDualArmStates() {
                f_l_h_t_(f_idx), f_l_h_t_(f_idx+1), f_l_h_t_(f_idx+2));
     }
     
-    printf("          |                                       |\n"); // 좌/우 구분용 공백선
+    printf("          |                                       |\n");
     
-    // 3. RIGHT HAND (Joint & Force)
     for(int i=0; i<5; i++) {
         int q_idx = i * 4;
         int f_idx = i * 3;
