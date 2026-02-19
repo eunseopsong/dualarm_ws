@@ -1,11 +1,6 @@
 #ifndef DUALARM_FORCE_CONTROL_H
 #define DUALARM_FORCE_CONTROL_H
 
-#include <memory>
-#include <string>
-#include <vector>
-#include <array>
-
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
@@ -16,8 +11,12 @@
 
 #include <Eigen/Dense>
 
-// Kinematics
-#include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"
+#include <string>
+#include <vector>
+#include <memory>
+#include <array>
+
+// include/ kinematics
 #include "dualarm_forcecon/Kinematics/arm_forward_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/arm_inverse_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"
@@ -38,15 +37,11 @@ public:
 
     // Main
     void ControlLoop();
-
-    // Print
     void PrintDualArmStates();
 
 private:
-    // Node
     std::shared_ptr<rclcpp::Node> node_;
 
-    // ROS interfaces
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_sub_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr position_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_pos_sub_;
@@ -61,41 +56,49 @@ private:
 
     // Params
     std::string urdf_path_;
-    std::array<double,3> world_base_xyz_{0.0, 0.0, 0.306};
+    std::array<double,3> world_base_xyz_{0.0, 0.0, 0.306};           // z offset 기본
     std::array<double,3> world_base_euler_xyz_deg_{0.0, 0.0, 0.0};
 
-    std::string ik_targets_frame_{"base"};   // "base" or "world"
-    std::string ik_euler_conv_{"rpy"};       // "rpy" or "xyz"
-    std::string ik_angle_unit_{"rad"};       // "rad" or "deg" or "auto"
+    std::string ik_targets_frame_ = "base"; // base/world
+    std::string ik_euler_conv_    = "rpy";  // rpy/xyz
+    std::string ik_angle_unit_    = "rad";  // rad/deg/auto
 
-    // Mode
-    std::string current_control_mode_{"idle"};
-    bool is_initialized_{false};
-    bool idle_synced_{false};
-
-    // Joint names
+    // mode
+    std::string current_control_mode_ = "idle";
     std::vector<std::string> joint_names_;
+    bool is_initialized_ = false;
+    bool idle_synced_ = false;
 
-    // Arm joints
-    Eigen::VectorXd q_l_c_, q_r_c_, q_l_t_, q_r_t_;
+    // joint states
+    Eigen::VectorXd q_l_c_, q_r_c_, q_l_t_, q_r_t_;          // 6
+    Eigen::VectorXd q_l_h_c_, q_r_h_c_, q_l_h_t_, q_r_h_t_;  // 20
 
-    // Hand joints (20)
-    Eigen::VectorXd q_l_h_c_, q_r_h_c_, q_l_h_t_, q_r_h_t_;
-
-    // Forces
+    // forces (arm)
     Eigen::Vector3d f_l_c_{0,0,0}, f_r_c_{0,0,0};
+    Eigen::Vector3d f_l_t_{0,0,0}, f_r_t_{0,0,0};
 
-    // Kinematics objects
+    // forces (hand) : 5 fingers x 3
+    Eigen::Matrix<double,5,3> f_l_hand_c_;
+    Eigen::Matrix<double,5,3> f_r_hand_c_;
+    Eigen::Matrix<double,5,3> f_l_hand_t_;
+    Eigen::Matrix<double,5,3> f_r_hand_t_;
+
+    // kinematics
     std::shared_ptr<ArmForwardKinematics> arm_fk_;
     std::shared_ptr<ArmInverseKinematics> arm_ik_l_, arm_ik_r_;
     std::shared_ptr<HandForwardKinematics> hand_fk_l_, hand_fk_r_;
 
-    // Current wrist pose (World frame) - FK 결과
+    // poses
     geometry_msgs::msg::Pose current_pose_l_, current_pose_r_;
+    geometry_msgs::msg::Pose target_pose_l_,  target_pose_r_;
 
-    // Fingertip positions (World frame)
+    // fingertip world (curr)
     geometry_msgs::msg::Point f_l_thumb_, f_l_index_, f_l_middle_, f_l_ring_, f_l_baby_;
     geometry_msgs::msg::Point f_r_thumb_, f_r_index_, f_r_middle_, f_r_ring_, f_r_baby_;
+
+    // fingertip world (targ)
+    geometry_msgs::msg::Point t_f_l_thumb_, t_f_l_index_, t_f_l_middle_, t_f_l_ring_, t_f_l_baby_;
+    geometry_msgs::msg::Point t_f_r_thumb_, t_f_r_index_, t_f_r_middle_, t_f_r_ring_, t_f_r_baby_;
 };
 
 #endif

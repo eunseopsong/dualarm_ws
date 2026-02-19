@@ -2,198 +2,168 @@
 #define DUALARM_FORCECON_KINEMATICS_ARM_INVERSE_KINEMATICS_HPP_
 
 #include <kdl/chain.hpp>
-#include <kdl/tree.hpp>
-#include <kdl/frames.hpp>
 #include <kdl/chainfksolverpos_recursive.hpp>
-#include <kdl/chainiksolvervel_pinv.hpp>
 #include <kdl/chainiksolverpos_nr_jl.hpp>
+#include <kdl/chainiksolvervel_pinv.hpp>
+#include <kdl/tree.hpp>
 #include <kdl_parser/kdl_parser.hpp>
 
 #include <urdf/model.h>
 
+#include <array>
 #include <vector>
 #include <string>
 #include <iostream>
 #include <memory>
-#include <array>
 #include <cmath>
-#include <algorithm>
 
-#include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"
+#include <Eigen/Dense>
 
 class ArmInverseKinematics {
 public:
     ArmInverseKinematics(const std::string& urdf_path,
                          const std::string& base_link,
                          const std::string& tip_link)
+    : ok_(false), world_T_base_(Eigen::Isometry3d::Identity())
     {
-        if (!urdf_model_.initFile(urdf_path)) {
-            std::cerr << "[IK Error] Failed URDF: " << urdf_path << "\n";
-            ready_ = false;
+        KDL::Tree tree;
+        if (!kdl_parser::treeFromFile(urdf_path, tree)) {
+            std::cerr << "[IK Error] Failed to construct KDL tree from file." << std::endl;
             return;
         }
-
-        if (!kdl_parser::treeFromUrdfModel(urdf_model_, tree_)) {
-            std::cerr << "[IK Error] Failed KDL tree.\n";
-            ready_ = false;
-            return;
-        }
-
-        if (!tree_.getChain(base_link, tip_link, chain_)) {
-            std::cerr << "[IK Error] Chain not found: " << base_link << " -> " << tip_link << "\n";
-            ready_ = false;
+        if (!tree.getChain(base_link, tip_link, chain_)) {
+            std::cerr << "[IK Error] Failed chain: " << base_link << " -> " << tip_link << std::endl;
             return;
         }
 
         num_joints_ = chain_.getNrOfJoints();
-        if (num_joints_ == 0) {
-            std::cerr << "[IK Error] 0 joints.\n";
-            ready_ = false;
-            return;
-        }
-
-        // chain 내 joint name 추출 -> URDF limit 매칭
-        joint_names_.clear();
-        joint_names_.reserve(num_joints_);
-        for (unsigned int i=0; i<chain_.getNrOfSegments(); ++i) {
-            const auto& seg = chain_.getSegment(i);
-            const auto& jnt = seg.getJoint();
-            if (jnt.getType() != KDL::Joint::None) joint_names_.push_back(jnt.getName());
-        }
-
-        KDL::JntArray q_min(num_joints_), q_max(num_joints_);
-        for (unsigned int i=0; i<num_joints_; ++i) {
-            double lo = -M_PI, hi = M_PI;
-            if (i < joint_names_.size()) {
-                auto uj = urdf_model_.getJoint(joint_names_[i]);
-                if (uj && uj->limits) { lo = uj->limits->lower; hi = uj->limits->upper; }
-            }
-            q_min(i) = lo;
-            q_max(i) = hi;
-        }
-
         fk_solver_  = std::make_shared<KDL::ChainFkSolverPos_recursive>(chain_);
         vel_solver_ = std::make_shared<KDL::ChainIkSolverVel_pinv>(chain_);
-        ik_solver_  = std::make_shared<KDL::ChainIkSolverPos_NR_JL>(
-            chain_, q_min, q_max, *fk_solver_, *vel_solver_, 100, 1e-6);
 
-        world_T_base_ = KDL::Frame::Identity();
-        ready_ = true;
-        std::cout << "[IK Info] ArmInverseKinematics ready.\n";
+        // Joint limits (기본 [-pi, pi], 필요하면 URDF에서 읽어오도록 확장 가능)
+        KDL::JntArray q_min(num_joints_), q_max(num_joints_);
+        for (unsigned int i = 0; i < num_joints_; ++i) {
+            q_min(i) = -M_PI;
+            q_max(i) =  M_PI;
+        }
+
+        ik_solver_ = std::make_shared<KDL::ChainIkSolverPos_NR_JL>(
+            chain_, q_min, q_max, *fk_solver_, *vel_solver_, 100, 1e-6
+        );
+
+        ok_ = true;
+        std::cout << "[IK Info] ArmInverseKinematics OK." << std::endl;
     }
 
-    bool isReady() const { return ready_; }
+    bool isOk() const { return ok_; }
 
-    void setWorldBaseTransformXYZEulerDeg(const std::array<double,3>& xyz_m,
+    void setWorldBaseTransformXYZEulerDeg(const std::array<double,3>& xyz,
                                          const std::array<double,3>& euler_xyz_deg)
     {
-        const double rx = dualarm_forcecon::kin::deg2rad(euler_xyz_deg[0]);
-        const double ry = dualarm_forcecon::kin::deg2rad(euler_xyz_deg[1]);
-        const double rz = dualarm_forcecon::kin::deg2rad(euler_xyz_deg[2]);
+        world_T_base_ = Eigen::Isometry3d::Identity();
+        world_T_base_.translation() = Eigen::Vector3d(xyz[0], xyz[1], xyz[2]);
 
-        KDL::Rotation R = KDL::Rotation::RotX(rx) * KDL::Rotation::RotY(ry) * KDL::Rotation::RotZ(rz);
-        KDL::Vector p(xyz_m[0], xyz_m[1], xyz_m[2]);
-        world_T_base_ = KDL::Frame(R, p);
+        Eigen::Vector3d e = Eigen::Vector3d(euler_xyz_deg[0], euler_xyz_deg[1], euler_xyz_deg[2]) * M_PI / 180.0;
+        Eigen::AngleAxisd Rx(e.x(), Eigen::Vector3d::UnitX());
+        Eigen::AngleAxisd Ry(e.y(), Eigen::Vector3d::UnitY());
+        Eigen::AngleAxisd Rz(e.z(), Eigen::Vector3d::UnitZ());
+        Eigen::Quaterniond q = Rx * Ry * Rz;
+        world_T_base_.linear() = q.toRotationMatrix();
     }
 
-    // ------------------------------------------------------------
-    // Generic IK:
-    //  - xyz: target translation
-    //  - ang: rpy(rad) or xyz(deg) depending on euler_conv + angle_unit
-    //  - target_frame: "base" or "world"
-    //  - euler_conv: "rpy" or "xyz"
-    //  - angle_unit: "rad" / "deg" / "auto"
-    // ------------------------------------------------------------
+    // ==========================
+    // v6 시그니처(7 args) - 네 include에서 이미 이 형태를 요구 중
+    // ==========================
     bool solveIK(const std::vector<double>& current_q,
-                 const std::array<double,3>& xyz,
-                 const std::array<double,3>& ang,
-                 const std::string& target_frame,
-                 const std::string& euler_conv,
-                 const std::string& angle_unit,
+                 const std::array<double,3>& target_xyz,
+                 const std::array<double,3>& target_euler,
+                 const std::string& targets_frame,   // "base" or "world"
+                 const std::string& euler_conv,      // "rpy" or "xyz"
+                 const std::string& angle_unit,      // "rad" or "deg" or "auto"
                  std::vector<double>& result_q) const
     {
-        if (!ready_ || !ik_solver_) return false;
+        if (!ok_ || !ik_solver_) return false;
         if (current_q.size() < num_joints_) return false;
 
-        // seed
+        // angle unit 처리
+        auto toRad = [&](double a)->double{
+            if (angle_unit == "rad") return a;
+            if (angle_unit == "deg") return a * M_PI / 180.0;
+            // auto: 값이 크면 deg로 판단
+            if (std::fabs(a) > 3.5) return a * M_PI / 180.0;
+            return a;
+        };
+
+        const double a0 = toRad(target_euler[0]);
+        const double a1 = toRad(target_euler[1]);
+        const double a2 = toRad(target_euler[2]);
+
+        // Rotation 만들기 (Isaac UI Euler XYZ 기준 or RPY)
+        Eigen::AngleAxisd Rx(a0, Eigen::Vector3d::UnitX());
+        Eigen::AngleAxisd Ry(a1, Eigen::Vector3d::UnitY());
+        Eigen::AngleAxisd Rz(a2, Eigen::Vector3d::UnitZ());
+
+        Eigen::Quaterniond q;
+        // "xyz"든 "rpy"든 여기서는 Rx*Ry*Rz로 통일 (현재 v6 UI 매칭에 사용하던 방식)
+        // 필요하면 euler_conv에 따라 바꿀 수 있음.
+        (void)euler_conv;
+        q = Rx * Ry * Rz;
+
+        Eigen::Isometry3d E_target = Eigen::Isometry3d::Identity();
+        E_target.translation() = Eigen::Vector3d(target_xyz[0], target_xyz[1], target_xyz[2]);
+        E_target.linear() = q.toRotationMatrix();
+
+        // targets_frame == "world" 이면 base frame으로 변환
+        Eigen::Isometry3d E_base_target = E_target;
+        if (targets_frame == "world") {
+            Eigen::Isometry3d E_base_world = world_T_base_.inverse();
+            E_base_target = E_base_world * E_target;
+        }
+
+        // Eigen -> KDL::Frame
+        KDL::Frame target_frame;
+        target_frame.p = KDL::Vector(E_base_target.translation().x(),
+                                     E_base_target.translation().y(),
+                                     E_base_target.translation().z());
+
+        Eigen::Quaterniond qb(E_base_target.linear());
+        target_frame.M = KDL::Rotation::Quaternion(qb.x(), qb.y(), qb.z(), qb.w());
+
         KDL::JntArray q_init(num_joints_);
-        for (unsigned int i=0; i<num_joints_; ++i) q_init(i) = current_q[i];
-
-        // angle unit 결정
-        std::string unit = angle_unit;
-        if (unit == "auto") {
-            double m = std::max({std::abs(ang[0]), std::abs(ang[1]), std::abs(ang[2])});
-            unit = dualarm_forcecon::kin::isProbablyDeg(m) ? "deg" : "rad";
-        }
-
-        // target frame 구성 (world or base)
-        KDL::Frame T;
-        T.p = KDL::Vector(xyz[0], xyz[1], xyz[2]);
-
-        if (euler_conv == "xyz") {
-            // Isaac UI의 Orient(XYZ deg)로 들어오는 경우가 일반적 -> deg로 쓰는게 가장 안전
-            std::array<double,3> e_deg;
-            if (unit == "deg") {
-                e_deg = {ang[0], ang[1], ang[2]};
-            } else {
-                // rad로 들어왔으면 deg로 변환(비추지만 지원)
-                e_deg = {dualarm_forcecon::kin::rad2deg(ang[0]),
-                         dualarm_forcecon::kin::rad2deg(ang[1]),
-                         dualarm_forcecon::kin::rad2deg(ang[2])};
-            }
-            // R = Rx*Ry*Rz
-            const double rx = dualarm_forcecon::kin::deg2rad(e_deg[0]);
-            const double ry = dualarm_forcecon::kin::deg2rad(e_deg[1]);
-            const double rz = dualarm_forcecon::kin::deg2rad(e_deg[2]);
-            T.M = KDL::Rotation::RotX(rx) * KDL::Rotation::RotY(ry) * KDL::Rotation::RotZ(rz);
-        } else {
-            // euler_conv == "rpy"
-            std::array<double,3> rpy_rad;
-            if (unit == "rad") {
-                rpy_rad = {ang[0], ang[1], ang[2]};
-            } else {
-                rpy_rad = {dualarm_forcecon::kin::deg2rad(ang[0]),
-                           dualarm_forcecon::kin::deg2rad(ang[1]),
-                           dualarm_forcecon::kin::deg2rad(ang[2])};
-            }
-            // 기존 네 코드 호환: KDL::Rotation::RPY(roll,pitch,yaw)
-            T.M = KDL::Rotation::RPY(rpy_rad[0], rpy_rad[1], rpy_rad[2]);
-        }
-
-        // world->base 변환 적용 여부
-        KDL::Frame T_base_target;
-        if (target_frame == "world") {
-            T_base_target = world_T_base_.Inverse() * T;
-        } else {
-            T_base_target = T;
-        }
+        for (unsigned int i = 0; i < num_joints_; ++i) q_init(i) = current_q[i];
 
         KDL::JntArray q_out(num_joints_);
-        int ret = ik_solver_->CartToJnt(q_init, T_base_target, q_out);
+        int ret = ik_solver_->CartToJnt(q_init, target_frame, q_out);
+        if (ret < 0) return false;
 
-        if (ret >= 0) {
-            result_q.resize(num_joints_);
-            for (unsigned int i=0; i<num_joints_; ++i) result_q[i] = q_out(i);
-            return true;
-        }
-        return false;
+        result_q.resize(num_joints_);
+        for (unsigned int i = 0; i < num_joints_; ++i) result_q[i] = q_out(i);
+        return true;
+    }
+
+    // ==========================
+    // 기존(4 args) 코드가 있어도 깨지지 않도록 호환 overload 제공
+    // ==========================
+    bool solveIK(const std::vector<double>& current_q,
+                 const double target_xyz[3],
+                 const double target_rpy[3],
+                 std::vector<double>& result_q) const
+    {
+        std::array<double,3> xyz{target_xyz[0], target_xyz[1], target_xyz[2]};
+        std::array<double,3> eul{target_rpy[0], target_rpy[1], target_rpy[2]};
+        return solveIK(current_q, xyz, eul, "base", "rpy", "rad", result_q);
     }
 
 private:
-    bool ready_{false};
-
-    urdf::Model urdf_model_;
-    KDL::Tree tree_;
+    bool ok_;
     KDL::Chain chain_;
-    unsigned int num_joints_{0};
-    std::vector<std::string> joint_names_;
+    unsigned int num_joints_;
 
     std::shared_ptr<KDL::ChainFkSolverPos_recursive> fk_solver_;
     std::shared_ptr<KDL::ChainIkSolverVel_pinv> vel_solver_;
     std::shared_ptr<KDL::ChainIkSolverPos_NR_JL> ik_solver_;
 
-    // World <- base
-    KDL::Frame world_T_base_{KDL::Frame::Identity()};
+    Eigen::Isometry3d world_T_base_;
 };
 
 #endif
