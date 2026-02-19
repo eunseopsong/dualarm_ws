@@ -241,6 +241,7 @@ void DualArmForceControl::PrintDualArmStates() {
 
     constexpr const char* C_CUR_F   = "\033[1;31m";        // RED
     constexpr const char* C_TAR_F   = "\033[1;34m";        // BLUE
+    constexpr const char* C_MODE    = "\033[1;92m";        // neon green (mode)
 
     auto fmtArmLine = [&](const char* tag,
                           const geometry_msgs::msg::Pose& pose,
@@ -295,9 +296,9 @@ void DualArmForceControl::PrintDualArmStates() {
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v6 | Mode: [%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v6 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
-           current_control_mode_.c_str(),
+           C_MODE, current_control_mode_.c_str(), C_RESET,
            C_CUR_POS, C_RESET,
            C_TAR_POS, C_RESET,
            C_CUR_F,   C_RESET,
