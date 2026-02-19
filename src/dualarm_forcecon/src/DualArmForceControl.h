@@ -20,6 +20,7 @@
 #include "dualarm_forcecon/Kinematics/arm_forward_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/arm_inverse_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"
+#include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"  // parseHandJointName()
 
 class DualArmForceControl : public std::enable_shared_from_this<DualArmForceControl> {
 public:

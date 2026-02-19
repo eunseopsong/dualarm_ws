@@ -2,6 +2,7 @@
 #define HAND_FORWARD_KINEMATICS_HPP
 
 #include <kdl/tree.hpp>
+#include <kdl/chain.hpp>
 #include <kdl/chainfksolverpos_recursive.hpp>
 #include <kdl_parser/kdl_parser.hpp>
 
@@ -12,6 +13,7 @@
 #include <string>
 #include <map>
 #include <memory>
+#include <iostream>
 
 #include <Eigen/Dense>
 
@@ -20,40 +22,64 @@ public:
     HandForwardKinematics(const std::string& urdf_path,
                           const std::string& hand_base_link,
                           const std::vector<std::string>& finger_tips)
+    : ok_(false), hand_base_link_(hand_base_link), finger_tips_(finger_tips)
     {
         KDL::Tree tree;
-        if (!kdl_parser::treeFromFile(urdf_path, tree)) return;
+        if (!kdl_parser::treeFromFile(urdf_path, tree)) {
+            std::cerr << "[HandFK Error] Failed to parse URDF: " << urdf_path << std::endl;
+            return;
+        }
 
-        for (const auto& tip : finger_tips) {
+        int built = 0;
+        for (const auto& tip : finger_tips_) {
             KDL::Chain chain;
-            if (tree.getChain(hand_base_link, tip, chain)) {
+            if (tree.getChain(hand_base_link_, tip, chain)) {
                 solvers_[tip] = std::make_shared<KDL::ChainFkSolverPos_recursive>(chain);
                 num_jnts_[tip] = chain.getNrOfJoints();
+                built++;
+            } else {
+                std::cerr << "[HandFK Warn] Chain not found: " << hand_base_link_ << " -> " << tip << std::endl;
             }
         }
+
+        ok_ = (built > 0);
+        std::cout << "[HandFK Info] base=" << hand_base_link_
+                  << " tips_in=" << finger_tips_.size()
+                  << " solvers_built=" << built << std::endl;
     }
 
-    std::map<std::string, geometry_msgs::msg::Pose> computeFingertips(const std::vector<double>& hand_q) {
+    bool isOk() const { return ok_; }
+
+    // v8: 생성자에서 받은 finger_tips_를 그대로 사용 (하드코딩 제거)
+    // hand_q: 20 dof, order = (thumb4, index4, middle4, ring4, baby4)
+    std::map<std::string, geometry_msgs::msg::Pose> computeFingertips(const std::vector<double>& hand_q) const {
         std::map<std::string, geometry_msgs::msg::Pose> results;
-        int start_idx = 0;
+        if (!ok_) return results;
 
-        // thumb, index, middle, ring, baby (각 4 dof 가정)
-        std::vector<std::string> tips = {"link4_thumb", "link4_index", "link4_middle", "link4_ring", "link4_baby"};
+        constexpr int DOF_PER_FINGER = 4;
+        const int expected = static_cast<int>(finger_tips_.size()) * DOF_PER_FINGER;
+        if (static_cast<int>(hand_q.size()) < expected) {
+            // 부족하면 0으로 패딩해서라도 계산 시도
+            // (여기서 return하면 print가 고정되어 보이기 쉬움)
+        }
 
-        for (size_t i = 0; i < tips.size(); ++i) {
-            const std::string& tip = tips[i];
-            if (solvers_.find(tip) == solvers_.end()) {
-                start_idx += 4;
-                continue;
-            }
+        for (size_t i = 0; i < finger_tips_.size(); ++i) {
+            const std::string& tip = finger_tips_[i];
+            const int start_idx = static_cast<int>(i) * DOF_PER_FINGER;
 
-            KDL::JntArray jnt_pos(num_jnts_[tip]);
-            for (unsigned int j=0; j<num_jnts_[tip]; ++j) {
-                jnt_pos(j) = hand_q[start_idx + j];
+            auto it = solvers_.find(tip);
+            if (it == solvers_.end()) continue;
+
+            const unsigned int nj = num_jnts_.at(tip);
+            KDL::JntArray jnt_pos(nj);
+
+            for (unsigned int j = 0; j < nj; ++j) {
+                const int idx = start_idx + static_cast<int>(j);
+                jnt_pos(j) = (idx >= 0 && idx < static_cast<int>(hand_q.size())) ? hand_q[idx] : 0.0;
             }
 
             KDL::Frame frame;
-            if (solvers_[tip]->JntToCart(jnt_pos, frame) >= 0) {
+            if (it->second->JntToCart(jnt_pos, frame) >= 0) {
                 geometry_msgs::msg::Pose p;
                 p.position.x = frame.p.x();
                 p.position.y = frame.p.y();
@@ -61,12 +87,12 @@ public:
                 frame.M.GetQuaternion(p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w);
                 results[tip] = p;
             }
-            start_idx += 4;
         }
+
         return results;
     }
 
-    // base(world) pose + relative pose -> world point (include에 존재해야 한다는 요구 반영)
+    // base(world) pose + relative pose -> world point
     static geometry_msgs::msg::Point combinePosePoint(const geometry_msgs::msg::Pose& base_world,
                                                       const geometry_msgs::msg::Pose& rel_in_base)
     {
@@ -94,6 +120,10 @@ public:
     }
 
 private:
+    bool ok_;
+    std::string hand_base_link_;
+    std::vector<std::string> finger_tips_;
+
     std::map<std::string, std::shared_ptr<KDL::ChainFkSolverPos_recursive>> solvers_;
     std::map<std::string, unsigned int> num_jnts_;
 };

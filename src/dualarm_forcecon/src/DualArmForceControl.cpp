@@ -101,8 +101,8 @@ void DualArmForceControl::ControlLoop() {
     if (!is_initialized_ || joint_names_.empty()) return;
 
     if (current_control_mode_ == "idle" && !idle_synced_) {
-        q_l_t_ = q_l_c_;
-        q_r_t_ = q_r_c_;
+        q_l_t_   = q_l_c_;
+        q_r_t_   = q_r_c_;
         q_l_h_t_ = q_l_h_c_;
         q_r_h_t_ = q_r_h_c_;
         idle_synced_ = true;
@@ -113,46 +113,44 @@ void DualArmForceControl::ControlLoop() {
     sensor_msgs::msg::JointState cmd;
     cmd.header.stamp = node_->now();
     cmd.name = joint_names_;
+    cmd.position.reserve(joint_names_.size());
 
     for (const auto& n : joint_names_) {
-        // arms
-        if      (n=="left_joint_1")  cmd.position.push_back(q_l_t_(0));
-        else if (n=="left_joint_2")  cmd.position.push_back(q_l_t_(1));
-        else if (n=="left_joint_3")  cmd.position.push_back(q_l_t_(2));
-        else if (n=="left_joint_4")  cmd.position.push_back(q_l_t_(3));
-        else if (n=="left_joint_5")  cmd.position.push_back(q_l_t_(4));
-        else if (n=="left_joint_6")  cmd.position.push_back(q_l_t_(5));
-        else if (n=="right_joint_1") cmd.position.push_back(q_r_t_(0));
-        else if (n=="right_joint_2") cmd.position.push_back(q_r_t_(1));
-        else if (n=="right_joint_3") cmd.position.push_back(q_r_t_(2));
-        else if (n=="right_joint_4") cmd.position.push_back(q_r_t_(3));
-        else if (n=="right_joint_5") cmd.position.push_back(q_r_t_(4));
-        else if (n=="right_joint_6") cmd.position.push_back(q_r_t_(5));
+        // ----------------
+        // Arms
+        // ----------------
+        if      (n == "left_joint_1")  cmd.position.push_back(q_l_t_(0));
+        else if (n == "left_joint_2")  cmd.position.push_back(q_l_t_(1));
+        else if (n == "left_joint_3")  cmd.position.push_back(q_l_t_(2));
+        else if (n == "left_joint_4")  cmd.position.push_back(q_l_t_(3));
+        else if (n == "left_joint_5")  cmd.position.push_back(q_l_t_(4));
+        else if (n == "left_joint_6")  cmd.position.push_back(q_l_t_(5));
+        else if (n == "right_joint_1") cmd.position.push_back(q_r_t_(0));
+        else if (n == "right_joint_2") cmd.position.push_back(q_r_t_(1));
+        else if (n == "right_joint_3") cmd.position.push_back(q_r_t_(2));
+        else if (n == "right_joint_4") cmd.position.push_back(q_r_t_(3));
+        else if (n == "right_joint_5") cmd.position.push_back(q_r_t_(4));
+        else if (n == "right_joint_6") cmd.position.push_back(q_r_t_(5));
+
+        // ----------------
+        // Hands (v8 robust parsing)
+        // ----------------
         else {
-            // hands (20)
-            int f_idx = -1;
-            if      (n.find("thumb")  != std::string::npos) f_idx = 0;
-            else if (n.find("index")  != std::string::npos) f_idx = 4;
-            else if (n.find("middle") != std::string::npos) f_idx = 8;
-            else if (n.find("ring")   != std::string::npos) f_idx = 12;
-            else if (n.find("baby")   != std::string::npos) f_idx = 16;
-
-            if (f_idx != -1) {
-                int j_idx = -1;
-                if      (n.find("1")!=std::string::npos) j_idx=0;
-                else if (n.find("2")!=std::string::npos) j_idx=1;
-                else if (n.find("3")!=std::string::npos) j_idx=2;
-                else if (n.find("4")!=std::string::npos) j_idx=3;
-
-                if (j_idx != -1) {
-                    if (n.find("left") != std::string::npos)  cmd.position.push_back(q_l_h_t_(f_idx + j_idx));
-                    else                                      cmd.position.push_back(q_r_h_t_(f_idx + j_idx));
-                } else {
-                    cmd.position.push_back(0.0);
-                }
-            } else {
+            auto hj = dualarm_forcecon::kin::parseHandJointName(n);
+            if (!hj.ok) {
                 cmd.position.push_back(0.0);
+                continue;
             }
+
+            // idx: 0..19 (thumb/index/middle/ring/baby each 4 dof)
+            const int idx = hj.finger_id * 4 + hj.joint_id;
+            if (idx < 0 || idx >= 20) {
+                cmd.position.push_back(0.0);
+                continue;
+            }
+
+            if (hj.is_left) cmd.position.push_back(q_l_h_t_(idx));
+            else            cmd.position.push_back(q_r_h_t_(idx));
         }
     }
 

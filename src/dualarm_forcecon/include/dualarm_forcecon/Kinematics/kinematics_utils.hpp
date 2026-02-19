@@ -5,6 +5,8 @@
 #include <string>
 #include <cmath>
 #include <algorithm>
+#include <map>
+#include <cctype>
 
 #include <Eigen/Dense>
 #include <geometry_msgs/msg/pose.hpp>
@@ -28,28 +30,33 @@ inline bool isProbablyDeg(double v_abs) {
     return (v_abs > 6.4);
 }
 
+inline std::string toLower(std::string s) {
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+inline bool endsWith(const std::string& s, const std::string& suffix) {
+    if (s.size() < suffix.size()) return false;
+    return (s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0);
+}
+
 // -------------------------------
 // Isaac UI의 Orient(XYZ deg)와 동일하게 나오도록
 // Euler XYZ 추출 (R = Rx * Ry * Rz 기준)
 // -------------------------------
 inline std::array<double,3> rotMatToEulerXYZRad_Isaac(const Eigen::Matrix3d& R) {
     // R = Rx(rx) * Ry(ry) * Rz(rz)
-    // sy = R02
     double sy = std::clamp(R(0,2), -1.0, 1.0);
     double ry = std::asin(sy);
 
     double cy = std::cos(ry);
-
     double rx = 0.0;
     double rz = 0.0;
 
     if (std::abs(cy) > 1e-8) {
-        // rx = atan2(-R12, R22), rz = atan2(-R01, R00)
         rx = std::atan2(-R(1,2), R(2,2));
         rz = std::atan2(-R(0,1), R(0,0));
     } else {
-        // gimbal lock: ry ~ +/-90 deg
-        // rz를 0으로 두고 rx를 다른 항으로 추정
         rz = 0.0;
         rx = std::atan2(R(2,1), R(1,1));
     }
@@ -76,30 +83,11 @@ inline Eigen::Matrix3d eulerXYZDegToRotMat_Isaac(const std::array<double,3>& eul
     Eigen::AngleAxisd Ay(ry, Eigen::Vector3d::UnitY());
     Eigen::AngleAxisd Az(rz, Eigen::Vector3d::UnitZ());
 
-    // R = Rx * Ry * Rz
     return (Ax * Ay * Az).toRotationMatrix();
-}
-
-// RPY(rad) -> RotationMatrix (KDL Rotation::RPY와 동일한 의미로 쓰기 위해)
-inline Eigen::Matrix3d rpyRadToRotMat(const std::array<double,3>& rpy_rad) {
-    double r = rpy_rad[0];
-    double p = rpy_rad[1];
-    double y = rpy_rad[2];
-
-    Eigen::AngleAxisd Ax(r, Eigen::Vector3d::UnitX());
-    Eigen::AngleAxisd Ay(p, Eigen::Vector3d::UnitY());
-    Eigen::AngleAxisd Az(y, Eigen::Vector3d::UnitZ());
-
-    // 일반적으로 RPY는 R = Rz(yaw)*Ry(pitch)*Rx(roll)을 쓰는 경우가 많지만
-    // 네 기존 구현은 KDL::Rotation::RPY(r,p,y)를 사용했으므로,
-    // "IK에서는 KDL로 직접 생성"하는 쪽이 안전함.
-    // 여기 함수는 단순 유틸로 남기되, 실제 IK는 KDL쪽에서 생성하도록 둔다.
-    return (Az * Ay * Ax).toRotationMatrix();
 }
 
 // -------------------------------
 // Pose 합성: base(world) * relative(base)
-// (기존 combinePose 역할을 include로 이동)
 // -------------------------------
 inline geometry_msgs::msg::Point composePoseTranslationWorld(
     const geometry_msgs::msg::Pose& base_world,
@@ -126,6 +114,62 @@ inline geometry_msgs::msg::Point composePoseTranslationWorld(
     p.y = T_world_rel.translation().y();
     p.z = T_world_rel.translation().z();
     return p;
+}
+
+// ============================================================================
+// v8: Hand joint name parsing (robust)
+//   expected examples: left_thumb_joint1 ... right_baby_joint4
+// ============================================================================
+struct HandJointParseResult {
+    bool ok{false};
+    bool is_left{false};   // false => right
+    int finger_id{-1};     // 0 thumb,1 index,2 middle,3 ring,4 baby
+    int joint_id{-1};      // 0..3 for joint1..4
+};
+
+inline HandJointParseResult parseHandJointName(const std::string& name) {
+    HandJointParseResult r;
+    const std::string n = toLower(name);
+
+    const bool has_left  = (n.find("left_")  != std::string::npos);
+    const bool has_right = (n.find("right_") != std::string::npos);
+    if (!has_left && !has_right) return r;
+    r.is_left = has_left;
+
+    if      (n.find("thumb")  != std::string::npos) r.finger_id = 0;
+    else if (n.find("index")  != std::string::npos) r.finger_id = 1;
+    else if (n.find("middle") != std::string::npos) r.finger_id = 2;
+    else if (n.find("ring")   != std::string::npos) r.finger_id = 3;
+    else if (n.find("baby")   != std::string::npos) r.finger_id = 4;
+    else return r;
+
+    // 반드시 suffix로 정확 매칭
+    if      (endsWith(n, "joint1")) r.joint_id = 0;
+    else if (endsWith(n, "joint2")) r.joint_id = 1;
+    else if (endsWith(n, "joint3")) r.joint_id = 2;
+    else if (endsWith(n, "joint4")) r.joint_id = 3;
+    else return r;
+
+    r.ok = true;
+    return r;
+}
+
+// ============================================================================
+// v8: find pose in map by keyword (case-insensitive)
+// ============================================================================
+inline bool findPoseByKeywordCI(const std::map<std::string, geometry_msgs::msg::Pose>& m,
+                               const std::string& keyword,
+                               geometry_msgs::msg::Pose& out)
+{
+    const std::string k = toLower(keyword);
+    for (const auto& kv : m) {
+        const std::string key = toLower(kv.first);
+        if (key.find(k) != std::string::npos) {
+            out = kv.second;
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace kin

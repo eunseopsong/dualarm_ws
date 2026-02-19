@@ -13,6 +13,7 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
         const std::string& n = msg->name[i];
         const double p = msg->position[i];
 
+        // arms
         if      (n=="left_joint_1")  q_l_c_(0)=p;
         else if (n=="left_joint_2")  q_l_c_(1)=p;
         else if (n=="left_joint_3")  q_l_c_(2)=p;
@@ -28,25 +29,15 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
         else if (n=="right_joint_6") q_r_c_(5)=p;
 
         else {
-            int f_idx = -1;
-            if      (n.find("thumb")  != std::string::npos) f_idx=0;
-            else if (n.find("index")  != std::string::npos) f_idx=4;
-            else if (n.find("middle") != std::string::npos) f_idx=8;
-            else if (n.find("ring")   != std::string::npos) f_idx=12;
-            else if (n.find("baby")   != std::string::npos) f_idx=16;
+            // v8: robust hand parsing (suffix-based)
+            auto hj = dualarm_forcecon::kin::parseHandJointName(n);
+            if (!hj.ok) continue;
 
-            if (f_idx!=-1) {
-                int j_idx = -1;
-                if      (n.find("1")!=std::string::npos) j_idx=0;
-                else if (n.find("2")!=std::string::npos) j_idx=1;
-                else if (n.find("3")!=std::string::npos) j_idx=2;
-                else if (n.find("4")!=std::string::npos) j_idx=3;
+            const int idx = hj.finger_id * 4 + hj.joint_id;  // 0..19
+            if (idx < 0 || idx >= 20) continue;
 
-                if (j_idx!=-1) {
-                    if (n.find("left")!=std::string::npos)  q_l_h_c_(f_idx+j_idx)=p;
-                    else                                     q_r_h_c_(f_idx+j_idx)=p;
-                }
-            }
+            if (hj.is_left)  q_l_h_c_(idx) = p;
+            else             q_r_h_c_(idx) = p;
         }
     }
 }
@@ -59,7 +50,7 @@ void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::S
     if (!is_initialized_) return;
     if (!arm_fk_ || !hand_fk_l_ || !hand_fk_r_) return;
 
-    // current FK
+    // current FK (arms)
     std::vector<double> jl(6), jr(6);
     for (int i=0;i<6;i++){ jl[i]=q_l_c_(i); jr[i]=q_r_c_(i); }
     current_pose_l_ = arm_fk_->getLeftFK(jl);
@@ -67,7 +58,7 @@ void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::S
 
     // target pose handling:
     // - idle: target=current
-    // - forward: target는 target joints로 FK 해서 "가고 있는 위치" 표시
+    // - forward: target=FK(q_t)
     // - inverse: TargetPositionCallback에서 저장된 target_pose 유지
     if (current_control_mode_ == "idle") {
         target_pose_l_ = current_pose_l_;
@@ -79,30 +70,95 @@ void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::S
         target_pose_r_ = arm_fk_->getRightFK(jr_t);
     }
 
-    // fingertips (curr)
+    // ---------- helper: default point = wrist position ----------
+    auto wristPoint = [&](const geometry_msgs::msg::Pose& p)->geometry_msgs::msg::Point{
+        geometry_msgs::msg::Point out;
+        out.x = p.position.x; out.y = p.position.y; out.z = p.position.z;
+        return out;
+    };
+
+    // =======================
+    // fingertips (CURRENT)
+    // =======================
+    f_l_thumb_  = wristPoint(current_pose_l_);
+    f_l_index_  = wristPoint(current_pose_l_);
+    f_l_middle_ = wristPoint(current_pose_l_);
+    f_l_ring_   = wristPoint(current_pose_l_);
+    f_l_baby_   = wristPoint(current_pose_l_);
+
+    f_r_thumb_  = wristPoint(current_pose_r_);
+    f_r_index_  = wristPoint(current_pose_r_);
+    f_r_middle_ = wristPoint(current_pose_r_);
+    f_r_ring_   = wristPoint(current_pose_r_);
+    f_r_baby_   = wristPoint(current_pose_r_);
+
     std::vector<double> hl(20), hr(20);
     for (int i=0;i<20;i++){ hl[i]=q_l_h_c_(i); hr[i]=q_r_h_c_(i); }
     auto tl = hand_fk_l_->computeFingertips(hl);
     auto tr = hand_fk_r_->computeFingertips(hr);
 
-    if(!tl.empty()){
-        f_l_thumb_  = HandForwardKinematics::combinePosePoint(current_pose_l_, tl["link4_thumb"]);
-        f_l_index_  = HandForwardKinematics::combinePosePoint(current_pose_l_, tl["link4_index"]);
-        f_l_middle_ = HandForwardKinematics::combinePosePoint(current_pose_l_, tl["link4_middle"]);
-        f_l_ring_   = HandForwardKinematics::combinePosePoint(current_pose_l_, tl["link4_ring"]);
-        f_l_baby_   = HandForwardKinematics::combinePosePoint(current_pose_l_, tl["link4_baby"]);
-    }
-    if(!tr.empty()){
-        f_r_thumb_  = HandForwardKinematics::combinePosePoint(current_pose_r_, tr["link4_thumb"]);
-        f_r_index_  = HandForwardKinematics::combinePosePoint(current_pose_r_, tr["link4_index"]);
-        f_r_middle_ = HandForwardKinematics::combinePosePoint(current_pose_r_, tr["link4_middle"]);
-        f_r_ring_   = HandForwardKinematics::combinePosePoint(current_pose_r_, tr["link4_ring"]);
-        f_r_baby_   = HandForwardKinematics::combinePosePoint(current_pose_r_, tr["link4_baby"]);
-    }
+    geometry_msgs::msg::Pose rel;
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "thumb", rel))  f_l_thumb_  = HandForwardKinematics::combinePosePoint(current_pose_l_, rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "index", rel))  f_l_index_  = HandForwardKinematics::combinePosePoint(current_pose_l_, rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "middle", rel)) f_l_middle_ = HandForwardKinematics::combinePosePoint(current_pose_l_, rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "ring", rel))   f_l_ring_   = HandForwardKinematics::combinePosePoint(current_pose_l_, rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "baby", rel))   f_l_baby_   = HandForwardKinematics::combinePosePoint(current_pose_l_, rel);
 
-    // hand target = current (핸드 고정 정책)
-    t_f_l_thumb_  = f_l_thumb_;  t_f_l_index_  = f_l_index_;  t_f_l_middle_ = f_l_middle_; t_f_l_ring_ = f_l_ring_; t_f_l_baby_ = f_l_baby_;
-    t_f_r_thumb_  = f_r_thumb_;  t_f_r_index_  = f_r_index_;  t_f_r_middle_ = f_r_middle_; t_f_r_ring_ = f_r_ring_; t_f_r_baby_ = f_r_baby_;
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "thumb", rel))  f_r_thumb_  = HandForwardKinematics::combinePosePoint(current_pose_r_, rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "index", rel))  f_r_index_  = HandForwardKinematics::combinePosePoint(current_pose_r_, rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "middle", rel)) f_r_middle_ = HandForwardKinematics::combinePosePoint(current_pose_r_, rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "ring", rel))   f_r_ring_   = HandForwardKinematics::combinePosePoint(current_pose_r_, rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "baby", rel))   f_r_baby_   = HandForwardKinematics::combinePosePoint(current_pose_r_, rel);
+
+    // =======================
+    // fingertips (TARGET)
+    //  - idle : target = current
+    //  - forward : FK(q_h_t_) + combine with target_pose (arm target)
+    //  - inverse : keep as current (hand fixed policy)
+    // =======================
+    t_f_l_thumb_  = f_l_thumb_;
+    t_f_l_index_  = f_l_index_;
+    t_f_l_middle_ = f_l_middle_;
+    t_f_l_ring_   = f_l_ring_;
+    t_f_l_baby_   = f_l_baby_;
+
+    t_f_r_thumb_  = f_r_thumb_;
+    t_f_r_index_  = f_r_index_;
+    t_f_r_middle_ = f_r_middle_;
+    t_f_r_ring_   = f_r_ring_;
+    t_f_r_baby_   = f_r_baby_;
+
+    if (current_control_mode_ == "forward") {
+        // default = wrist target
+        t_f_l_thumb_  = wristPoint(target_pose_l_);
+        t_f_l_index_  = wristPoint(target_pose_l_);
+        t_f_l_middle_ = wristPoint(target_pose_l_);
+        t_f_l_ring_   = wristPoint(target_pose_l_);
+        t_f_l_baby_   = wristPoint(target_pose_l_);
+
+        t_f_r_thumb_  = wristPoint(target_pose_r_);
+        t_f_r_index_  = wristPoint(target_pose_r_);
+        t_f_r_middle_ = wristPoint(target_pose_r_);
+        t_f_r_ring_   = wristPoint(target_pose_r_);
+        t_f_r_baby_   = wristPoint(target_pose_r_);
+
+        std::vector<double> hl_t(20), hr_t(20);
+        for (int i=0;i<20;i++){ hl_t[i]=q_l_h_t_(i); hr_t[i]=q_r_h_t_(i); }
+        auto tl_t = hand_fk_l_->computeFingertips(hl_t);
+        auto tr_t = hand_fk_r_->computeFingertips(hr_t);
+
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "thumb", rel))  t_f_l_thumb_  = HandForwardKinematics::combinePosePoint(target_pose_l_, rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "index", rel))  t_f_l_index_  = HandForwardKinematics::combinePosePoint(target_pose_l_, rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "middle", rel)) t_f_l_middle_ = HandForwardKinematics::combinePosePoint(target_pose_l_, rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "ring", rel))   t_f_l_ring_   = HandForwardKinematics::combinePosePoint(target_pose_l_, rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "baby", rel))   t_f_l_baby_   = HandForwardKinematics::combinePosePoint(target_pose_l_, rel);
+
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "thumb", rel))  t_f_r_thumb_  = HandForwardKinematics::combinePosePoint(target_pose_r_, rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "index", rel))  t_f_r_index_  = HandForwardKinematics::combinePosePoint(target_pose_r_, rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "middle", rel)) t_f_r_middle_ = HandForwardKinematics::combinePosePoint(target_pose_r_, rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "ring", rel))   t_f_r_ring_   = HandForwardKinematics::combinePosePoint(target_pose_r_, rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "baby", rel))   t_f_r_baby_   = HandForwardKinematics::combinePosePoint(target_pose_r_, rel);
+    }
 
     // hand force도 아직은 0 유지 (나중에 토픽 연결되면 callback에서 채우면 됨)
     f_l_hand_t_ = f_l_hand_c_;
@@ -142,8 +198,6 @@ void DualArmForceControl::TargetPositionCallback(const std_msgs::msg::Float64Mul
     target_pose_r_.position.y = r_xyz[1];
     target_pose_r_.position.z = r_xyz[2];
 
-    // orientation은 굳이 quaternion으로 저장 안 해도 되지만, Print가 Euler 출력하므로 placeholder로 생성
-    // (Euler 출력은 IK 입력 euler를 그대로 쓰게 만들 수도 있는데, 여기서는 단순화를 위해 quaternion 생성)
     auto eulToQuat = [&](double ex, double ey, double ez){
         double a0 = ex, a1 = ey, a2 = ez;
         if (ik_angle_unit_ == "deg") { a0*=M_PI/180.0; a1*=M_PI/180.0; a2*=M_PI/180.0; }
@@ -168,29 +222,22 @@ void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiA
 
     const size_t n = msg->data.size();
 
-    // -------------------------
-    // 1) Arms (always if >=12)
-    // -------------------------
+    // 1) Arms (>=12)
     if (n >= 12) {
         for (int i = 0; i < 6; ++i) {
             q_l_t_(i) = msg->data[i + 0];
             q_r_t_(i) = msg->data[i + 6];
         }
     } else {
-        return; // 12 미만이면 무시
+        return;
     }
 
-    // -------------------------
-    // 2) Hands (only if >=52)
-    //   [12~31]  : Left hand 20
-    //   [32~51]  : Right hand 20
-    // -------------------------
+    // 2) Hands (>=52)
     if (n >= 52) {
         for (int i = 0; i < 20; ++i) q_l_h_t_(i) = msg->data[12 + i];
         for (int i = 0; i < 20; ++i) q_r_h_t_(i) = msg->data[32 + i];
     }
 }
-
 
 // --------------------
 // ControlModeCallback
@@ -217,7 +264,6 @@ void DualArmForceControl::ContactForceCallback(const std_msgs::msg::Float64Multi
     f_l_c_ << msg->data[0], msg->data[1], msg->data[2];
     f_r_c_ << msg->data[3], msg->data[4], msg->data[5];
 
-    // 현재는 target force를 별도 입력 안 받으므로 targ = curr
     f_l_t_ = f_l_c_;
     f_r_t_ = f_r_c_;
 }
@@ -228,20 +274,16 @@ void DualArmForceControl::ContactForceCallback(const std_msgs::msg::Float64Multi
 void DualArmForceControl::PrintDualArmStates() {
     if (!is_initialized_) return;
 
-    // ===== ANSI Colors =====
-    // Position 색깔은 유지 (256-color 파스텔)
-    // Curr Force: Red
-    // Targ Force: Blue
     constexpr const char* C_RESET   = "\033[0m";
     constexpr const char* C_TITLE   = "\033[1;38;5;252m";
     constexpr const char* C_DIM     = "\033[38;5;245m";
 
-    constexpr const char* C_CUR_POS = "\033[1;38;5;81m";   // teal-ish (keep)
-    constexpr const char* C_TAR_POS = "\033[1;38;5;220m";  // gold-ish (keep)
+    constexpr const char* C_CUR_POS = "\033[1;38;5;81m";
+    constexpr const char* C_TAR_POS = "\033[1;38;5;220m";
 
-    constexpr const char* C_CUR_F   = "\033[1;31m";        // RED
-    constexpr const char* C_TAR_F   = "\033[1;34m";        // BLUE
-    constexpr const char* C_MODE    = "\033[1;92m";        // neon green (mode)
+    constexpr const char* C_CUR_F   = "\033[1;31m";
+    constexpr const char* C_TAR_F   = "\033[1;34m";
+    constexpr const char* C_MODE    = "\033[1;92m";
 
     auto fmtArmLine = [&](const char* tag,
                           const geometry_msgs::msg::Pose& pose,
@@ -289,14 +331,13 @@ void DualArmForceControl::PrintDualArmStates() {
     {
         fmtFingerLine(name4, cur_p, cur_f, C_CUR_POS, C_CUR_F);
         fmtFingerLine(name4, tar_p, tar_f, C_TAR_POS, C_TAR_F);
-        printf("\n"); // finger block gap
+        printf("\n");
     };
 
-    // clear screen
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v6 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v8 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
            C_MODE, current_control_mode_.c_str(), C_RESET,
            C_CUR_POS, C_RESET,
@@ -306,7 +347,6 @@ void DualArmForceControl::PrintDualArmStates() {
            C_RESET);
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 
-    // ---------------- ARM ----------------
     printf("%s[L ARM]%s\n", C_TITLE, C_RESET);
     fmtArmLine("CUR", current_pose_l_, f_l_c_, C_CUR_POS, C_CUR_F);
     fmtArmLine("TAR", target_pose_l_,  f_l_t_, C_TAR_POS, C_TAR_F);
@@ -319,7 +359,6 @@ void DualArmForceControl::PrintDualArmStates() {
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 
-    // ---------------- HAND ----------------
     printf("%s[L HAND]%s\n\n", C_TITLE, C_RESET);
     printFingerBlock("THMB", f_l_thumb_,   t_f_l_thumb_,   f_l_hand_c_.row(0), f_l_hand_t_.row(0));
     printFingerBlock("INDX", f_l_index_,   t_f_l_index_,   f_l_hand_c_.row(1), f_l_hand_t_.row(1));
