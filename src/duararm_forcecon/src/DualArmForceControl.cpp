@@ -28,9 +28,13 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node) : n
     f_l_c_.setZero(); f_r_c_.setZero(); f_l_t_.setZero(); f_r_t_.setZero();
     f_l_h_c_.setZero(15); f_r_h_c_.setZero(15); f_l_h_t_.setZero(15); f_r_h_t_.setZero(15);
 
+
     // Forward Kinematics 객체 초기화
     std::string urdf_path = "/home/eunseop/isaac/isaac_save/dualarm/dualarm_description/urdf/aidin_dsr_dualarm.urdf";
-    arm_fk_ = std::make_shared<ArmForwardKinematics>(urdf_path, "base_link", "left_link6", "right_link6");
+
+    // 수정됨: left_link6 -> left_link_6, right_link6 -> right_link_6
+    arm_fk_ = std::make_shared<ArmForwardKinematics>(urdf_path, "base_link", "left_link_6", "right_link_6");
+
 
     print_timer_ = node_->create_wall_timer(500ms, std::bind(&DualArmForceControl::PrintDualArmStates, this));
     control_timer_ = node_->create_wall_timer(10ms, std::bind(&DualArmForceControl::ControlLoop, this));
