@@ -8,14 +8,15 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node) : n
 
     joint_states_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
         "/isaac_joint_states", qos, std::bind(&DualArmForceControl::JointsCallback, this, std::placeholders::_1));
-        
-    // FK 연산을 위한 PositionCallback 구독자
     position_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
         "/isaac_joint_states", qos, std::bind(&DualArmForceControl::PositionCallback, this, std::placeholders::_1));
+    
+    // ✅ Target Position 구독 추가 (X, Y, Z, R, P, Y * 2 = 12개 데이터 예상)
+    target_pos_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+        "/target_cartesian_pose", qos, std::bind(&DualArmForceControl::TargetPositionCallback, this, std::placeholders::_1));
 
     contact_force_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/isaac_contact_states", qos, std::bind(&DualArmForceControl::ContactForceCallback, this, std::placeholders::_1));
-        
     target_joint_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/forward_joint_targets", qos, std::bind(&DualArmForceControl::TargetJointCallback, this, std::placeholders::_1));
 
@@ -26,15 +27,13 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node) : n
     q_l_c_.setZero(6); q_r_c_.setZero(6); q_l_t_.setZero(6); q_r_t_.setZero(6);
     q_l_h_c_.setZero(20); q_r_h_c_.setZero(20); q_l_h_t_.setZero(20); q_r_h_t_.setZero(20);
     f_l_c_.setZero(); f_r_c_.setZero(); f_l_t_.setZero(); f_r_t_.setZero();
-    f_l_h_c_.setZero(15); f_r_h_c_.setZero(15); f_l_h_t_.setZero(15); f_r_h_t_.setZero(15);
 
-
-    // Forward Kinematics 객체 초기화
     std::string urdf_path = "/home/eunseop/isaac/isaac_save/dualarm/dualarm_description/urdf/aidin_dsr_dualarm.urdf";
-
-    // 수정됨: left_link6 -> left_link_6, right_link6 -> right_link_6
     arm_fk_ = std::make_shared<ArmForwardKinematics>(urdf_path, "base_link", "left_link_6", "right_link_6");
-
+    
+    // ✅ IK 객체 초기화
+    arm_ik_l_ = std::make_shared<ArmInverseKinematics>(urdf_path, "base_link", "left_link_6");
+    arm_ik_r_ = std::make_shared<ArmInverseKinematics>(urdf_path, "base_link", "right_link_6");
 
     print_timer_ = node_->create_wall_timer(500ms, std::bind(&DualArmForceControl::PrintDualArmStates, this));
     control_timer_ = node_->create_wall_timer(10ms, std::bind(&DualArmForceControl::ControlLoop, this));
@@ -49,7 +48,9 @@ void DualArmForceControl::ControlLoop() {
             q_l_h_t_ = q_l_h_c_; q_r_h_t_ = q_r_h_c_;
             idle_synced_ = true;
         }
-    } else {
+    } 
+    // forward와 inverse 모드에서는 TargetCallback들에 의해 q_t 값이 업데이트됨
+    else {
         idle_synced_ = false;
     }
 
@@ -70,8 +71,8 @@ void DualArmForceControl::ControlLoop() {
         else if (name == "right_joint_4") cmd.position.push_back(q_r_t_(3));
         else if (name == "right_joint_5") cmd.position.push_back(q_r_t_(4));
         else if (name == "right_joint_6") cmd.position.push_back(q_r_t_(5));
-        else if (name == "yaw_joint" || name == "pitch_joint") cmd.position.push_back(0.0);
         else {
+            // 핸드는 현재 위치 고정 (q_l_h_t_는 idle 상태에서 동기화된 값 유지)
             int f_idx = -1;
             if (name.find("thumb") != std::string::npos) f_idx = 0;
             else if (name.find("index") != std::string::npos) f_idx = 4;
@@ -89,7 +90,6 @@ void DualArmForceControl::ControlLoop() {
                 if (j_idx != -1) {
                     if (name.find("left") != std::string::npos) cmd.position.push_back(q_l_h_t_(f_idx + j_idx));
                     else if (name.find("right") != std::string::npos) cmd.position.push_back(q_r_h_t_(f_idx + j_idx));
-                    else cmd.position.push_back(0.0);
                 } else cmd.position.push_back(0.0);
             } else cmd.position.push_back(0.0); 
         }
