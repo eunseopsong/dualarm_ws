@@ -162,11 +162,35 @@ void DualArmForceControl::TargetPositionCallback(const std_msgs::msg::Float64Mul
 // --------------------
 // TargetJointCallback (forward)
 // --------------------
-void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+{
     if (current_control_mode_ != "forward") return;
-    if (msg->data.size() < 12) return;
-    for (int i=0;i<6;i++){ q_l_t_(i)=msg->data[i]; q_r_t_(i)=msg->data[i+6]; }
+
+    const size_t n = msg->data.size();
+
+    // -------------------------
+    // 1) Arms (always if >=12)
+    // -------------------------
+    if (n >= 12) {
+        for (int i = 0; i < 6; ++i) {
+            q_l_t_(i) = msg->data[i + 0];
+            q_r_t_(i) = msg->data[i + 6];
+        }
+    } else {
+        return; // 12 미만이면 무시
+    }
+
+    // -------------------------
+    // 2) Hands (only if >=52)
+    //   [12~31]  : Left hand 20
+    //   [32~51]  : Right hand 20
+    // -------------------------
+    if (n >= 52) {
+        for (int i = 0; i < 20; ++i) q_l_h_t_(i) = msg->data[12 + i];
+        for (int i = 0; i < 20; ++i) q_r_h_t_(i) = msg->data[32 + i];
+    }
 }
+
 
 // --------------------
 // ControlModeCallback
