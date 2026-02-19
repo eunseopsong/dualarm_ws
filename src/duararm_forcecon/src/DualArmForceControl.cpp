@@ -17,7 +17,6 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node) : n
     mode_service_ = node_->create_service<std_srvs::srv::Trigger>(
         "/change_control_mode", std::bind(&DualArmForceControl::ControlModeCallback, this, std::placeholders::_1, std::placeholders::_2));
 
-    // Vector Initialization
     q_l_c_.setZero(6); q_r_c_.setZero(6); q_l_t_.setZero(6); q_r_t_.setZero(6);
     q_l_h_c_.setZero(20); q_r_h_c_.setZero(20); q_l_h_t_.setZero(20); q_r_h_t_.setZero(20);
     f_l_c_.setZero(); f_r_c_.setZero(); f_l_t_.setZero(); f_r_t_.setZero();
@@ -30,17 +29,22 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node) : n
 void DualArmForceControl::ControlLoop() {
     if (!is_initialized_ || joint_names_.empty()) return;
 
+    // [수정] idle 모드일 때 최초 1회만 타겟을 고정하여 흘러내림(Drift) 방지
     if (current_control_mode_ == "idle") {
-        q_l_t_ = q_l_c_; q_r_t_ = q_r_c_;
-        q_l_h_t_ = q_l_h_c_; q_r_h_t_ = q_r_h_c_;
+        if (!idle_synced_) {
+            q_l_t_ = q_l_c_; q_r_t_ = q_r_c_;
+            q_l_h_t_ = q_l_h_c_; q_r_h_t_ = q_r_h_c_;
+            idle_synced_ = true;
+        }
+    } else {
+        idle_synced_ = false; // forward 모드일 때는 플래그 초기화
     }
 
     auto cmd = sensor_msgs::msg::JointState();
     cmd.header.stamp = node_->now();
-    cmd.name = joint_names_; // Isaac Sim의 순서 그대로 사용
+    cmd.name = joint_names_; 
 
     for (const auto& name : joint_names_) {
-        // [안전 구역 1] 팔(Arm) 매핑 - 기존 작동 코드 100% 유지
         if (name == "left_joint_1") cmd.position.push_back(q_l_t_(0));
         else if (name == "left_joint_2") cmd.position.push_back(q_l_t_(1));
         else if (name == "left_joint_3") cmd.position.push_back(q_l_t_(2));
@@ -54,8 +58,6 @@ void DualArmForceControl::ControlLoop() {
         else if (name == "right_joint_5") cmd.position.push_back(q_r_t_(4));
         else if (name == "right_joint_6") cmd.position.push_back(q_r_t_(5));
         else if (name == "yaw_joint" || name == "pitch_joint") cmd.position.push_back(0.0);
-        
-        // [추가 구역] 손가락(Hand) 매핑 - stoi 에러 없이 키워드만 검색
         else {
             int f_idx = -1;
             if (name.find("thumb") != std::string::npos) f_idx = 0;
@@ -75,15 +77,10 @@ void DualArmForceControl::ControlLoop() {
                     if (name.find("left") != std::string::npos) cmd.position.push_back(q_l_h_t_(f_idx + j_idx));
                     else if (name.find("right") != std::string::npos) cmd.position.push_back(q_r_h_t_(f_idx + j_idx));
                     else cmd.position.push_back(0.0);
-                } else {
-                    cmd.position.push_back(0.0);
-                }
-            } else {
-                cmd.position.push_back(0.0); 
-            }
+                } else cmd.position.push_back(0.0);
+            } else cmd.position.push_back(0.0); 
         }
     }
-
     joint_command_pub_->publish(cmd);
 }
 

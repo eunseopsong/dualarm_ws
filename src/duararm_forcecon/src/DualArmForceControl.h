@@ -35,7 +35,7 @@ private:
     rclcpp::TimerBase::SharedPtr control_timer_;
 
     std::string current_control_mode_ = "idle";
-    std::vector<std::string> joint_names_; // Isaac Sim 조인트 이름 저장용
+    std::vector<std::string> joint_names_;
 
     // Arm & Hand Vectors
     Eigen::VectorXd q_l_c_, q_r_c_, q_l_t_, q_r_t_;
@@ -44,5 +44,6 @@ private:
     Eigen::VectorXd f_l_h_c_, f_r_h_c_, f_l_h_t_, f_r_h_t_;
 
     bool is_initialized_ = false;
+    bool idle_synced_ = false; // [추가] idle 모드 진입 시 1회만 고정하기 위한 플래그
 };
 #endif
