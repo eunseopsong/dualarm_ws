@@ -30,7 +30,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_joint_sub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr mode_service_;
-    
+
     rclcpp::TimerBase::SharedPtr print_timer_;
     rclcpp::TimerBase::SharedPtr control_timer_;
 

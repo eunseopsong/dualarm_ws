@@ -72,36 +72,54 @@ void DualArmForceControl::ContactForceCallback(const std_msgs::msg::Float64Multi
 
 void DualArmForceControl::PrintDualArmStates() {
     if (!is_initialized_) return;
-    
-    // [수정] \033[2J를 추가하여 화면의 찌꺼기 글자들을 완전히 지우고 UI를 깔끔하게 정렬
-    printf("\033[2J\033[H");
-    printf("================================================================================\n");
-    printf("   Dual Arm & Hand Monitor | Mode: [\033[1;32m%-7s\033[0m] | Cyan: Curr, Yel: Targ\n", current_control_mode_.c_str());
-    printf("================================================================================\n");
 
-    auto print_arm = [&](const char* side, Eigen::VectorXd& c, Eigen::VectorXd& t, Eigen::Vector3d& fc) {
-        printf("[%s ARM] Joints: \033[1;36m%5.2f %5.2f %5.2f %5.2f %5.2f %5.2f\033[0m | F: %4.1f %4.1f %4.1f\n", 
+    // 화면 초기화 및 헤더
+    printf("\033[2J\033[H");
+    printf("========================================================================================\n");
+    printf("   Dual Arm & Hand Monitor | Mode: [\033[1;32m%-7s\033[0m] | Cyan: Curr, Yel: Targ\n", current_control_mode_.c_str());
+    printf("========================================================================================\n");
+
+    // 1. ARM Force 추가 출력
+    auto print_arm = [&](const char* side, Eigen::VectorXd& c, Eigen::VectorXd& t, Eigen::Vector3d& fc, Eigen::Vector3d& ft) {
+        printf("[%s ARM] Joints: \033[1;36m%5.2f %5.2f %5.2f %5.2f %5.2f %5.2f\033[0m | F_C: \033[1;36m%5.1f %5.1f %5.1f\033[0m\n", 
                side, c(0),c(1),c(2),c(3),c(4),c(5), fc(0),fc(1),fc(2));
-        printf("        Target: \033[1;33m%5.2f %5.2f %5.2f %5.2f %5.2f %5.2f\033[0m\n", 
-               t(0),t(1),t(2),t(3),t(4),t(5));
+        printf("        Target: \033[1;33m%5.2f %5.2f %5.2f %5.2f %5.2f %5.2f\033[0m | F_T: \033[1;33m%5.1f %5.1f %5.1f\033[0m\n", 
+               t(0),t(1),t(2),t(3),t(4),t(5), ft(0),ft(1),ft(2));
     };
 
-    print_arm("L", q_l_c_, q_l_t_, f_l_c_);
-    print_arm("R", q_r_c_, q_r_t_, f_r_c_);
+    print_arm("L", q_l_c_, q_l_t_, f_l_c_, f_l_t_);
+    print_arm("R", q_r_c_, q_r_t_, f_r_c_, f_r_t_);
     
-    printf("--------------------------------------------------------------------------------\n");
-    printf("[HAND]  Finger | L_Curr (Cyan) / L_Targ (Yel)  | R_Curr (Cyan) / R_Targ (Yel)\n");
-    printf("--------------------------------------------------------------------------------\n");
+    printf("----------------------------------------------------------------------------------------\n");
+    printf("[HAND]    | Joints: Curr(C) / Targ(Y)             | Forces: Curr(C) / Targ(Y)\n");
+    printf("----------------------------------------------------------------------------------------\n");
 
     const char* f_names[] = {"Thumb", "Index", "Middle", "Ring", "Baby"};
+    
+    // 2. LEFT HAND (Joint & Force)
     for(int i=0; i<5; i++) {
-        int idx = i * 4;
-        printf("%-7s        | \033[1;36m%4.1f %4.1f %4.1f %4.1f\033[0m / \033[1;33m%4.1f %4.1f %4.1f %4.1f\033[0m | \033[1;36m%4.1f %4.1f %4.1f %4.1f\033[0m / \033[1;33m%4.1f %4.1f %4.1f %4.1f\033[0m\n", 
+        int q_idx = i * 4;
+        int f_idx = i * 3;
+        printf("L_%-7s | \033[1;36m%5.1f %5.1f %5.1f %5.1f\033[0m / \033[1;33m%5.1f %5.1f %5.1f %5.1f\033[0m | \033[1;36m%5.1f %5.1f %5.1f\033[0m / \033[1;33m%5.1f %5.1f %5.1f\033[0m\n", 
                f_names[i], 
-               q_l_h_c_(idx), q_l_h_c_(idx+1), q_l_h_c_(idx+2), q_l_h_c_(idx+3),
-               q_l_h_t_(idx), q_l_h_t_(idx+1), q_l_h_t_(idx+2), q_l_h_t_(idx+3),
-               q_r_h_c_(idx), q_r_h_c_(idx+1), q_r_h_c_(idx+2), q_r_h_c_(idx+3),
-               q_r_h_t_(idx), q_r_h_t_(idx+1), q_r_h_t_(idx+2), q_r_h_t_(idx+3));
+               q_l_h_c_(q_idx), q_l_h_c_(q_idx+1), q_l_h_c_(q_idx+2), q_l_h_c_(q_idx+3),
+               q_l_h_t_(q_idx), q_l_h_t_(q_idx+1), q_l_h_t_(q_idx+2), q_l_h_t_(q_idx+3),
+               f_l_h_c_(f_idx), f_l_h_c_(f_idx+1), f_l_h_c_(f_idx+2),
+               f_l_h_t_(f_idx), f_l_h_t_(f_idx+1), f_l_h_t_(f_idx+2));
     }
-    printf("================================================================================\n");
+    
+    printf("          |                                       |\n"); // 좌/우 구분용 공백선
+    
+    // 3. RIGHT HAND (Joint & Force)
+    for(int i=0; i<5; i++) {
+        int q_idx = i * 4;
+        int f_idx = i * 3;
+        printf("R_%-7s | \033[1;36m%5.1f %5.1f %5.1f %5.1f\033[0m / \033[1;33m%5.1f %5.1f %5.1f %5.1f\033[0m | \033[1;36m%5.1f %5.1f %5.1f\033[0m / \033[1;33m%5.1f %5.1f %5.1f\033[0m\n", 
+               f_names[i], 
+               q_r_h_c_(q_idx), q_r_h_c_(q_idx+1), q_r_h_c_(q_idx+2), q_r_h_c_(q_idx+3),
+               q_r_h_t_(q_idx), q_r_h_t_(q_idx+1), q_r_h_t_(q_idx+2), q_r_h_t_(q_idx+3),
+               f_r_h_c_(f_idx), f_r_h_c_(f_idx+1), f_r_h_c_(f_idx+2),
+               f_r_h_t_(f_idx), f_r_h_t_(f_idx+1), f_r_h_t_(f_idx+2));
+    }
+    printf("========================================================================================\n");
 }

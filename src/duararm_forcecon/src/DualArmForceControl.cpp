@@ -42,7 +42,7 @@ void DualArmForceControl::ControlLoop() {
 
     auto cmd = sensor_msgs::msg::JointState();
     cmd.header.stamp = node_->now();
-    cmd.name = joint_names_; 
+    cmd.name = joint_names_;
 
     for (const auto& name : joint_names_) {
         if (name == "left_joint_1") cmd.position.push_back(q_l_t_(0));
