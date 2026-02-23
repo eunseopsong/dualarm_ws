@@ -38,6 +38,8 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
             const int idx = hj.finger_id * 4 + hj.joint_id;  // 0..19
             if (idx < 0 || idx >= 20) continue;
 
+            // ✅ PATCH: hand current joint write 보호
+            std::lock_guard<std::mutex> lk(hand_mtx_);
             if (hj.is_left)  q_l_h_c_(idx) = p;
             else             q_r_h_c_(idx) = p;
         }
@@ -80,107 +82,53 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
     }
 }
 
+// --------------------
+// HandPositionCallback
+// --------------------
 void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
 {
-    if (!msg) return;
+    (void)msg;
+    if (!is_initialized_) return;
 
-    // ------------------------------------------------------------
-    // 0) FK 객체 준비 확인
-    // ------------------------------------------------------------
-    if (!hand_fk_l_ || !hand_fk_r_) {
-        // FK가 아직 생성되지 않았으면 계산 불가
-        return;
-    }
+    // FK 객체 준비 확인
+    if (!hand_fk_l_ || !hand_fk_r_) return;
 
-    // ------------------------------------------------------------
-    // 1) 유틸: Eigen -> geometry_msgs::msg::Point 변환
-    // ------------------------------------------------------------
+    // 유틸: Eigen -> geometry_msgs::msg::Point
     auto assign_point = [&](geometry_msgs::msg::Point& p, const Eigen::Vector3d& v) {
         p.x = v.x();
         p.y = v.y();
         p.z = v.z();
     };
 
-    // ------------------------------------------------------------
-    // 2) 유틸: vector<Eigen::Vector3d> 안전 인덱싱
-    // ------------------------------------------------------------
+    // 유틸: vector<Eigen::Vector3d> 안전 인덱싱
     auto safe_get = [&](const std::vector<Eigen::Vector3d>& v, int idx) -> Eigen::Vector3d {
         if (idx < 0 || idx >= static_cast<int>(v.size())) return Eigen::Vector3d::Zero();
         return v[idx];
     };
 
     // ------------------------------------------------------------
-    // 3) msg -> (현재/타겟) 손 관절 벡터 생성
-    //    - 아래는 "이름 기반 매핑" 템플릿.
-    //    - 네 코드에 이미 확정된 매핑/인덱스가 있으면 그걸로 교체해도 됨.
+    // ✅ PATCH 핵심:
+    // msg에서 다시 파싱하지 말고,
+    // 이미 콜백에서 갱신된 q_l_h_c_/q_r_h_c_ (CUR) 와 q_l_h_t_/q_r_h_t_ (TAR)를 사용한다.
     // ------------------------------------------------------------
-    // 예: 각 손 20DOF라고 가정 (프로젝트 설정에 맞게 수정 가능)
-    constexpr int HAND_DOF = 20;
-    Eigen::Matrix<double, HAND_DOF, 1> hl;   hl.setZero();
-    Eigen::Matrix<double, HAND_DOF, 1> hr;   hr.setZero();
-    Eigen::Matrix<double, HAND_DOF, 1> hl_t; hl_t.setZero();   // 타겟(있으면)
-    Eigen::Matrix<double, HAND_DOF, 1> hr_t; hr_t.setZero();
-
-    // ------------------------------------------------------------
-    // 3-1) 파싱 함수(내부 람다)
-    //  - msg->name / msg->position 를 읽어 hl/hr 채움
-    //  - ⚠️ 여기의 조인트명-인덱스 매핑만 네 프로젝트에 맞게 채워라.
-    // ------------------------------------------------------------
-    auto parseHandJointsFromMsg = [&](const sensor_msgs::msg::JointState::SharedPtr& m,
-                                      Eigen::Matrix<double, HAND_DOF, 1>& out_l,
-                                      Eigen::Matrix<double, HAND_DOF, 1>& out_r)
+    Eigen::Matrix<double,20,1> hl, hr, hl_t, hr_t;
     {
-        const size_t N = std::min(m->name.size(), m->position.size());
-        for (size_t i = 0; i < N; ++i) {
-            const std::string& n = m->name[i];
-            const double q = m->position[i];
-
-            // -----------------------------
-            // ✅ TODO: 아래는 예시 템플릿
-            // 네 손 조인트 네이밍에 맞게 "정확히" 수정해야 함.
-            //
-            // out_l(k) / out_r(k)에서 k는 0..HAND_DOF-1
-            // -----------------------------
-
-            // ===== Left hand examples =====
-            // if (n == "left_hand_joint_0") out_l(0) = q;
-            // else if (n == "left_hand_joint_1") out_l(1) = q;
-            // ...
-            // ===== Right hand examples =====
-            // else if (n == "right_hand_joint_0") out_r(0) = q;
-            // else if (n == "right_hand_joint_1") out_r(1) = q;
-            // ...
-
-            // ----------------------------------------------------
-            // 만약 이미 네 코드에 "확정된 매핑"이 있다면
-            // 위 TODO 구간 전체를 네 기존 매핑 코드로 교체하면 끝.
-            // ----------------------------------------------------
+        std::lock_guard<std::mutex> lk(hand_mtx_);
+        for (int i = 0; i < 20; ++i) {
+            hl(i)   = q_l_h_c_(i);
+            hr(i)   = q_r_h_c_(i);
+            hl_t(i) = q_l_h_t_(i);
+            hr_t(i) = q_r_h_t_(i);
         }
-    };
+    }
 
-    // 현재 손 관절 파싱
-    parseHandJointsFromMsg(msg, hl, hr);
+    // Fingertip FK 계산 (order: thumb, index, middle, ring, baby)
+    const std::vector<Eigen::Vector3d> tl   = hand_fk_l_->computeFingertips(hl);
+    const std::vector<Eigen::Vector3d> tr   = hand_fk_r_->computeFingertips(hr);
+    const std::vector<Eigen::Vector3d> tl_t = hand_fk_l_->computeFingertips(hl_t);
+    const std::vector<Eigen::Vector3d> tr_t = hand_fk_r_->computeFingertips(hr_t);
 
-    // ------------------------------------------------------------
-    // 3-2) 타겟 관절(있을 때만)
-    //  - 네 코드가 타겟을 따로 안 쓰면, 아래 블록은 그대로 둬도 됨(0 유지)
-    //  - 타겟을 별도 토픽으로 받는 구조면, 여기서 msg가 아니라
-    //    "저장해둔 타겟 벡터"를 hl_t/hr_t에 넣으면 됨.
-    // ------------------------------------------------------------
-    // 예시:
-    // hl_t = hand_q_l_target_;
-    // hr_t = hand_q_r_target_;
-
-    // ------------------------------------------------------------
-    // 4) Fingertip FK 계산: vector<Eigen::Vector3d> 반환 가정
-    //    order: [thumb, index, middle, ring, baby]
-    // ------------------------------------------------------------
-    const std::vector<Eigen::Vector3d> tl = hand_fk_l_->computeFingertips(hl);
-    const std::vector<Eigen::Vector3d> tr = hand_fk_r_->computeFingertips(hr);
-
-    // ------------------------------------------------------------
-    // 5) 현재 fingertip -> Point 멤버에 저장
-    // ------------------------------------------------------------
+    // CUR tip 저장
     assign_point(f_l_thumb_,  safe_get(tl, 0));
     assign_point(f_l_index_,  safe_get(tl, 1));
     assign_point(f_l_middle_, safe_get(tl, 2));
@@ -193,29 +141,18 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     assign_point(f_r_ring_,   safe_get(tr, 3));
     assign_point(f_r_baby_,   safe_get(tr, 4));
 
-    // ------------------------------------------------------------
-    // 6) 타겟 fingertip도 계산해서 저장(원하면 유지)
-    // ------------------------------------------------------------
-    {
-        const std::vector<Eigen::Vector3d> tl_t = hand_fk_l_->computeFingertips(hl_t);
-        const std::vector<Eigen::Vector3d> tr_t = hand_fk_r_->computeFingertips(hr_t);
+    // TAR tip 저장 (REAL target hand joints)
+    assign_point(t_f_l_thumb_,  safe_get(tl_t, 0));
+    assign_point(t_f_l_index_,  safe_get(tl_t, 1));
+    assign_point(t_f_l_middle_, safe_get(tl_t, 2));
+    assign_point(t_f_l_ring_,   safe_get(tl_t, 3));
+    assign_point(t_f_l_baby_,   safe_get(tl_t, 4));
 
-        assign_point(t_f_l_thumb_,  safe_get(tl_t, 0));
-        assign_point(t_f_l_index_,  safe_get(tl_t, 1));
-        assign_point(t_f_l_middle_, safe_get(tl_t, 2));
-        assign_point(t_f_l_ring_,   safe_get(tl_t, 3));
-        assign_point(t_f_l_baby_,   safe_get(tl_t, 4));
-
-        assign_point(t_f_r_thumb_,  safe_get(tr_t, 0));
-        assign_point(t_f_r_index_,  safe_get(tr_t, 1));
-        assign_point(t_f_r_middle_, safe_get(tr_t, 2));
-        assign_point(t_f_r_ring_,   safe_get(tr_t, 3));
-        assign_point(t_f_r_baby_,   safe_get(tr_t, 4));
-    }
-
-    // ------------------------------------------------------------
-    // 7) (선택) 디버그/프린트/후속 로직은 네 기존 코드 그대로
-    // ------------------------------------------------------------
+    assign_point(t_f_r_thumb_,  safe_get(tr_t, 0));
+    assign_point(t_f_r_index_,  safe_get(tr_t, 1));
+    assign_point(t_f_r_middle_, safe_get(tr_t, 2));
+    assign_point(t_f_r_ring_,   safe_get(tr_t, 3));
+    assign_point(t_f_r_baby_,   safe_get(tr_t, 4));
 }
 
 // --------------------
@@ -284,6 +221,8 @@ void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiA
     }
 
     if (n >= 52) {
+        // ✅ PATCH: hand target joint write 보호
+        std::lock_guard<std::mutex> lk(hand_mtx_);
         for (int i = 0; i < 20; ++i) q_l_h_t_(i) = msg->data[12 + i];
         for (int i = 0; i < 20; ++i) q_r_h_t_(i) = msg->data[32 + i];
     }

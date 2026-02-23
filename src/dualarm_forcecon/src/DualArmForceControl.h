@@ -15,6 +15,7 @@
 #include <vector>
 #include <memory>
 #include <array>
+#include <mutex>   // ✅ PATCH: hand state 보호용
 
 // include/ kinematics
 #include "dualarm_forcecon/Kinematics/arm_forward_kinematics.hpp"
@@ -106,6 +107,9 @@ private:
 
     geometry_msgs::msg::Point t_f_l_thumb_, t_f_l_index_, t_f_l_middle_, t_f_l_ring_, t_f_l_baby_;
     geometry_msgs::msg::Point t_f_r_thumb_, t_f_r_index_, t_f_r_middle_, t_f_r_ring_, t_f_r_baby_;
+
+    // ✅ PATCH: hand current/target joint & tip 계산 시 thread-safety 최소 보강
+    mutable std::mutex hand_mtx_;
 };
 
 #endif
