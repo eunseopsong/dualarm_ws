@@ -17,11 +17,10 @@
 #include <iostream>
 #include <algorithm>
 #include <limits>
+#include <cctype>
 
 class HandForwardKinematics {
 public:
-    // v7 signature 유지: (urdf_path, hand_base_link, finger_tips)
-    // finger_tips: frame(link) base names (ex: link4_thumb, ...)
     HandForwardKinematics(const std::string& urdf_path,
                           const std::string& hand_base_link,
                           const std::vector<std::string>& finger_tips)
@@ -45,43 +44,49 @@ public:
         }
 
         // base frame id
-        base_fid_ = model_.getFrameId(hand_base_link_);
-        if (base_fid_ == (pinocchio::FrameIndex)(-1)) {
-            std::cerr << "[HandFK Error] Base frame not found in model: " << hand_base_link_ << std::endl;
+        base_fid_ = safeGetFrameId(hand_base_link_);
+        if (!isValidFrameId(base_fid_)) {
+            std::cerr << "[HandFK Error] Base frame not found in model: " << hand_base_link_
+                      << " (nframes=" << model_.nframes << ")\n";
             return;
         }
 
         // build resolved tip specs
         tip_specs_.clear();
         int built = 0;
+
         for (const auto& tip_in : finger_tips_in_) {
             TipSpec spec;
             spec.key_name = tip_in;
 
-            pinocchio::FrameIndex fid = model_.getFrameId(tip_in);
+            // 1) exact
+            pinocchio::FrameIndex fid = safeGetFrameId(tip_in);
             std::string resolved = tip_in;
 
-            if (fid == (pinocchio::FrameIndex)(-1) && !side_prefix_.empty()) {
+            // 2) side prefix: left_/right_
+            if (!isValidFrameId(fid) && !side_prefix_.empty()) {
                 const std::string pref = side_prefix_ + "_" + tip_in;
-                fid = model_.getFrameId(pref);
-                if (fid != (pinocchio::FrameIndex)(-1)) {
+                pinocchio::FrameIndex fid2 = safeGetFrameId(pref);
+                if (isValidFrameId(fid2)) {
+                    fid = fid2;
                     resolved = pref;
                 }
             }
 
-            if (fid == (pinocchio::FrameIndex)(-1)) {
-                // fallback: substring search (must include side if we know it)
+            // 3) substring search fallback
+            if (!isValidFrameId(fid)) {
                 std::string best_name;
                 fid = findFrameIdBySubstring(toLower(tip_in),
                                              side_prefix_.empty() ? "" : side_prefix_,
                                              best_name);
-                if (fid != (pinocchio::FrameIndex)(-1)) {
+                if (isValidFrameId(fid)) {
                     resolved = best_name;
                 }
             }
 
-            if (fid == (pinocchio::FrameIndex)(-1)) {
-                std::cerr << "[HandFK Warn] Tip frame not found (tried exact/prefix/search): " << tip_in << std::endl;
+            if (!isValidFrameId(fid)) {
+                std::cerr << "[HandFK Warn] Tip frame not found: " << tip_in
+                          << " (side=" << side_prefix_ << ", nframes=" << model_.nframes << ")\n";
                 continue;
             }
 
@@ -100,13 +105,25 @@ public:
                   << " tips_in=" << finger_tips_in_.size()
                   << " tips_found=" << built
                   << " side=" << side_prefix_
+                  << " nframes=" << model_.nframes
                   << std::endl;
 
         if (ok_) {
-            std::cout << "[HandFK Info] Resolved tips:\n";
+            std::cout << "[HandFK Info] Resolved tips (key -> frame):\n";
             for (const auto& s : tip_specs_) {
                 std::cout << "  key='" << s.key_name << "' -> frame='"
                           << s.model_frame_name << "' (fid=" << (int)s.fid << ")\n";
+            }
+
+            // 디버그: 동일 fid 여부 체크
+            if (tip_specs_.size() >= 2) {
+                bool all_same = true;
+                for (size_t i=1;i<tip_specs_.size();++i) {
+                    if (tip_specs_[i].fid != tip_specs_[0].fid) { all_same = false; break; }
+                }
+                if (all_same) {
+                    std::cerr << "[HandFK Warn] All tip frame ids are identical. Check URDF tip link names.\n";
+                }
             }
         }
     }
@@ -141,6 +158,8 @@ public:
 
         // each tip: rel = base^{-1} * tip
         for (const auto& spec : tip_specs_) {
+            if (!isValidFrameId(spec.fid)) continue;
+
             const pinocchio::SE3& oMtip = data_.oMf[spec.fid];
             pinocchio::SE3 baseMtip = oMbase.inverse() * oMtip;
 
@@ -162,7 +181,6 @@ public:
         return results;
     }
 
-    // base(world) pose + relative pose -> world point (기존 유지)
     static geometry_msgs::msg::Point combinePosePoint(const geometry_msgs::msg::Pose& base_world,
                                                       const geometry_msgs::msg::Pose& rel_in_base)
     {
@@ -193,12 +211,24 @@ private:
     struct TipSpec {
         std::string key_name;         // input key (ex: link4_thumb)
         std::string model_frame_name; // resolved frame name in URDF (ex: left_link4_thumb)
-        pinocchio::FrameIndex fid{(pinocchio::FrameIndex)(-1)};
+        pinocchio::FrameIndex fid{0};
     };
+
+    // Pinocchio에서 "not found"는 흔히 fid==model_.nframes 로 온다.
+    inline bool isValidFrameId(pinocchio::FrameIndex fid) const {
+        return fid < (pinocchio::FrameIndex)model_.nframes;
+    }
+
+    inline pinocchio::FrameIndex safeGetFrameId(const std::string& name) const {
+        pinocchio::FrameIndex fid = model_.getFrameId(name);
+        // not found => fid == nframes (많은 버전에서 이 동작)
+        if (!isValidFrameId(fid)) return (pinocchio::FrameIndex)model_.nframes;
+        return fid;
+    }
 
     static std::string toLower(std::string s)
     {
-        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return (char)std::tolower(c); });
         return s;
     }
 
@@ -214,7 +244,7 @@ private:
                                                  const std::string& must_contain_low,
                                                  std::string& best_name) const
     {
-        pinocchio::FrameIndex best = (pinocchio::FrameIndex)(-1);
+        pinocchio::FrameIndex best = (pinocchio::FrameIndex)model_.nframes;
         size_t best_len = std::numeric_limits<size_t>::max();
         best_name.clear();
 
@@ -282,7 +312,7 @@ private:
     pinocchio::Model model_;
     mutable pinocchio::Data data_;
 
-    pinocchio::FrameIndex base_fid_{(pinocchio::FrameIndex)(-1)};
+    pinocchio::FrameIndex base_fid_{0};
 
     // size 20, JointIndex (0 means not found)
     std::vector<pinocchio::JointIndex> hand_joint_ids_;

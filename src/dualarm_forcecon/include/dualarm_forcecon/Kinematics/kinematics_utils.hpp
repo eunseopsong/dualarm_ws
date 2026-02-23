@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <map>
 #include <cctype>
+#include <limits>
 
 #include <Eigen/Dense>
 #include <geometry_msgs/msg/pose.hpp>
@@ -38,6 +39,10 @@ inline std::string toLower(std::string s) {
 inline bool endsWith(const std::string& s, const std::string& suffix) {
     if (s.size() < suffix.size()) return false;
     return (s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0);
+}
+
+inline bool startsWith(const std::string& s, const std::string& prefix) {
+    return (s.rfind(prefix, 0) == 0);
 }
 
 // -------------------------------
@@ -117,8 +122,11 @@ inline geometry_msgs::msg::Point composePoseTranslationWorld(
 }
 
 // ============================================================================
-// v8: Hand joint name parsing (robust)
-//   expected examples: left_thumb_joint1 ... right_baby_joint4
+// v10: Hand joint name parsing (more robust)
+//   supports examples:
+//     left_thumb_joint1, left_thumb_joint_1, left_thumb_j1
+//     right_index_joint4, right_index_joint_4, right_index_j4
+//   also tolerates prefix like: l_*, r_* (only when it clearly starts with it)
 // ============================================================================
 struct HandJointParseResult {
     bool ok{false};
@@ -131,11 +139,14 @@ inline HandJointParseResult parseHandJointName(const std::string& name) {
     HandJointParseResult r;
     const std::string n = toLower(name);
 
-    const bool has_left  = (n.find("left_")  != std::string::npos);
-    const bool has_right = (n.find("right_") != std::string::npos);
+    // ---- side detect (avoid accidental match like "middle" containing 'l') ----
+    bool has_left  = (n.find("left")  != std::string::npos) || startsWith(n, "l_")  || startsWith(n, "lh_");
+    bool has_right = (n.find("right") != std::string::npos) || startsWith(n, "r_")  || startsWith(n, "rh_");
     if (!has_left && !has_right) return r;
+    if (has_left && has_right)   return r; // ambiguous
     r.is_left = has_left;
 
+    // ---- finger ----
     if      (n.find("thumb")  != std::string::npos) r.finger_id = 0;
     else if (n.find("index")  != std::string::npos) r.finger_id = 1;
     else if (n.find("middle") != std::string::npos) r.finger_id = 2;
@@ -143,11 +154,24 @@ inline HandJointParseResult parseHandJointName(const std::string& name) {
     else if (n.find("baby")   != std::string::npos) r.finger_id = 4;
     else return r;
 
-    // 반드시 suffix로 정확 매칭
-    if      (endsWith(n, "joint1")) r.joint_id = 0;
-    else if (endsWith(n, "joint2")) r.joint_id = 1;
-    else if (endsWith(n, "joint3")) r.joint_id = 2;
-    else if (endsWith(n, "joint4")) r.joint_id = 3;
+    // ---- joint index: accept joint1 / joint_1 / j1 형태 ----
+    if (n.empty()) return r;
+    const char last = n.back();
+    if (last >= '1' && last <= '4') {
+        const int jid = (last - '1'); // 0..3
+        // make sure it's really joint indicator
+        if (n.find("joint") != std::string::npos || n.find("_j") != std::string::npos || endsWith(n, "j"+std::string(1,last))) {
+            r.joint_id = jid;
+            r.ok = true;
+            return r;
+        }
+    }
+
+    // fallback (rare): explicit suffixes
+    if      (endsWith(n, "joint1") || endsWith(n, "joint_1") || endsWith(n, "_j1")) r.joint_id = 0;
+    else if (endsWith(n, "joint2") || endsWith(n, "joint_2") || endsWith(n, "_j2")) r.joint_id = 1;
+    else if (endsWith(n, "joint3") || endsWith(n, "joint_3") || endsWith(n, "_j3")) r.joint_id = 2;
+    else if (endsWith(n, "joint4") || endsWith(n, "joint_4") || endsWith(n, "_j4")) r.joint_id = 3;
     else return r;
 
     r.ok = true;

@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cmath>
 #include <limits>
+#include <map>
 
 // --------------------
 // JointsCallback
@@ -30,6 +31,7 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
         else if (n=="right_joint_6") q_r_c_(5)=p;
 
         else {
+            // v10: parseHandJointName가 joint_1까지 robust하게 잡음
             auto hj = dualarm_forcecon::kin::parseHandJointName(n);
             if (!hj.ok) continue;
 
@@ -80,7 +82,7 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
 
 // --------------------
 // HandPositionCallback
-//  - fingertip positions are NOW expressed in each hand base frame
+//  - fingertip positions are expressed in each hand base frame
 //    left: left_hand_base_link frame
 //    right: right_hand_base_link frame
 // --------------------
@@ -105,11 +107,18 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
         return p;
     };
 
-    auto getTip = [&](const std::map<std::string, geometry_msgs::msg::Pose>& m,
-                      const std::string& keyword)->geometry_msgs::msg::Point
+    // v10: tip map은 canonical key로 저장되므로 "정확 키 매칭"을 우선한다.
+    auto getTipByKey = [&](const std::map<std::string, geometry_msgs::msg::Pose>& m,
+                           const std::string& key,
+                           const std::string& keyword_fallback)->geometry_msgs::msg::Point
     {
+        auto it = m.find(key);
+        if (it != m.end()) return posePosToPoint(it->second);
+
         geometry_msgs::msg::Pose rel;
-        if (dualarm_forcecon::kin::findPoseByKeywordCI(m, keyword, rel)) {
+        if (!keyword_fallback.empty() &&
+            dualarm_forcecon::kin::findPoseByKeywordCI(m, keyword_fallback, rel))
+        {
             return posePosToPoint(rel);
         }
         return nanPoint();
@@ -124,17 +133,17 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     auto tl = hand_fk_l_->computeFingertips(hl);
     auto tr = hand_fk_r_->computeFingertips(hr);
 
-    f_l_thumb_  = getTip(tl, "thumb");
-    f_l_index_  = getTip(tl, "index");
-    f_l_middle_ = getTip(tl, "middle");
-    f_l_ring_   = getTip(tl, "ring");
-    f_l_baby_   = getTip(tl, "baby");
+    f_l_thumb_  = getTipByKey(tl, "link4_thumb",  "thumb");
+    f_l_index_  = getTipByKey(tl, "link4_index",  "index");
+    f_l_middle_ = getTipByKey(tl, "link4_middle", "middle");
+    f_l_ring_   = getTipByKey(tl, "link4_ring",   "ring");
+    f_l_baby_   = getTipByKey(tl, "link4_baby",   "baby");
 
-    f_r_thumb_  = getTip(tr, "thumb");
-    f_r_index_  = getTip(tr, "index");
-    f_r_middle_ = getTip(tr, "middle");
-    f_r_ring_   = getTip(tr, "ring");
-    f_r_baby_   = getTip(tr, "baby");
+    f_r_thumb_  = getTipByKey(tr, "link4_thumb",  "thumb");
+    f_r_index_  = getTipByKey(tr, "link4_index",  "index");
+    f_r_middle_ = getTipByKey(tr, "link4_middle", "middle");
+    f_r_ring_   = getTipByKey(tr, "link4_ring",   "ring");
+    f_r_baby_   = getTipByKey(tr, "link4_baby",   "baby");
 
     // =======================
     // TARGET fingertips (policy)
@@ -161,17 +170,17 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
         auto tl_t = hand_fk_l_->computeFingertips(hl_t);
         auto tr_t = hand_fk_r_->computeFingertips(hr_t);
 
-        t_f_l_thumb_  = getTip(tl_t, "thumb");
-        t_f_l_index_  = getTip(tl_t, "index");
-        t_f_l_middle_ = getTip(tl_t, "middle");
-        t_f_l_ring_   = getTip(tl_t, "ring");
-        t_f_l_baby_   = getTip(tl_t, "baby");
+        t_f_l_thumb_  = getTipByKey(tl_t, "link4_thumb",  "thumb");
+        t_f_l_index_  = getTipByKey(tl_t, "link4_index",  "index");
+        t_f_l_middle_ = getTipByKey(tl_t, "link4_middle", "middle");
+        t_f_l_ring_   = getTipByKey(tl_t, "link4_ring",   "ring");
+        t_f_l_baby_   = getTipByKey(tl_t, "link4_baby",   "baby");
 
-        t_f_r_thumb_  = getTip(tr_t, "thumb");
-        t_f_r_index_  = getTip(tr_t, "index");
-        t_f_r_middle_ = getTip(tr_t, "middle");
-        t_f_r_ring_   = getTip(tr_t, "ring");
-        t_f_r_baby_   = getTip(tr_t, "baby");
+        t_f_r_thumb_  = getTipByKey(tr_t, "link4_thumb",  "thumb");
+        t_f_r_index_  = getTipByKey(tr_t, "link4_index",  "index");
+        t_f_r_middle_ = getTipByKey(tr_t, "link4_middle", "middle");
+        t_f_r_ring_   = getTipByKey(tr_t, "link4_ring",   "ring");
+        t_f_r_baby_   = getTipByKey(tr_t, "link4_baby",   "baby");
     }
 
     // hand force는 아직 0 유지
@@ -348,7 +357,7 @@ void DualArmForceControl::PrintDualArmStates() {
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v9 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v10 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
            C_MODE, current_control_mode_.c_str(), C_RESET,
            C_CUR_POS, C_RESET,
