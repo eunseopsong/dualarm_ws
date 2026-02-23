@@ -86,8 +86,10 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     // NOTE: canonical tip keys 유지 (link4_thumb, ...)
     std::vector<std::string> tips = {"link4_thumb", "link4_index", "link4_middle", "link4_ring", "link4_baby"};
-    hand_fk_l_ = std::make_shared<HandForwardKinematics>(urdf_path_, "left_hand_base_link", tips);
-    hand_fk_r_ = std::make_shared<HandForwardKinematics>(urdf_path_, "right_hand_base_link", tips);
+    // hand_fk_l_ = std::make_shared<HandForwardKinematics>(urdf_path_, "left_hand_base_link", tips);
+    // hand_fk_r_ = std::make_shared<HandForwardKinematics>(urdf_path_, "right_hand_base_link", tips);
+    hand_fk_l_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(urdf_path_, "left_hand_base_link", tips);
+    hand_fk_r_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(urdf_path_, "right_hand_base_link", tips);
 
     // -------------------------
     // Timers

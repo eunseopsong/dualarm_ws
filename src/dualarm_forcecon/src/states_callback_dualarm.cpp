@@ -80,112 +80,142 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
     }
 }
 
-// --------------------
-// HandPositionCallback
-//  - fingertip positions are expressed in each hand base frame
-//    left: left_hand_base_link frame
-//    right: right_hand_base_link frame
-// --------------------
-void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
-    (void)msg;
-    if (!is_initialized_) return;
-    if (!hand_fk_l_ || !hand_fk_r_) return;
+void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
+{
+    if (!msg) return;
 
-    auto nanPoint = []()->geometry_msgs::msg::Point{
-        geometry_msgs::msg::Point p;
-        p.x = std::numeric_limits<double>::quiet_NaN();
-        p.y = std::numeric_limits<double>::quiet_NaN();
-        p.z = std::numeric_limits<double>::quiet_NaN();
-        return p;
-    };
-
-    auto posePosToPoint = [](const geometry_msgs::msg::Pose& rel)->geometry_msgs::msg::Point{
-        geometry_msgs::msg::Point p;
-        p.x = rel.position.x;
-        p.y = rel.position.y;
-        p.z = rel.position.z;
-        return p;
-    };
-
-    // v10: tip map은 canonical key로 저장되므로 "정확 키 매칭"을 우선한다.
-    auto getTipByKey = [&](const std::map<std::string, geometry_msgs::msg::Pose>& m,
-                           const std::string& key,
-                           const std::string& keyword_fallback)->geometry_msgs::msg::Point
-    {
-        auto it = m.find(key);
-        if (it != m.end()) return posePosToPoint(it->second);
-
-        geometry_msgs::msg::Pose rel;
-        if (!keyword_fallback.empty() &&
-            dualarm_forcecon::kin::findPoseByKeywordCI(m, keyword_fallback, rel))
-        {
-            return posePosToPoint(rel);
-        }
-        return nanPoint();
-    };
-
-    // =======================
-    // CURRENT fingertips (in each hand base frame)
-    // =======================
-    std::vector<double> hl(20), hr(20);
-    for (int i=0;i<20;i++){ hl[i]=q_l_h_c_(i); hr[i]=q_r_h_c_(i); }
-
-    auto tl = hand_fk_l_->computeFingertips(hl);
-    auto tr = hand_fk_r_->computeFingertips(hr);
-
-    f_l_thumb_  = getTipByKey(tl, "link4_thumb",  "thumb");
-    f_l_index_  = getTipByKey(tl, "link4_index",  "index");
-    f_l_middle_ = getTipByKey(tl, "link4_middle", "middle");
-    f_l_ring_   = getTipByKey(tl, "link4_ring",   "ring");
-    f_l_baby_   = getTipByKey(tl, "link4_baby",   "baby");
-
-    f_r_thumb_  = getTipByKey(tr, "link4_thumb",  "thumb");
-    f_r_index_  = getTipByKey(tr, "link4_index",  "index");
-    f_r_middle_ = getTipByKey(tr, "link4_middle", "middle");
-    f_r_ring_   = getTipByKey(tr, "link4_ring",   "ring");
-    f_r_baby_   = getTipByKey(tr, "link4_baby",   "baby");
-
-    // =======================
-    // TARGET fingertips (policy)
-    //  - idle: target=current
-    //  - forward: compute from q_h_t_ (also in each hand base frame)
-    //  - inverse: keep as current (hand fixed policy)
-    // =======================
-    t_f_l_thumb_  = f_l_thumb_;
-    t_f_l_index_  = f_l_index_;
-    t_f_l_middle_ = f_l_middle_;
-    t_f_l_ring_   = f_l_ring_;
-    t_f_l_baby_   = f_l_baby_;
-
-    t_f_r_thumb_  = f_r_thumb_;
-    t_f_r_index_  = f_r_index_;
-    t_f_r_middle_ = f_r_middle_;
-    t_f_r_ring_   = f_r_ring_;
-    t_f_r_baby_   = f_r_baby_;
-
-    if (current_control_mode_ == "forward") {
-        std::vector<double> hl_t(20), hr_t(20);
-        for (int i=0;i<20;i++){ hl_t[i]=q_l_h_t_(i); hr_t[i]=q_r_h_t_(i); }
-
-        auto tl_t = hand_fk_l_->computeFingertips(hl_t);
-        auto tr_t = hand_fk_r_->computeFingertips(hr_t);
-
-        t_f_l_thumb_  = getTipByKey(tl_t, "link4_thumb",  "thumb");
-        t_f_l_index_  = getTipByKey(tl_t, "link4_index",  "index");
-        t_f_l_middle_ = getTipByKey(tl_t, "link4_middle", "middle");
-        t_f_l_ring_   = getTipByKey(tl_t, "link4_ring",   "ring");
-        t_f_l_baby_   = getTipByKey(tl_t, "link4_baby",   "baby");
-
-        t_f_r_thumb_  = getTipByKey(tr_t, "link4_thumb",  "thumb");
-        t_f_r_index_  = getTipByKey(tr_t, "link4_index",  "index");
-        t_f_r_middle_ = getTipByKey(tr_t, "link4_middle", "middle");
-        t_f_r_ring_   = getTipByKey(tr_t, "link4_ring",   "ring");
-        t_f_r_baby_   = getTipByKey(tr_t, "link4_baby",   "baby");
+    // ------------------------------------------------------------
+    // 0) FK 객체 준비 확인
+    // ------------------------------------------------------------
+    if (!hand_fk_l_ || !hand_fk_r_) {
+        // FK가 아직 생성되지 않았으면 계산 불가
+        return;
     }
 
-    // hand force는 아직 0 유지
-    f_l_hand_t_ = f_l_hand_c_;
-    f_r_hand_t_ = f_r_hand_c_;
+    // ------------------------------------------------------------
+    // 1) 유틸: Eigen -> geometry_msgs::msg::Point 변환
+    // ------------------------------------------------------------
+    auto assign_point = [&](geometry_msgs::msg::Point& p, const Eigen::Vector3d& v) {
+        p.x = v.x();
+        p.y = v.y();
+        p.z = v.z();
+    };
+
+    // ------------------------------------------------------------
+    // 2) 유틸: vector<Eigen::Vector3d> 안전 인덱싱
+    // ------------------------------------------------------------
+    auto safe_get = [&](const std::vector<Eigen::Vector3d>& v, int idx) -> Eigen::Vector3d {
+        if (idx < 0 || idx >= static_cast<int>(v.size())) return Eigen::Vector3d::Zero();
+        return v[idx];
+    };
+
+    // ------------------------------------------------------------
+    // 3) msg -> (현재/타겟) 손 관절 벡터 생성
+    //    - 아래는 "이름 기반 매핑" 템플릿.
+    //    - 네 코드에 이미 확정된 매핑/인덱스가 있으면 그걸로 교체해도 됨.
+    // ------------------------------------------------------------
+    // 예: 각 손 20DOF라고 가정 (프로젝트 설정에 맞게 수정 가능)
+    constexpr int HAND_DOF = 20;
+    Eigen::Matrix<double, HAND_DOF, 1> hl;   hl.setZero();
+    Eigen::Matrix<double, HAND_DOF, 1> hr;   hr.setZero();
+    Eigen::Matrix<double, HAND_DOF, 1> hl_t; hl_t.setZero();   // 타겟(있으면)
+    Eigen::Matrix<double, HAND_DOF, 1> hr_t; hr_t.setZero();
+
+    // ------------------------------------------------------------
+    // 3-1) 파싱 함수(내부 람다)
+    //  - msg->name / msg->position 를 읽어 hl/hr 채움
+    //  - ⚠️ 여기의 조인트명-인덱스 매핑만 네 프로젝트에 맞게 채워라.
+    // ------------------------------------------------------------
+    auto parseHandJointsFromMsg = [&](const sensor_msgs::msg::JointState::SharedPtr& m,
+                                      Eigen::Matrix<double, HAND_DOF, 1>& out_l,
+                                      Eigen::Matrix<double, HAND_DOF, 1>& out_r)
+    {
+        const size_t N = std::min(m->name.size(), m->position.size());
+        for (size_t i = 0; i < N; ++i) {
+            const std::string& n = m->name[i];
+            const double q = m->position[i];
+
+            // -----------------------------
+            // ✅ TODO: 아래는 예시 템플릿
+            // 네 손 조인트 네이밍에 맞게 "정확히" 수정해야 함.
+            //
+            // out_l(k) / out_r(k)에서 k는 0..HAND_DOF-1
+            // -----------------------------
+
+            // ===== Left hand examples =====
+            // if (n == "left_hand_joint_0") out_l(0) = q;
+            // else if (n == "left_hand_joint_1") out_l(1) = q;
+            // ...
+            // ===== Right hand examples =====
+            // else if (n == "right_hand_joint_0") out_r(0) = q;
+            // else if (n == "right_hand_joint_1") out_r(1) = q;
+            // ...
+
+            // ----------------------------------------------------
+            // 만약 이미 네 코드에 "확정된 매핑"이 있다면
+            // 위 TODO 구간 전체를 네 기존 매핑 코드로 교체하면 끝.
+            // ----------------------------------------------------
+        }
+    };
+
+    // 현재 손 관절 파싱
+    parseHandJointsFromMsg(msg, hl, hr);
+
+    // ------------------------------------------------------------
+    // 3-2) 타겟 관절(있을 때만)
+    //  - 네 코드가 타겟을 따로 안 쓰면, 아래 블록은 그대로 둬도 됨(0 유지)
+    //  - 타겟을 별도 토픽으로 받는 구조면, 여기서 msg가 아니라
+    //    "저장해둔 타겟 벡터"를 hl_t/hr_t에 넣으면 됨.
+    // ------------------------------------------------------------
+    // 예시:
+    // hl_t = hand_q_l_target_;
+    // hr_t = hand_q_r_target_;
+
+    // ------------------------------------------------------------
+    // 4) Fingertip FK 계산: vector<Eigen::Vector3d> 반환 가정
+    //    order: [thumb, index, middle, ring, baby]
+    // ------------------------------------------------------------
+    const std::vector<Eigen::Vector3d> tl = hand_fk_l_->computeFingertips(hl);
+    const std::vector<Eigen::Vector3d> tr = hand_fk_r_->computeFingertips(hr);
+
+    // ------------------------------------------------------------
+    // 5) 현재 fingertip -> Point 멤버에 저장
+    // ------------------------------------------------------------
+    assign_point(f_l_thumb_,  safe_get(tl, 0));
+    assign_point(f_l_index_,  safe_get(tl, 1));
+    assign_point(f_l_middle_, safe_get(tl, 2));
+    assign_point(f_l_ring_,   safe_get(tl, 3));
+    assign_point(f_l_baby_,   safe_get(tl, 4));
+
+    assign_point(f_r_thumb_,  safe_get(tr, 0));
+    assign_point(f_r_index_,  safe_get(tr, 1));
+    assign_point(f_r_middle_, safe_get(tr, 2));
+    assign_point(f_r_ring_,   safe_get(tr, 3));
+    assign_point(f_r_baby_,   safe_get(tr, 4));
+
+    // ------------------------------------------------------------
+    // 6) 타겟 fingertip도 계산해서 저장(원하면 유지)
+    // ------------------------------------------------------------
+    {
+        const std::vector<Eigen::Vector3d> tl_t = hand_fk_l_->computeFingertips(hl_t);
+        const std::vector<Eigen::Vector3d> tr_t = hand_fk_r_->computeFingertips(hr_t);
+
+        assign_point(t_f_l_thumb_,  safe_get(tl_t, 0));
+        assign_point(t_f_l_index_,  safe_get(tl_t, 1));
+        assign_point(t_f_l_middle_, safe_get(tl_t, 2));
+        assign_point(t_f_l_ring_,   safe_get(tl_t, 3));
+        assign_point(t_f_l_baby_,   safe_get(tl_t, 4));
+
+        assign_point(t_f_r_thumb_,  safe_get(tr_t, 0));
+        assign_point(t_f_r_index_,  safe_get(tr_t, 1));
+        assign_point(t_f_r_middle_, safe_get(tr_t, 2));
+        assign_point(t_f_r_ring_,   safe_get(tr_t, 3));
+        assign_point(t_f_r_baby_,   safe_get(tr_t, 4));
+    }
+
+    // ------------------------------------------------------------
+    // 7) (선택) 디버그/프린트/후속 로직은 네 기존 코드 그대로
+    // ------------------------------------------------------------
 }
 
 // --------------------

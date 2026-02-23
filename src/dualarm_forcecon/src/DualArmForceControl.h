@@ -92,7 +92,8 @@ private:
     // kinematics
     std::shared_ptr<ArmForwardKinematics> arm_fk_;
     std::shared_ptr<ArmInverseKinematics> arm_ik_l_, arm_ik_r_;
-    std::shared_ptr<HandForwardKinematics> hand_fk_l_, hand_fk_r_;
+    // std::shared_ptr<HandForwardKinematics> hand_fk_l_, hand_fk_r_;
+    std::shared_ptr<dualarm_forcecon::HandForwardKinematics> hand_fk_l_, hand_fk_r_;
 
     // poses (arm world pose)
     geometry_msgs::msg::Pose current_pose_l_, current_pose_r_;
