@@ -70,7 +70,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     // Kinematics
     // -------------------------
-    arm_fk_   = std::make_shared<ArmForwardKinematics>(urdf_path_, "base_link", "left_link_6", "right_link_6");
+    arm_fk_  = std::make_shared<ArmForwardKinematics>(urdf_path_, "base_link", "left_link_6", "right_link_6");
     arm_ik_l_ = std::make_shared<ArmInverseKinematics>(urdf_path_, "base_link", "left_link_6");
     arm_ik_r_ = std::make_shared<ArmInverseKinematics>(urdf_path_, "base_link", "right_link_6");
 
@@ -84,6 +84,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         arm_ik_r_->setWorldBaseTransformXYZEulerDeg(world_base_xyz_, world_base_euler_xyz_deg_);
     }
 
+    // NOTE: canonical tip keys 유지 (link4_thumb, ...)
     std::vector<std::string> tips = {"link4_thumb", "link4_index", "link4_middle", "link4_ring", "link4_baby"};
     hand_fk_l_ = std::make_shared<HandForwardKinematics>(urdf_path_, "left_hand_base_link", tips);
     hand_fk_r_ = std::make_shared<HandForwardKinematics>(urdf_path_, "right_hand_base_link", tips);
@@ -133,7 +134,7 @@ void DualArmForceControl::ControlLoop() {
         else if (n == "right_joint_6") cmd.position.push_back(q_r_t_(5));
 
         // ----------------
-        // Hands (v8 robust parsing)
+        // Hands (robust parsing)
         // ----------------
         else {
             auto hj = dualarm_forcecon::kin::parseHandJointName(n);
@@ -142,7 +143,7 @@ void DualArmForceControl::ControlLoop() {
                 continue;
             }
 
-            const int idx = hj.finger_id * 4 + hj.joint_id;
+            const int idx = hj.finger_id * 4 + hj.joint_id; // 0..19
             if (idx < 0 || idx >= 20) {
                 cmd.position.push_back(0.0);
                 continue;
