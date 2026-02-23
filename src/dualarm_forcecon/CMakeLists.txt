@@ -63,6 +63,7 @@ ament_target_dependencies(dualarm_forcecon_node
 # Eigen
 target_link_libraries(dualarm_forcecon_node
   Eigen3::Eigen
+  orocos-kdl
 )
 
 # Pinocchio: ament에는 "pinocchio"로, 링크는 target로

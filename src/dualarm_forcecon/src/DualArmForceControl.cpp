@@ -44,8 +44,14 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     position_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
         "/isaac_joint_states", qos, std::bind(&DualArmForceControl::PositionCallback, this, std::placeholders::_1));
 
-    target_pos_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
-        "/target_cartesian_pose", qos, std::bind(&DualArmForceControl::TargetPositionCallback, this, std::placeholders::_1));
+    // ✅ v11: target_arm / target_hand 분리
+    target_arm_pos_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+        "/target_arm_cartesian_pose", qos,
+        std::bind(&DualArmForceControl::TargetArmPositionCallback, this, std::placeholders::_1));
+
+    target_hand_pos_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+        "/target_hand_fingertips", qos,
+        std::bind(&DualArmForceControl::TargetHandPositionCallback, this, std::placeholders::_1));
 
     contact_force_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/isaac_contact_states", qos, std::bind(&DualArmForceControl::ContactForceCallback, this, std::placeholders::_1));
@@ -54,6 +60,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "/forward_joint_targets", qos, std::bind(&DualArmForceControl::TargetJointCallback, this, std::placeholders::_1));
 
     joint_command_pub_ = node_->create_publisher<sensor_msgs::msg::JointState>("/isaac_joint_command", 10);
+
     mode_service_ = node_->create_service<std_srvs::srv::Trigger>(
         "/change_control_mode",
         std::bind(&DualArmForceControl::ControlModeCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -70,7 +77,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     // Kinematics
     // -------------------------
-    arm_fk_  = std::make_shared<ArmForwardKinematics>(urdf_path_, "base_link", "left_link_6", "right_link_6");
+    arm_fk_   = std::make_shared<ArmForwardKinematics>(urdf_path_, "base_link", "left_link_6", "right_link_6");
     arm_ik_l_ = std::make_shared<ArmInverseKinematics>(urdf_path_, "base_link", "left_link_6");
     arm_ik_r_ = std::make_shared<ArmInverseKinematics>(urdf_path_, "base_link", "right_link_6");
 
@@ -84,12 +91,15 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         arm_ik_r_->setWorldBaseTransformXYZEulerDeg(world_base_xyz_, world_base_euler_xyz_deg_);
     }
 
-    // NOTE: canonical tip keys 유지 (link4_thumb, ...)
+    // NOTE: canonical tip keys 유지
     std::vector<std::string> tips = {"link4_thumb", "link4_index", "link4_middle", "link4_ring", "link4_baby"};
-    // hand_fk_l_ = std::make_shared<HandForwardKinematics>(urdf_path_, "left_hand_base_link", tips);
-    // hand_fk_r_ = std::make_shared<HandForwardKinematics>(urdf_path_, "right_hand_base_link", tips);
+
     hand_fk_l_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(urdf_path_, "left_hand_base_link", tips);
     hand_fk_r_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(urdf_path_, "right_hand_base_link", tips);
+
+    // ✅ v11: Hand IK (pos-only)
+    hand_ik_l_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(urdf_path_, "left_hand_base_link", tips);
+    hand_ik_r_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(urdf_path_, "right_hand_base_link", tips);
 
     // -------------------------
     // Timers

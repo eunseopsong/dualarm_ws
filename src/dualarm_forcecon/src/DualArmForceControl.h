@@ -15,12 +15,12 @@
 #include <vector>
 #include <memory>
 #include <array>
-#include <mutex>   // ✅ PATCH: hand state 보호용
 
 // include/ kinematics
 #include "dualarm_forcecon/Kinematics/arm_forward_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/arm_inverse_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"
+#include "dualarm_forcecon/Kinematics/hand_inverse_kinematics.hpp"   // ✅ v11
 #include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"
 
 class DualArmForceControl : public std::enable_shared_from_this<DualArmForceControl> {
@@ -36,7 +36,10 @@ public:
     void ArmPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
     void HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
 
-    void TargetPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    // ✅ v11: arm/hand target 분리
+    void TargetArmPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    void TargetHandPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+
     void ContactForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetJointCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
@@ -51,7 +54,11 @@ private:
 
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_sub_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr position_sub_;
-    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_pos_sub_;
+
+    // ✅ v11
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_pos_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_pos_sub_;
+
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_joint_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr contact_force_sub_;
 
@@ -93,23 +100,22 @@ private:
     // kinematics
     std::shared_ptr<ArmForwardKinematics> arm_fk_;
     std::shared_ptr<ArmInverseKinematics> arm_ik_l_, arm_ik_r_;
-    // std::shared_ptr<HandForwardKinematics> hand_fk_l_, hand_fk_r_;
+
     std::shared_ptr<dualarm_forcecon::HandForwardKinematics> hand_fk_l_, hand_fk_r_;
+
+    // ✅ v11: hand IK
+    std::shared_ptr<dualarm_forcecon::HandInverseKinematics> hand_ik_l_, hand_ik_r_;
 
     // poses (arm world pose)
     geometry_msgs::msg::Pose current_pose_l_, current_pose_r_;
     geometry_msgs::msg::Pose target_pose_l_,  target_pose_r_;
 
-    // fingertip position
-    // ✅ v9: 이제 이 Point들은 "HAND BASE FRAME 기준 position"을 저장한다.
+    // fingertip position (HAND BASE FRAME)
     geometry_msgs::msg::Point f_l_thumb_, f_l_index_, f_l_middle_, f_l_ring_, f_l_baby_;
     geometry_msgs::msg::Point f_r_thumb_, f_r_index_, f_r_middle_, f_r_ring_, f_r_baby_;
 
     geometry_msgs::msg::Point t_f_l_thumb_, t_f_l_index_, t_f_l_middle_, t_f_l_ring_, t_f_l_baby_;
     geometry_msgs::msg::Point t_f_r_thumb_, t_f_r_index_, t_f_r_middle_, t_f_r_ring_, t_f_r_baby_;
-
-    // ✅ PATCH: hand current/target joint & tip 계산 시 thread-safety 최소 보강
-    mutable std::mutex hand_mtx_;
 };
 
 #endif

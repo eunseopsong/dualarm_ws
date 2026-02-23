@@ -31,15 +31,12 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
         else if (n=="right_joint_6") q_r_c_(5)=p;
 
         else {
-            // v10: parseHandJointName가 joint_1까지 robust하게 잡음
             auto hj = dualarm_forcecon::kin::parseHandJointName(n);
             if (!hj.ok) continue;
 
             const int idx = hj.finger_id * 4 + hj.joint_id;  // 0..19
             if (idx < 0 || idx >= 20) continue;
 
-            // ✅ PATCH: hand current joint write 보호
-            std::lock_guard<std::mutex> lk(hand_mtx_);
             if (hj.is_left)  q_l_h_c_(idx) = p;
             else             q_r_h_c_(idx) = p;
         }
@@ -65,7 +62,6 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
     if (!is_initialized_) return;
     if (!arm_fk_) return;
 
-    // current FK (arms)
     std::vector<double> jl(6), jr(6);
     for (int i=0;i<6;i++){ jl[i]=q_l_c_(i); jr[i]=q_r_c_(i); }
     current_pose_l_ = arm_fk_->getLeftFK(jl);
@@ -83,52 +79,35 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
 }
 
 // --------------------
-// HandPositionCallback
+// HandPositionCallback (v11: placeholder 제거, 실제 q_*_h_c_/q_*_h_t_ 사용)
 // --------------------
 void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
 {
     (void)msg;
     if (!is_initialized_) return;
-
-    // FK 객체 준비 확인
     if (!hand_fk_l_ || !hand_fk_r_) return;
 
-    // 유틸: Eigen -> geometry_msgs::msg::Point
     auto assign_point = [&](geometry_msgs::msg::Point& p, const Eigen::Vector3d& v) {
-        p.x = v.x();
-        p.y = v.y();
-        p.z = v.z();
+        p.x = v.x(); p.y = v.y(); p.z = v.z();
     };
-
-    // 유틸: vector<Eigen::Vector3d> 안전 인덱싱
     auto safe_get = [&](const std::vector<Eigen::Vector3d>& v, int idx) -> Eigen::Vector3d {
         if (idx < 0 || idx >= static_cast<int>(v.size())) return Eigen::Vector3d::Zero();
         return v[idx];
     };
 
-    // ------------------------------------------------------------
-    // ✅ PATCH 핵심:
-    // msg에서 다시 파싱하지 말고,
-    // 이미 콜백에서 갱신된 q_l_h_c_/q_r_h_c_ (CUR) 와 q_l_h_t_/q_r_h_t_ (TAR)를 사용한다.
-    // ------------------------------------------------------------
-    Eigen::Matrix<double,20,1> hl, hr, hl_t, hr_t;
-    {
-        std::lock_guard<std::mutex> lk(hand_mtx_);
-        for (int i = 0; i < 20; ++i) {
-            hl(i)   = q_l_h_c_(i);
-            hr(i)   = q_r_h_c_(i);
-            hl_t(i) = q_l_h_t_(i);
-            hr_t(i) = q_r_h_t_(i);
-        }
+    Eigen::VectorXd hl(20), hr(20), hl_t(20), hr_t(20);
+    for (int i = 0; i < 20; ++i) {
+        hl[i]   = q_l_h_c_(i);
+        hr[i]   = q_r_h_c_(i);
+        hl_t[i] = q_l_h_t_(i);
+        hr_t[i] = q_r_h_t_(i);
     }
 
-    // Fingertip FK 계산 (order: thumb, index, middle, ring, baby)
     const std::vector<Eigen::Vector3d> tl   = hand_fk_l_->computeFingertips(hl);
     const std::vector<Eigen::Vector3d> tr   = hand_fk_r_->computeFingertips(hr);
     const std::vector<Eigen::Vector3d> tl_t = hand_fk_l_->computeFingertips(hl_t);
     const std::vector<Eigen::Vector3d> tr_t = hand_fk_r_->computeFingertips(hr_t);
 
-    // CUR tip 저장
     assign_point(f_l_thumb_,  safe_get(tl, 0));
     assign_point(f_l_index_,  safe_get(tl, 1));
     assign_point(f_l_middle_, safe_get(tl, 2));
@@ -141,7 +120,6 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     assign_point(f_r_ring_,   safe_get(tr, 3));
     assign_point(f_r_baby_,   safe_get(tr, 4));
 
-    // TAR tip 저장 (REAL target hand joints)
     assign_point(t_f_l_thumb_,  safe_get(tl_t, 0));
     assign_point(t_f_l_index_,  safe_get(tl_t, 1));
     assign_point(t_f_l_middle_, safe_get(tl_t, 2));
@@ -155,12 +133,13 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     assign_point(t_f_r_baby_,   safe_get(tr_t, 4));
 }
 
-// --------------------
-// TargetPositionCallback (inverse)
-// --------------------
-void DualArmForceControl::TargetPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+// ============================================================================
+// v11: TargetArmPositionCallback (inverse arm IK)
+// msg: 12 = [L x y z r p y, R x y z r p y]  (euler는 기존 arm IK 규칙)
+// ============================================================================
+void DualArmForceControl::TargetArmPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
     if (current_control_mode_ != "inverse") return;
-    if (msg->data.size() < 12) return;
+    if (!msg || msg->data.size() < 12) return;
     if (!arm_ik_l_ || !arm_ik_r_) return;
 
     std::array<double,3> l_xyz{msg->data[0], msg->data[1], msg->data[2]};
@@ -202,6 +181,99 @@ void DualArmForceControl::TargetPositionCallback(const std_msgs::msg::Float64Mul
     target_pose_r_.orientation = eulToQuat(r_eul[0], r_eul[1], r_eul[2]);
 }
 
+// ============================================================================
+// v11: TargetHandPositionCallback (inverse hand IK, pos-only)
+// msg size:
+//   - 15: LEFT only  (thumb..baby each xyz)  -> right는 hold
+//   - 30: LEFT(0..14) + RIGHT(15..29)
+// order per hand = [thumb xyz, index xyz, middle xyz, ring xyz, baby xyz]
+// all positions expressed in each HAND_BASE frame (left_joint_6/right_joint_6)
+// ============================================================================
+void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+{
+    if (current_control_mode_ != "inverse") return;
+    if (!msg) return;
+    if (!hand_ik_l_ || !hand_ik_r_) return;
+
+    const size_t n = msg->data.size();
+    if (!(n == 15 || n == 30)) {
+        // 테스트 단계라 사이즈 고정으로 강하게 잡음
+        return;
+    }
+
+    auto read5 = [&](size_t offset, std::array<Eigen::Vector3d,5>& out){
+        for (int i = 0; i < 5; ++i) {
+            const double x = msg->data[offset + 3*i + 0];
+            const double y = msg->data[offset + 3*i + 1];
+            const double z = msg->data[offset + 3*i + 2];
+            out[i] = Eigen::Vector3d(x,y,z);
+        }
+    };
+
+    std::array<Eigen::Vector3d,5> tgtL, tgtR;
+    read5(0, tgtL);
+
+    const bool hasRight = (n == 30);
+    if (hasRight) read5(15, tgtR);
+
+    // ---- solve LEFT ----
+    std::vector<double> ql_init(20);
+    for (int i = 0; i < 20; ++i) ql_init[i] = q_l_h_c_(i);
+
+    std::vector<double> ql_sol;
+    dualarm_forcecon::HandInverseKinematics::Options opt;
+    opt.verbose = false;
+
+    if (hand_ik_l_->solveIKFingertips(ql_init, tgtL, ql_sol, opt) && ql_sol.size() == 20) {
+        for (int i = 0; i < 20; ++i) q_l_h_t_(i) = ql_sol[i];
+    } else {
+        // fail-safe: hold
+        for (int i = 0; i < 20; ++i) q_l_h_t_(i) = q_l_h_c_(i);
+    }
+
+    // ---- solve RIGHT (optional) ----
+    if (hasRight) {
+        std::vector<double> qr_init(20);
+        for (int i = 0; i < 20; ++i) qr_init[i] = q_r_h_c_(i);
+
+        std::vector<double> qr_sol;
+        if (hand_ik_r_->solveIKFingertips(qr_init, tgtR, qr_sol, opt) && qr_sol.size() == 20) {
+            for (int i = 0; i < 20; ++i) q_r_h_t_(i) = qr_sol[i];
+        } else {
+            for (int i = 0; i < 20; ++i) q_r_h_t_(i) = q_r_h_c_(i);
+        }
+    } else {
+        // right hold
+        for (int i = 0; i < 20; ++i) q_r_h_t_(i) = q_r_h_c_(i);
+    }
+
+    // ---- also store target fingertip points for Print (HAND BASE frame) ----
+    auto set_point = [&](geometry_msgs::msg::Point& p, const Eigen::Vector3d& v){
+        p.x = v.x(); p.y = v.y(); p.z = v.z();
+    };
+
+    set_point(t_f_l_thumb_,  tgtL[0]);
+    set_point(t_f_l_index_,  tgtL[1]);
+    set_point(t_f_l_middle_, tgtL[2]);
+    set_point(t_f_l_ring_,   tgtL[3]);
+    set_point(t_f_l_baby_,   tgtL[4]);
+
+    if (hasRight) {
+        set_point(t_f_r_thumb_,  tgtR[0]);
+        set_point(t_f_r_index_,  tgtR[1]);
+        set_point(t_f_r_middle_, tgtR[2]);
+        set_point(t_f_r_ring_,   tgtR[3]);
+        set_point(t_f_r_baby_,   tgtR[4]);
+    } else {
+        // keep current as "target" to avoid confusing print
+        t_f_r_thumb_  = f_r_thumb_;
+        t_f_r_index_  = f_r_index_;
+        t_f_r_middle_ = f_r_middle_;
+        t_f_r_ring_   = f_r_ring_;
+        t_f_r_baby_   = f_r_baby_;
+    }
+}
+
 // --------------------
 // TargetJointCallback (forward)
 // --------------------
@@ -221,15 +293,13 @@ void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiA
     }
 
     if (n >= 52) {
-        // ✅ PATCH: hand target joint write 보호
-        std::lock_guard<std::mutex> lk(hand_mtx_);
         for (int i = 0; i < 20; ++i) q_l_h_t_(i) = msg->data[12 + i];
         for (int i = 0; i < 20; ++i) q_r_h_t_(i) = msg->data[32 + i];
     }
 }
 
 // --------------------
-// ControlModeCallback
+// ControlModeCallback  (v11: inverse 진입 시 target sync)
 // --------------------
 void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                                               std::shared_ptr<std_srvs::srv::Trigger::Response> res)
@@ -239,7 +309,16 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
         (current_control_mode_=="idle") ? "forward" :
         (current_control_mode_=="forward") ? "inverse" : "idle";
 
-    if (current_control_mode_=="idle") idle_synced_=false;
+    if (current_control_mode_=="idle") {
+        idle_synced_ = false;
+    }
+
+    // ✅ inverse로 바뀌는 순간 "현재값=타겟"으로 동기화해서
+    //    hand 토픽만 테스트할 때 arm이 의도치 않게 움직이는 걸 방지
+    if (current_control_mode_=="inverse") {
+        for (int i=0;i<6;i++){ q_l_t_(i)=q_l_c_(i); q_r_t_(i)=q_r_c_(i); }
+        for (int i=0;i<20;i++){ q_l_h_t_(i)=q_l_h_c_(i); q_r_h_t_(i)=q_r_h_c_(i); }
+    }
 
     res->success=true;
     res->message="Mode: "+current_control_mode_;
@@ -258,7 +337,7 @@ void DualArmForceControl::ContactForceCallback(const std_msgs::msg::Float64Multi
 }
 
 // ============================================================================
-// PrintDualArmStates (hand points are in hand-base frames now)
+// PrintDualArmStates (기존 v10 그대로)
 // ============================================================================
 void DualArmForceControl::PrintDualArmStates() {
     if (!is_initialized_) return;
@@ -326,7 +405,7 @@ void DualArmForceControl::PrintDualArmStates() {
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v10 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v11 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
            C_MODE, current_control_mode_.c_str(), C_RESET,
            C_CUR_POS, C_RESET,
