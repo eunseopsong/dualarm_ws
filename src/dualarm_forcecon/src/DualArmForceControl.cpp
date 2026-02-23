@@ -70,7 +70,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     // Kinematics
     // -------------------------
-    arm_fk_  = std::make_shared<ArmForwardKinematics>(urdf_path_, "base_link", "left_link_6", "right_link_6");
+    arm_fk_   = std::make_shared<ArmForwardKinematics>(urdf_path_, "base_link", "left_link_6", "right_link_6");
     arm_ik_l_ = std::make_shared<ArmInverseKinematics>(urdf_path_, "base_link", "left_link_6");
     arm_ik_r_ = std::make_shared<ArmInverseKinematics>(urdf_path_, "base_link", "right_link_6");
 
@@ -142,7 +142,6 @@ void DualArmForceControl::ControlLoop() {
                 continue;
             }
 
-            // idx: 0..19 (thumb/index/middle/ring/baby each 4 dof)
             const int idx = hj.finger_id * 4 + hj.joint_id;
             if (idx < 0 || idx >= 20) {
                 cmd.position.push_back(0.0);

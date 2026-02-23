@@ -49,31 +49,24 @@ void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::S
     (void)msg;
     if (!is_initialized_) return;
 
-    // ✅ 순서 중요: arm pose 먼저 계산 -> hand combinePosePoint에 사용
+    // arm pose 먼저 -> hand에서도 mode 판단/target_pose에 의존할 수 있으니 유지
     ArmPositionCallback(msg);
     HandPositionCallback(msg);
 }
 
 // --------------------
 // ArmPositionCallback
-//  - current_pose_l_/r_ 계산
-//  - mode에 따른 target_pose_l_/r_ 유지/갱신
 // --------------------
 void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
     (void)msg;
     if (!is_initialized_) return;
     if (!arm_fk_) return;
 
-    // current FK (arms)
     std::vector<double> jl(6), jr(6);
     for (int i=0;i<6;i++){ jl[i]=q_l_c_(i); jr[i]=q_r_c_(i); }
     current_pose_l_ = arm_fk_->getLeftFK(jl);
     current_pose_r_ = arm_fk_->getRightFK(jr);
 
-    // target pose handling:
-    // - idle: target=current
-    // - forward: target=FK(q_t)
-    // - inverse: TargetPositionCallback에서 저장된 target_pose 유지
     if (current_control_mode_ == "idle") {
         target_pose_l_ = current_pose_l_;
         target_pose_r_ = current_pose_r_;
@@ -87,61 +80,62 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
 
 // --------------------
 // HandPositionCallback
-//  - fingertip world(cur/target) 계산
-//  - v7과 동일한 변수들(f_l_thumb_, t_f_l_thumb_ ...) 업데이트
-//  - Hand FK는 pinocchio 기반 HandForwardKinematics 사용
+//  ✅ v9: fingertip position을 "HAND BASE FRAME" 기준으로 저장
 // --------------------
 void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
     (void)msg;
     if (!is_initialized_) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
 
-    // ---------- helper: default point = wrist position ----------
-    auto wristPoint = [&](const geometry_msgs::msg::Pose& p)->geometry_msgs::msg::Point{
+    auto originPoint = [&]()->geometry_msgs::msg::Point{
+        geometry_msgs::msg::Point out;
+        out.x = 0.0; out.y = 0.0; out.z = 0.0;
+        return out;
+    };
+
+    auto poseToPoint = [&](const geometry_msgs::msg::Pose& p)->geometry_msgs::msg::Point{
         geometry_msgs::msg::Point out;
         out.x = p.position.x; out.y = p.position.y; out.z = p.position.z;
         return out;
     };
 
     // =======================
-    // fingertips (CURRENT)
+    // fingertips (CURRENT) in HAND BASE FRAME
     // =======================
-    f_l_thumb_  = wristPoint(current_pose_l_);
-    f_l_index_  = wristPoint(current_pose_l_);
-    f_l_middle_ = wristPoint(current_pose_l_);
-    f_l_ring_   = wristPoint(current_pose_l_);
-    f_l_baby_   = wristPoint(current_pose_l_);
+    f_l_thumb_  = originPoint();
+    f_l_index_  = originPoint();
+    f_l_middle_ = originPoint();
+    f_l_ring_   = originPoint();
+    f_l_baby_   = originPoint();
 
-    f_r_thumb_  = wristPoint(current_pose_r_);
-    f_r_index_  = wristPoint(current_pose_r_);
-    f_r_middle_ = wristPoint(current_pose_r_);
-    f_r_ring_   = wristPoint(current_pose_r_);
-    f_r_baby_   = wristPoint(current_pose_r_);
+    f_r_thumb_  = originPoint();
+    f_r_index_  = originPoint();
+    f_r_middle_ = originPoint();
+    f_r_ring_   = originPoint();
+    f_r_baby_   = originPoint();
 
     std::vector<double> hl(20), hr(20);
     for (int i=0;i<20;i++){ hl[i]=q_l_h_c_(i); hr[i]=q_r_h_c_(i); }
 
-    auto tl = hand_fk_l_->computeFingertips(hl);
+    auto tl = hand_fk_l_->computeFingertips(hl); // map<tip_name, Pose> where Pose is rel in hand base
     auto tr = hand_fk_r_->computeFingertips(hr);
 
     geometry_msgs::msg::Pose rel;
-    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "thumb", rel))  f_l_thumb_  = HandForwardKinematics::combinePosePoint(current_pose_l_, rel);
-    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "index", rel))  f_l_index_  = HandForwardKinematics::combinePosePoint(current_pose_l_, rel);
-    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "middle", rel)) f_l_middle_ = HandForwardKinematics::combinePosePoint(current_pose_l_, rel);
-    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "ring", rel))   f_l_ring_   = HandForwardKinematics::combinePosePoint(current_pose_l_, rel);
-    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "baby", rel))   f_l_baby_   = HandForwardKinematics::combinePosePoint(current_pose_l_, rel);
 
-    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "thumb", rel))  f_r_thumb_  = HandForwardKinematics::combinePosePoint(current_pose_r_, rel);
-    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "index", rel))  f_r_index_  = HandForwardKinematics::combinePosePoint(current_pose_r_, rel);
-    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "middle", rel)) f_r_middle_ = HandForwardKinematics::combinePosePoint(current_pose_r_, rel);
-    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "ring", rel))   f_r_ring_   = HandForwardKinematics::combinePosePoint(current_pose_r_, rel);
-    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "baby", rel))   f_r_baby_   = HandForwardKinematics::combinePosePoint(current_pose_r_, rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "thumb", rel))  f_l_thumb_  = poseToPoint(rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "index", rel))  f_l_index_  = poseToPoint(rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "middle", rel)) f_l_middle_ = poseToPoint(rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "ring", rel))   f_l_ring_   = poseToPoint(rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tl, "baby", rel))   f_l_baby_   = poseToPoint(rel);
+
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "thumb", rel))  f_r_thumb_  = poseToPoint(rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "index", rel))  f_r_index_  = poseToPoint(rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "middle", rel)) f_r_middle_ = poseToPoint(rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "ring", rel))   f_r_ring_   = poseToPoint(rel);
+    if (dualarm_forcecon::kin::findPoseByKeywordCI(tr, "baby", rel))   f_r_baby_   = poseToPoint(rel);
 
     // =======================
-    // fingertips (TARGET)
-    //  - idle : target = current
-    //  - forward : FK(q_h_t_) + combine with target_pose (arm target)
-    //  - inverse : keep as current (hand fixed policy)
+    // fingertips (TARGET) in HAND BASE FRAME
     // =======================
     t_f_l_thumb_  = f_l_thumb_;
     t_f_l_index_  = f_l_index_;
@@ -156,18 +150,17 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     t_f_r_baby_   = f_r_baby_;
 
     if (current_control_mode_ == "forward") {
-        // default = wrist target
-        t_f_l_thumb_  = wristPoint(target_pose_l_);
-        t_f_l_index_  = wristPoint(target_pose_l_);
-        t_f_l_middle_ = wristPoint(target_pose_l_);
-        t_f_l_ring_   = wristPoint(target_pose_l_);
-        t_f_l_baby_   = wristPoint(target_pose_l_);
+        t_f_l_thumb_  = originPoint();
+        t_f_l_index_  = originPoint();
+        t_f_l_middle_ = originPoint();
+        t_f_l_ring_   = originPoint();
+        t_f_l_baby_   = originPoint();
 
-        t_f_r_thumb_  = wristPoint(target_pose_r_);
-        t_f_r_index_  = wristPoint(target_pose_r_);
-        t_f_r_middle_ = wristPoint(target_pose_r_);
-        t_f_r_ring_   = wristPoint(target_pose_r_);
-        t_f_r_baby_   = wristPoint(target_pose_r_);
+        t_f_r_thumb_  = originPoint();
+        t_f_r_index_  = originPoint();
+        t_f_r_middle_ = originPoint();
+        t_f_r_ring_   = originPoint();
+        t_f_r_baby_   = originPoint();
 
         std::vector<double> hl_t(20), hr_t(20);
         for (int i=0;i<20;i++){ hl_t[i]=q_l_h_t_(i); hr_t[i]=q_r_h_t_(i); }
@@ -175,20 +168,20 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
         auto tl_t = hand_fk_l_->computeFingertips(hl_t);
         auto tr_t = hand_fk_r_->computeFingertips(hr_t);
 
-        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "thumb", rel))  t_f_l_thumb_  = HandForwardKinematics::combinePosePoint(target_pose_l_, rel);
-        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "index", rel))  t_f_l_index_  = HandForwardKinematics::combinePosePoint(target_pose_l_, rel);
-        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "middle", rel)) t_f_l_middle_ = HandForwardKinematics::combinePosePoint(target_pose_l_, rel);
-        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "ring", rel))   t_f_l_ring_   = HandForwardKinematics::combinePosePoint(target_pose_l_, rel);
-        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "baby", rel))   t_f_l_baby_   = HandForwardKinematics::combinePosePoint(target_pose_l_, rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "thumb", rel))  t_f_l_thumb_  = poseToPoint(rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "index", rel))  t_f_l_index_  = poseToPoint(rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "middle", rel)) t_f_l_middle_ = poseToPoint(rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "ring", rel))   t_f_l_ring_   = poseToPoint(rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tl_t, "baby", rel))   t_f_l_baby_   = poseToPoint(rel);
 
-        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "thumb", rel))  t_f_r_thumb_  = HandForwardKinematics::combinePosePoint(target_pose_r_, rel);
-        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "index", rel))  t_f_r_index_  = HandForwardKinematics::combinePosePoint(target_pose_r_, rel);
-        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "middle", rel)) t_f_r_middle_ = HandForwardKinematics::combinePosePoint(target_pose_r_, rel);
-        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "ring", rel))   t_f_r_ring_   = HandForwardKinematics::combinePosePoint(target_pose_r_, rel);
-        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "baby", rel))   t_f_r_baby_   = HandForwardKinematics::combinePosePoint(target_pose_r_, rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "thumb", rel))  t_f_r_thumb_  = poseToPoint(rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "index", rel))  t_f_r_index_  = poseToPoint(rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "middle", rel)) t_f_r_middle_ = poseToPoint(rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "ring", rel))   t_f_r_ring_   = poseToPoint(rel);
+        if (dualarm_forcecon::kin::findPoseByKeywordCI(tr_t, "baby", rel))   t_f_r_baby_   = poseToPoint(rel);
     }
 
-    // hand force도 아직은 0 유지 (나중에 토픽 연결되면 callback에서 채우면 됨)
+    // hand force (아직 0 유지)
     f_l_hand_t_ = f_l_hand_c_;
     f_r_hand_t_ = f_r_hand_c_;
 }
@@ -217,7 +210,6 @@ void DualArmForceControl::TargetPositionCallback(const std_msgs::msg::Float64Mul
         for (int i=0;i<6;i++) q_r_t_(i)=rr[i];
     }
 
-    // Print용: inverse에서는 "입력 목표"를 그대로 저장해서 보여줌
     target_pose_l_.position.x = l_xyz[0];
     target_pose_l_.position.y = l_xyz[1];
     target_pose_l_.position.z = l_xyz[2];
@@ -250,7 +242,6 @@ void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiA
 
     const size_t n = msg->data.size();
 
-    // 1) Arms (>=12)
     if (n >= 12) {
         for (int i = 0; i < 6; ++i) {
             q_l_t_(i) = msg->data[i + 0];
@@ -260,7 +251,6 @@ void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiA
         return;
     }
 
-    // 2) Hands (>=52)
     if (n >= 52) {
         for (int i = 0; i < 20; ++i) q_l_h_t_(i) = msg->data[12 + i];
         for (int i = 0; i < 20; ++i) q_r_h_t_(i) = msg->data[32 + i];
@@ -365,7 +355,7 @@ void DualArmForceControl::PrintDualArmStates() {
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v8 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v9 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
            C_MODE, current_control_mode_.c_str(), C_RESET,
            C_CUR_POS, C_RESET,
@@ -387,7 +377,7 @@ void DualArmForceControl::PrintDualArmStates() {
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 
-    printf("%s[L HAND]%s\n\n", C_TITLE, C_RESET);
+    printf("%s[L HAND]  (positions are expressed in LEFT_HAND_BASE frame)%s\n\n", C_TITLE, C_RESET);
     printFingerBlock("THMB", f_l_thumb_,   t_f_l_thumb_,   f_l_hand_c_.row(0), f_l_hand_t_.row(0));
     printFingerBlock("INDX", f_l_index_,   t_f_l_index_,   f_l_hand_c_.row(1), f_l_hand_t_.row(1));
     printFingerBlock("MIDL", f_l_middle_,  t_f_l_middle_,  f_l_hand_c_.row(2), f_l_hand_t_.row(2));
@@ -396,7 +386,7 @@ void DualArmForceControl::PrintDualArmStates() {
 
     printf("%s------------------------------------------------------------------------------------------------------------%s\n", C_DIM, C_RESET);
 
-    printf("%s[R HAND]%s\n\n", C_TITLE, C_RESET);
+    printf("%s[R HAND]  (positions are expressed in RIGHT_HAND_BASE frame)%s\n\n", C_TITLE, C_RESET);
     printFingerBlock("THMB", f_r_thumb_,   t_f_r_thumb_,   f_r_hand_c_.row(0), f_r_hand_t_.row(0));
     printFingerBlock("INDX", f_r_index_,   t_f_r_index_,   f_r_hand_c_.row(1), f_r_hand_t_.row(1));
     printFingerBlock("MIDL", f_r_middle_,  t_f_r_middle_,  f_r_hand_c_.row(2), f_r_hand_t_.row(2));

@@ -19,8 +19,8 @@
 // include/ kinematics
 #include "dualarm_forcecon/Kinematics/arm_forward_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/arm_inverse_kinematics.hpp"
-#include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"   // <-- pinocchio 버전으로 교체됨
-#include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"          // parseHandJointName()
+#include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"
+#include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"
 
 class DualArmForceControl : public std::enable_shared_from_this<DualArmForceControl> {
 public:
@@ -30,10 +30,8 @@ public:
     // Callbacks
     void JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
 
-    // ✅ 분할: wrapper(기존 subscription 유지용)
     void PositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
 
-    // ✅ 분할된 실제 처리
     void ArmPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
     void HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
 
@@ -96,15 +94,15 @@ private:
     std::shared_ptr<ArmInverseKinematics> arm_ik_l_, arm_ik_r_;
     std::shared_ptr<HandForwardKinematics> hand_fk_l_, hand_fk_r_;
 
-    // poses
+    // poses (arm world pose)
     geometry_msgs::msg::Pose current_pose_l_, current_pose_r_;
     geometry_msgs::msg::Pose target_pose_l_,  target_pose_r_;
 
-    // fingertip world (curr)
+    // fingertip position
+    // ✅ v9: 이제 이 Point들은 "HAND BASE FRAME 기준 position"을 저장한다.
     geometry_msgs::msg::Point f_l_thumb_, f_l_index_, f_l_middle_, f_l_ring_, f_l_baby_;
     geometry_msgs::msg::Point f_r_thumb_, f_r_index_, f_r_middle_, f_r_ring_, f_r_baby_;
 
-    // fingertip world (targ)
     geometry_msgs::msg::Point t_f_l_thumb_, t_f_l_index_, t_f_l_middle_, t_f_l_ring_, t_f_l_baby_;
     geometry_msgs::msg::Point t_f_r_thumb_, t_f_r_index_, t_f_r_middle_, t_f_r_ring_, t_f_r_baby_;
 };
