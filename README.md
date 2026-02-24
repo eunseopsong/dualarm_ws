@@ -1,191 +1,267 @@
-# Dual Arm & Hand Force Control System (v6)
+# dualarm_forcecon — v11
 
-Isaac Sim 환경의 Dual Arm 로봇(양팔)과 Aidin Hand(양손)를 **ROS 2**로 제어하고 상태를 모니터링하기 위한 **통합 제어 시스템**입니다.  
-v6에서는 **모니터 출력이 Isaac Sim UI와 동일한 EE Pose(특히 RPY/deg, XYZ/meter)**가 되도록 FK/IK(및 world-base z offset) 보정이 반영되어 있습니다.
+This README documents **v11** of the `dualarm_forcecon` ROS 2 package (workspace: `~/dualarm_ws`).
 
----
-
-## 🚀 주요 기능
-
-- **Real-time Monitoring (Terminal UI)**
-  - 양팔 조인트(Current/Target)
-  - End-effector Cartesian 좌표 **XYZ (m)** 및 자세 **RPY (deg)** 출력
-  - 접촉력 **Force (N)** 출력
-  - 양손(각 손가락) fingertip position 출력
-- **Forward Kinematics (FK)**
-  - KDL 기반: Joint → End-effector Pose
-  - Isaac Sim UI와 동일한 world 기준 Pose가 되도록 world-base offset 보정
-- **Inverse Kinematics (IK)**
-  - 목표 **XYZ/RPY** → Joint 산출 (KDL Newton-Raphson)
-- **Multi-Mode Control**
-  - 서비스 호출로 모드 전환: `idle → forward → inverse → idle ...`
+v11 focus:
+- Split **arm IK** and **hand IK** command topics.
+- Add **hand inverse kinematics (pos-only)** using Pinocchio forward kinematics + numerical Jacobian + Damped Least Squares (DLS).
+- Keep all v10 invariants (package tree, file roles, 52-DOF mapping, Isaac UI pose matching, print format/colors).
 
 ---
 
-## 🧩 DOF 구성
+## Git commit (one-line message)
 
-- **Arms**: 12-DOF (Left 6 + Right 6)
-- **Hands**: 40-DOF (Left 20 + Right 20, 5 fingers × 4 joints)
-- **Total**: **52-DOF**
+`v11: split arm/hand IK topics and add pos-only hand fingertip IK (DLS, Pinocchio FK)`
 
 ---
 
-## 🛠 제어 모드
+## Project / package layout (MUST NOT CHANGE)
 
-- **idle**
-  - 안전 모드. 현재 상태를 타겟으로 동기화하여 유지(드리프트 방지)
-- **forward**
-  - 관절 제어 모드
-  - 입력:
-    - **12개(팔만)**: `[L_arm(6), R_arm(6)]`
-    - **52개(팔+손)**: `[L_arm(6), R_arm(6), L_hand(20), R_hand(20)]`
-- **inverse**
-  - 좌표 제어 모드 (팔 IK)
-  - 입력 12개:
-    - `[L_xyz(3), L_rpy(3), R_xyz(3), R_rpy(3)]`
-  - **주의**: v6 기준으로 Hand는 inverse에서 별도 제어 입력이 없으면 현재값 유지(고정)
+**Do not add/remove/move files. Edit inside files only.**
+
+```
+dualarm_forcecon
+├── CMakeLists.txt
+├── package.xml
+├── include
+│   └── dualarm_forcecon
+│       └── Kinematics
+│           ├── arm_forward_kinematics.hpp
+│           ├── arm_inverse_kinematics.hpp
+│           ├── hand_forward_kinematics.hpp
+│           ├── hand_inverse_kinematics.hpp          # v11
+│           └── kinematics_utils.hpp
+└── src
+    ├── DualArmForceControl.cpp                      # constructor/destructor/ControlLoop ONLY
+    ├── DualArmForceControl.h
+    ├── node_dualarm_main.cpp                        # main() only
+    └── states_callback_dualarm.cpp                  # all callbacks + PrintDualArmStates
+```
 
 ---
 
-## 📡 통신 규격 (Topics & Service)
+## File role rules (STRICT)
 
-### Subscribed
+### `src/DualArmForceControl.cpp`
+Must contain **only**:
+- `DualArmForceControl::DualArmForceControl(...)`
+- `DualArmForceControl::~DualArmForceControl()`
+- `DualArmForceControl::ControlLoop()`
+
+No callbacks / helpers / print functions in this file.
+
+### `src/states_callback_dualarm.cpp`
+All subscriber callbacks and state updates live here, including:
+- JointState parsing (arms + hands)
+- Arm FK update (current/target)
+- Target callbacks (arm IK / hand IK / forward joints)
+- Console monitor printing
+
+### Kinematics headers
+Already validated behavior; do not break:
+- 52-DOF mapping (12 arm + 40 hand)
+- Isaac Sim UI-matching Euler / base alignment rules
+- World-base z offset default ~`0.306 m` (where applied must not be changed)
+
+---
+
+## v11 ROS interfaces
+
+### Subscriptions
 - `/isaac_joint_states` (`sensor_msgs/msg/JointState`)  
-  - Isaac Sim의 현재 Joint States
-- `/isaac_contact_states` (`std_msgs/msg/Float64MultiArray`)  
-  - Contact Force (Fx,Fy,Fz) (좌/우)
+  Used for current joints + FK updates.
 - `/forward_joint_targets` (`std_msgs/msg/Float64MultiArray`)  
-  - forward 모드 타겟 조인트 배열
-- `/target_cartesian_pose` (`std_msgs/msg/Float64MultiArray`)  
-  - inverse 모드 타겟 EE pose 배열
+  **Forward mode** command (52-DOF).
+- `/target_arm_cartesian_pose` (`std_msgs/msg/Float64MultiArray`)  
+  **Inverse mode** arm IK command (12 values).
+- `/target_hand_fingertips` (`std_msgs/msg/Float64MultiArray`)  
+  **Inverse mode** hand IK command (pos-only, 30 values).
+- `/isaac_contact_states` (`std_msgs/msg/Float64MultiArray`)  
+  External force/state (optional).
 
-### Published
+### Publication
 - `/isaac_joint_command` (`sensor_msgs/msg/JointState`)  
-  - Isaac Sim으로 전송되는 Joint Position command
+  Published joint position commands for Isaac Sim.
 
 ### Service
 - `/change_control_mode` (`std_srvs/srv/Trigger`)  
-  - 모드 순환 토글: `idle → forward → inverse → idle ...`
+  Cycles modes: `idle -> forward -> inverse -> idle`
 
 ---
 
-## 💻 실행 및 모드 전환
+## Build / run
 
-### 1) 노드 실행
-> **Node 실행 파일:** `dualarm_ctrl`
+### Build
+```bash
+cd ~/dualarm_ws
+colcon build --symlink-install
+source ~/dualarm_ws/install/setup.bash
+```
 
+(If you use alias `cb`, it should run the same build.)
+
+### Run
 ```bash
 source ~/dualarm_ws/install/setup.bash
-ros2 run dualarm_forcecon dualarm_ctrl
-```
-
-### 2) 모드 전환 (순환: idle → forward → inverse → idle ...)
-```bash
-source ~/dualarm_ws/install/setup.bash
-ros2 service call /change_control_mode std_srvs/srv/Trigger
+ros2 run dualarm_forcecon dualarm_forcecon_node
 ```
 
 ---
 
-## 🎯 예시 명령어 (복사/붙여넣기용)
+## Mode switching (service)
 
-> **단위**
-> - Joint: **rad**
-> - Position: **m**
-> - RPY: **rad** (inverse 입력은 rad 기준)
-> - Force: **N** (모니터링 출력)
+The service toggles modes in sequence:
+`idle -> forward -> inverse -> idle`
 
----
-
-### ✅ [Forward 모드] 팔(12개)만 제어
-- 토픽: `/forward_joint_targets`
-- 타입: `std_msgs/msg/Float64MultiArray`
-- 데이터 형식:
-  - `[L_joint1..6, R_joint1..6]` (총 12개)
-
+To go from `idle` to `inverse`:
 ```bash
-ros2 topic pub -1 /forward_joint_targets std_msgs/msg/Float64MultiArray \
-"{data: [0.0, -0.78, -2.0, -0.24, 1.34, 0.37,  0.0, 0.78, 2.0, 0.24, -1.33, -0.42]}"
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
 ```
 
+(Once more would return to `idle`.)
+
 ---
 
-### ✅ [Forward 모드] **팔+손(52개)** 동시에 제어 (손가락 테스트용)
-- 데이터 형식:
-  - `[0..5]=L_arm(6), [6..11]=R_arm(6), [12..31]=L_hand(20), [32..51]=R_hand(20)`
-- Hand 20개는 (엄지~새끼) × (각 4 joint) 순서로 채워짐
+## FK monitoring (no command needed)
 
-#### 1) 팔은 유지 + **양손 손가락 모두 0.5 rad로 굽히기**
+The console monitor prints:
+- Arm: CUR/TAR pose (world), forces
+- Hand: CUR/TAR fingertip positions in each HAND_BASE frame
+
+If you want to confirm active command topics:
 ```bash
-ros2 topic pub -1 /forward_joint_targets std_msgs/msg/Float64MultiArray "{data: [
-  0.0, -0.78, -2.00, -0.24,  1.34,  0.37,
-  0.0,  0.79,  2.00,  0.24, -1.33, -0.42,
-  0.5, 0.5, 0.5, 0.5,   0.5, 0.5, 0.5, 0.5,   0.5, 0.5, 0.5, 0.5,   0.5, 0.5, 0.5, 0.5,   0.5, 0.5, 0.5, 0.5,
-  0.5, 0.5, 0.5, 0.5,   0.5, 0.5, 0.5, 0.5,   0.5, 0.5, 0.5, 0.5,   0.5, 0.5, 0.5, 0.5,   0.5, 0.5, 0.5, 0.5
+ros2 topic list | grep target
+```
+
+Expected (v11):
+- `/forward_joint_targets`
+- `/target_arm_cartesian_pose`
+- `/target_hand_fingertips`
+
+---
+
+## Forward mode: joint targets (arms + hands)
+
+### Enter forward mode
+From `idle`:
+```bash
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+```
+
+### Publish 52-DOF targets (example)
+Format:
+- `[0..5]`   left arm joints (6)
+- `[6..11]`  right arm joints (6)
+- `[12..31]` left hand joints (20)
+- `[32..51]` right hand joints (20)
+
+```bash
+ros2 topic pub --once --qos-reliability best_effort /forward_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  0,0,0,0,0,0,   0,0,0,0,0,0,
+  0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+  0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0
 ]}"
 ```
 
-#### 2) 손가락 다시 펴기 (Hand 전체 0.0 rad)
+---
+
+## Inverse mode: ARM IK only (`/target_arm_cartesian_pose`)
+
+### Enter inverse mode
+From `idle`:
 ```bash
-ros2 topic pub -1 /forward_joint_targets std_msgs/msg/Float64MultiArray "{data: [
-  0.0, -0.78, -2.00, -0.24,  1.34,  0.37,
-  0.0,  0.79,  2.00,  0.24, -1.33, -0.42,
-  0.0, 0.0, 0.0, 0.0,   0.0, 0.0, 0.0, 0.0,   0.0, 0.0, 0.0, 0.0,   0.0, 0.0, 0.0, 0.0,   0.0, 0.0, 0.0, 0.0,
-  0.0, 0.0, 0.0, 0.0,   0.0, 0.0, 0.0, 0.0,   0.0, 0.0, 0.0, 0.0,   0.0, 0.0, 0.0, 0.0,   0.0, 0.0, 0.0, 0.0
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+```
+
+### Message format (12 values)
+`[Lx Ly Lz Lrx Lry Lrz  Rx Ry Rz Rrx Rry Rrz]`
+
+- Position units: meters
+- Euler units: depends on param `ik_angle_unit` (default typically `rad`)
+- Euler convention depends on `ik_euler_conv` (kept as project standard)
+
+Example:
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
+  0.5357,  0.2988,  0.4345,   2.801777, 1.301317, -1.720022,
+  0.5371, -0.2991,  0.4355,  -2.796192, 1.301143, -1.481261
+]}"
+```
+
+> Tip: If values look wrong, ensure you are in `inverse` mode and confirm `ik_angle_unit`:
+```bash
+ros2 param get /dualarm_forcecon_node ik_angle_unit
+```
+
+---
+
+## Inverse mode: HAND IK only (`/target_hand_fingertips`)
+
+Hand IK is **pos-only**. Targets are fingertip positions expressed in each HAND_BASE frame.
+
+### Message format (30 values)
+Order:
+- Left hand: THMB, INDX, MIDL, RING, BABY (each xyz)  → 15 values
+- Right hand: THMB, INDX, MIDL, RING, BABY (each xyz) → 15 values
+
+`[L_THMB(x y z), L_INDX(x y z), L_MIDL(x y z), L_RING(x y z), L_BABY(x y z),  R_THMB..., R_BABY...]`
+
+### Example: “home” (no motion) test
+Use your printed CUR fingertip values as targets:
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
+  -0.0590, -0.1297,  0.1145,
+  -0.0403, -0.0144,  0.2465,
+  -0.0135, -0.0144,  0.2640,
+   0.0133, -0.0144,  0.2465,
+   0.0401, -0.0144,  0.2310,
+
+   0.0590, -0.1297,  0.1145,
+   0.0403, -0.0144,  0.2465,
+   0.0135, -0.0144,  0.2640,
+  -0.0133, -0.0144,  0.2465,
+  -0.0401, -0.0144,  0.2310
+]}"
+```
+
+### Example: noticeable motion (finger curl / close)
+This tends to be more feasible than trying to translate all tips together.
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
+  -0.0510, -0.1128,  0.1000,
+  -0.0403, -0.0151,  0.1800,
+  -0.0135, -0.0151,  0.1900,
+   0.0133, -0.0151,  0.1800,
+   0.0401, -0.0151,  0.1700,
+
+   0.0590, -0.1297,  0.1145,
+   0.0403, -0.0144,  0.2465,
+   0.0135, -0.0144,  0.2640,
+  -0.0133, -0.0144,  0.2465,
+  -0.0401, -0.0144,  0.2310
 ]}"
 ```
 
 ---
 
-### ✅ [Inverse 모드] 팔 Cartesian Pose 제어 (12개)
-- 토픽: `/target_cartesian_pose`
-- 타입: `std_msgs/msg/Float64MultiArray`
-- 데이터 형식:
-  - `[L_x, L_y, L_z, L_roll, L_pitch, L_yaw,  R_x, R_y, R_z, R_roll, R_pitch, R_yaw]`
-- **주의**: RPY 단위는 **rad**
+## Notes / known limitations (v11)
 
-#### 1) 기본 위치로 이동
-```bash
-ros2 topic pub -1 /target_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.53, 0.30, 0.13, 1.85, 0.48, 1.61,  0.53, -0.30, 0.13, 1.85, -0.43, 1.54]}"
-```
-
-#### 2) 캔(Can) 앞으로 양손 모으기
-```bash
-ros2 topic pub -1 /target_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.60, 0.15, 0.12, 1.57, 0.00, 1.57,  0.60, -0.15, 0.12, 1.57, 0.00, 1.57]}"
-```
-
-#### 3) 높게 들기
-```bash
-ros2 topic pub -1 /target_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.55, 0.30, 0.40, 1.80, 0.50, 1.60,  0.55, -0.30, 0.40, 1.80, -0.40, 1.50]}"
-```
+- Fingertip targets are currently the **link frame origins** of `*_link4_*` (thumb/index/middle/ring/baby).
+  They are valid “EE frames” by definition, but may not coincide with the physical fingertip contact point.
+- Hand IK uses numerical Jacobian (finite difference) for robustness without requiring analytic Jacobians.
+  Expect small sensitivity differences between fingers and poses.
 
 ---
 
-## 📂 코드 구조 규칙 (v6 리팩토링 규칙)
+## Quick sanity checklist
 
-### include/ (Kinematics)
-- **Kinematics 관련 연산/유틸은 모두 include/에 존재**
-  - FK/IK 구현
-  - quaternion ↔ euler 변환(Isaac UI match)
-  - world-base transform / z-offset 보정
-  - (필요 시) pose 합성 같은 수학 유틸
-
-### src/
-- `DualArmForceControl.cpp`
-  - **생성자/소멸자 + ControlLoop()만**
-- `states_callback_dualarm.cpp`
-  - **Callback 이름이 들어간 함수들 + PrintDualArmStates()만**
-  - `PrintDualArmStates()`는 **파일 최하단**
-- `node_dualarm_main.cpp`
-  - 노드 엔트리포인트
-
----
-
-## ⚠️ 주의사항
-
-- IK가 해를 찾지 못하는 **가동 범위 밖 좌표**를 입력하면 로봇이 움직이지 않습니다.
-- 모니터에 출력되는 **Curr Pose (XYZ[m], RPY[deg])**를 확인하면서 **좌표를 조금씩 변경**하며 테스트하세요.
-- forward에서 **Hand까지 움직이려면** `/forward_joint_targets`에 **52개 배열**을 보내야 합니다.
+- Build succeeds
+- `ros2 topic list | grep target` shows:
+  - `/target_arm_cartesian_pose`
+  - `/target_hand_fingertips`
+- Inverse mode:
+  - arm-only publish moves arms
+  - hand-only publish moves fingers (best with “curl/close” targets)
+- Monitor prints keep v11 formatting and colors intact.
