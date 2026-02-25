@@ -186,8 +186,8 @@ ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
 
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.2988,  0.1332,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.2991,  0.1332,  -2.7962, 1.3011, -1.8800
+  0.5357,  0.2988,  0.1332,   2.8018, 1.57079, -1.2500,
+  0.5371, -0.2991,  0.1332,  -2.7962, 1.57079, -1.8800
 ]}"
 ```
 
@@ -229,18 +229,18 @@ ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose s
 #### (6) 핸드 힘제어 준비 자세
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5371,  0.2988,  0.00,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.2991,  0.1332,  -2.7962, 1.3011, -1.8800
+  0.5371,  0.2988,  0.00,   2.8018, 1.57079, -1.2500,
+  0.5371, -0.2991,  0.1332,  -2.7962, 1.57079, -1.8800
 ]}"
 
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.2000,  0.2988,  0.00,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.2991,  0.1332,  -2.7962, 1.3011, -1.8800
+  0.2000,  0.2988,  0.00,   2.8018, 1.57079, -1.2500,
+  0.5371, -0.2991,  0.1332,  -2.7962, 1.57079, -1.8800
 ]}"
 
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.2000,  0.2988,  -0.1800,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.2991,  0.1332,  -2.7962, 1.3011, -1.8800
+  0.2000,  0.2988,  -0.1800,   2.8018, 1.57079, -1.2500,
+  0.5371, -0.2991,  0.1332,  -2.7962, 1.57079, -1.8800
 ]}"
 
 
