@@ -225,13 +225,13 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
     if (!hand_ik_l_ || !hand_ik_r_) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
 
-    // ----------------------------
-    // 1) parse target fingertip positions (HAND_BASE frame)
-    // order: thumb,index,middle,ring,baby
-    // left 15 + right 15 = total 30
-    // ----------------------------
-    std::array<Eigen::Vector3d, 5> tgt_l;
-    std::array<Eigen::Vector3d, 5> tgt_r;
+    // ------------------------------------------------------------
+    // 1) Parse target fingertip positions (HAND_BASE frame)
+    //    order: thumb,index,middle,ring,baby
+    //    data: left(15) + right(15)
+    // ------------------------------------------------------------
+    std::array<Eigen::Vector3d,5> tgt_l;
+    std::array<Eigen::Vector3d,5> tgt_r;
 
     for (int i = 0; i < 5; ++i) {
         const int b = i * 3;
@@ -242,10 +242,10 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
         tgt_r[i] = Eigen::Vector3d(msg->data[b + 0], msg->data[b + 1], msg->data[b + 2]);
     }
 
-    // ----------------------------
-    // 2) prepare q_init20 (hand target/current as initial guess)
-    //    - q_h_t_가 이미 있으면 그걸 우선 사용 (continuity 좋음)
-    // ----------------------------
+    // ------------------------------------------------------------
+    // 2) Initial guess (prefer current target joints for continuity)
+    //    q_*_h_t_ / q_*_h_c_ are stored as 20DoF representation
+    // ------------------------------------------------------------
     auto eigen20_to_stdvec20 = [&](const Eigen::VectorXd& qh) -> std::vector<double> {
         std::vector<double> out(20, 0.0);
         const int n = std::min<int>(qh.size(), 20);
@@ -253,30 +253,43 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
         return out;
     };
 
-    std::vector<double> ql_init20 = eigen20_to_stdvec20(q_l_h_t_);
-    std::vector<double> qr_init20 = eigen20_to_stdvec20(q_r_h_t_);
-
-    // q_l_h_t_/q_r_h_t_가 아직 비어있는 초기 상태면 current를 fallback으로 사용
     auto near_zero_norm = [](const Eigen::VectorXd& v)->bool {
         if (v.size() == 0) return true;
         return (v.norm() < 1e-12);
     };
-    if (near_zero_norm(q_l_h_t_)) ql_init20 = eigen20_to_stdvec20(q_l_h_c_);
-    if (near_zero_norm(q_r_h_t_)) qr_init20 = eigen20_to_stdvec20(q_r_h_c_);
 
-    // ----------------------------
-    // 3) solve hand IK (v12 내부는 15DoF independent + mimic, 외부는 20DoF 호환)
-    // ----------------------------
+    std::vector<double> ql_init20 = near_zero_norm(q_l_h_t_) ? eigen20_to_stdvec20(q_l_h_c_)
+                                                             : eigen20_to_stdvec20(q_l_h_t_);
+    std::vector<double> qr_init20 = near_zero_norm(q_r_h_t_) ? eigen20_to_stdvec20(q_r_h_c_)
+                                                             : eigen20_to_stdvec20(q_r_h_t_);
+
+    // ------------------------------------------------------------
+    // 3) IK options (v13: independent finger IK)
+    // ------------------------------------------------------------
+    dualarm_forcecon::HandInverseKinematics::Options opt;
+    opt.max_iters       = 80;
+    opt.tol_pos_m       = 5e-4;   // 0.5 mm 수준
+    opt.lambda          = 1e-2;
+    opt.lambda_min      = 1e-5;
+    opt.lambda_max      = 1.0;
+    opt.alpha           = 0.8;
+    opt.alpha_min       = 0.05;
+    opt.max_step        = 0.12;
+    opt.mu_posture      = 1e-4;
+    opt.use_urdf_like_limits = true;
+    opt.verbose         = false;
+
+    // 기본은 모두 활성
+    opt.mask    = {{true, true, true, true, true}};
+    opt.weights = {{1.0, 1.0, 1.0, 1.0, 1.0}};
+
+    // ------------------------------------------------------------
+    // 4) Solve hand IK (returns 20DoF representation, with q4=q3 mimic)
+    // ------------------------------------------------------------
     std::vector<double> ql_sol20, qr_sol20;
+    const bool ok_l = hand_ik_l_->solveIKFingertips(ql_init20, tgt_l, ql_sol20, opt);
+    const bool ok_r = hand_ik_r_->solveIKFingertips(qr_init20, tgt_r, qr_sol20, opt);
 
-    // 옵션을 쓰고 싶으면 여기서 hand IK options 설정 가능
-    // (예: finger-wise independent는 hand_inverse_kinematics.hpp 내부 구조에서 처리)
-    bool ok_l = hand_ik_l_->solveIKFingertips(ql_init20, tgt_l, ql_sol20);
-    bool ok_r = hand_ik_r_->solveIKFingertips(qr_init20, tgt_r, qr_sol20);
-
-    // ----------------------------
-    // 4) store target hand joints (20DoF representation for compatibility)
-    // ----------------------------
     if (ok_l && ql_sol20.size() >= 20) {
         for (int i = 0; i < 20; ++i) q_l_h_t_(i) = ql_sol20[i];
     }
@@ -284,35 +297,58 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
         for (int i = 0; i < 20; ++i) q_r_h_t_(i) = qr_sol20[i];
     }
 
-    // ----------------------------
-    // 5) update target fingertip display points directly from requested targets
-    //    (모니터 TAR 라인을 "사용자가 요청한 목표"로 표시)
-    // ----------------------------
+    // ------------------------------------------------------------
+    // 5) Update target fingertip display
+    //    - 성공 시: solved joints로 FK한 실제 command tip 표시
+    //    - 실패 시: requested target 그대로 표시
+    // ------------------------------------------------------------
     auto assign_point = [&](geometry_msgs::msg::Point& p, const Eigen::Vector3d& v) {
         p.x = v.x();
         p.y = v.y();
         p.z = v.z();
     };
 
-    assign_point(t_f_l_thumb_,  tgt_l[0]);
-    assign_point(t_f_l_index_,  tgt_l[1]);
-    assign_point(t_f_l_middle_, tgt_l[2]);
-    assign_point(t_f_l_ring_,   tgt_l[3]);
-    assign_point(t_f_l_baby_,   tgt_l[4]);
+    auto safe_get = [&](const std::vector<Eigen::Vector3d>& v, int idx) -> Eigen::Vector3d {
+        if (idx < 0 || idx >= static_cast<int>(v.size())) return Eigen::Vector3d::Zero();
+        return v[idx];
+    };
 
-    assign_point(t_f_r_thumb_,  tgt_r[0]);
-    assign_point(t_f_r_index_,  tgt_r[1]);
-    assign_point(t_f_r_middle_, tgt_r[2]);
-    assign_point(t_f_r_ring_,   tgt_r[3]);
-    assign_point(t_f_r_baby_,   tgt_r[4]);
+    if (ok_l && ql_sol20.size() >= 20) {
+        const auto tl_cmd = hand_fk_l_->computeFingertips(ql_sol20);
+        assign_point(t_f_l_thumb_,  safe_get(tl_cmd, 0));
+        assign_point(t_f_l_index_,  safe_get(tl_cmd, 1));
+        assign_point(t_f_l_middle_, safe_get(tl_cmd, 2));
+        assign_point(t_f_l_ring_,   safe_get(tl_cmd, 3));
+        assign_point(t_f_l_baby_,   safe_get(tl_cmd, 4));
+    } else {
+        assign_point(t_f_l_thumb_,  tgt_l[0]);
+        assign_point(t_f_l_index_,  tgt_l[1]);
+        assign_point(t_f_l_middle_, tgt_l[2]);
+        assign_point(t_f_l_ring_,   tgt_l[3]);
+        assign_point(t_f_l_baby_,   tgt_l[4]);
+    }
 
-    // ----------------------------
-    // 6) (선택) 실패 로그
-    // ----------------------------
+    if (ok_r && qr_sol20.size() >= 20) {
+        const auto tr_cmd = hand_fk_r_->computeFingertips(qr_sol20);
+        assign_point(t_f_r_thumb_,  safe_get(tr_cmd, 0));
+        assign_point(t_f_r_index_,  safe_get(tr_cmd, 1));
+        assign_point(t_f_r_middle_, safe_get(tr_cmd, 2));
+        assign_point(t_f_r_ring_,   safe_get(tr_cmd, 3));
+        assign_point(t_f_r_baby_,   safe_get(tr_cmd, 4));
+    } else {
+        assign_point(t_f_r_thumb_,  tgt_r[0]);
+        assign_point(t_f_r_index_,  tgt_r[1]);
+        assign_point(t_f_r_middle_, tgt_r[2]);
+        assign_point(t_f_r_ring_,   tgt_r[3]);
+        assign_point(t_f_r_baby_,   tgt_r[4]);
+    }
+
+    // (선택) 로그
     if (!ok_l || !ok_r) {
-        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
-            "[HandIK] solve failed (left=%d right=%d). Target joints may be partially updated.",
-            static_cast<int>(ok_l), static_cast<int>(ok_r));
+        // 필요하면 throttle 로그로 바꿔도 됨
+        RCLCPP_WARN(node_->get_logger(),
+                    "[HandIK v13] solve result: left=%d right=%d (partial update may be applied)",
+                    static_cast<int>(ok_l), static_cast<int>(ok_r));
     }
 }
 

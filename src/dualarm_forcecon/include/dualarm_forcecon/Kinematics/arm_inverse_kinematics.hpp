@@ -16,6 +16,7 @@
 #include <iostream>
 #include <memory>
 #include <cmath>
+#include <algorithm>
 
 #include <Eigen/Dense>
 
@@ -72,7 +73,7 @@ public:
     }
 
     // ==========================
-    // v6 시그니처(7 args) - 네 include에서 이미 이 형태를 요구 중
+    // v6 시그니처(7 args)
     // ==========================
     bool solveIK(const std::vector<double>& current_q,
                  const std::array<double,3>& target_xyz,
@@ -85,7 +86,9 @@ public:
         if (!ok_ || !ik_solver_) return false;
         if (current_q.size() < num_joints_) return false;
 
+        // --------------------------
         // angle unit 처리
+        // --------------------------
         auto toRad = [&](double a)->double{
             if (angle_unit == "rad") return a;
             if (angle_unit == "deg") return a * M_PI / 180.0;
@@ -104,20 +107,41 @@ public:
         Eigen::AngleAxisd Rz(a2, Eigen::Vector3d::UnitZ());
 
         Eigen::Quaterniond q;
-        // "xyz"든 "rpy"든 여기서는 Rx*Ry*Rz로 통일 (현재 v6 UI 매칭에 사용하던 방식)
-        // 필요하면 euler_conv에 따라 바꿀 수 있음.
+        // "xyz"든 "rpy"든 현재 v6/v10 UI 매칭 방식 유지: Rx * Ry * Rz
         (void)euler_conv;
         q = Rx * Ry * Rz;
 
-        Eigen::Isometry3d E_target = Eigen::Isometry3d::Identity();
-        E_target.translation() = Eigen::Vector3d(target_xyz[0], target_xyz[1], target_xyz[2]);
-        E_target.linear() = q.toRotationMatrix();
+        // 입력 target pose (입력 frame 기준)
+        Eigen::Isometry3d E_target_input = Eigen::Isometry3d::Identity();
+        E_target_input.translation() = Eigen::Vector3d(target_xyz[0], target_xyz[1], target_xyz[2]);
+        E_target_input.linear() = q.toRotationMatrix();
 
-        // targets_frame == "world" 이면 base frame으로 변환
-        Eigen::Isometry3d E_base_target = E_target;
-        if (targets_frame == "world") {
+        // --------------------------
+        // v13 patch:
+        // targets_frame=="base"인데 실제로 world 좌표(모니터 값)를 넣는 경우 자동 보정
+        // --------------------------
+        std::string effective_frame = targets_frame;
+        if (effective_frame.empty()) effective_frame = "base";
+
+        // heuristic: 사용자가 base로 지정했지만 world pose를 넣은 경우 감지
+        if (effective_frame == "base") {
+            std::string inferred = inferLikelyFrameFromCurrentQ_(current_q, target_xyz);
+            if (inferred == "world") {
+                effective_frame = "world";
+                // 디버그 로그 (너무 시끄러우면 주석처리 가능)
+                std::cout << "[IK Info] solveIK auto-frame patch: input targets_frame='base' "
+                          << "but target looks like WORLD (monitor pose). Interpreting as world."
+                          << std::endl;
+            }
+        }
+
+        // --------------------------
+        // target를 base frame으로 변환
+        // --------------------------
+        Eigen::Isometry3d E_base_target = E_target_input;
+        if (effective_frame == "world") {
             Eigen::Isometry3d E_base_world = world_T_base_.inverse();
-            E_base_target = E_base_world * E_target;
+            E_base_target = E_base_world * E_target_input;
         }
 
         // Eigen -> KDL::Frame
@@ -142,7 +166,7 @@ public:
     }
 
     // ==========================
-    // 기존(4 args) 코드가 있어도 깨지지 않도록 호환 overload 제공
+    // 기존(4 args) 코드 호환 overload
     // ==========================
     bool solveIK(const std::vector<double>& current_q,
                  const double target_xyz[3],
@@ -164,6 +188,66 @@ private:
     std::shared_ptr<KDL::ChainIkSolverPos_NR_JL> ik_solver_;
 
     Eigen::Isometry3d world_T_base_;
+
+private:
+    // --------------------------
+    // Helpers for v13 auto-frame patch
+    // --------------------------
+    static double distance3_(const Eigen::Vector3d& a, const Eigen::Vector3d& b) {
+        return (a - b).norm();
+    }
+
+    bool currentBaseTipFromQ_(const std::vector<double>& current_q, Eigen::Isometry3d& E_base_tip) const {
+        if (!ok_ || !fk_solver_) return false;
+        if (current_q.size() < num_joints_) return false;
+
+        KDL::JntArray q(num_joints_);
+        for (unsigned int i = 0; i < num_joints_; ++i) q(i) = current_q[i];
+
+        KDL::Frame base_T_tip;
+        if (fk_solver_->JntToCart(q, base_T_tip) < 0) return false;
+
+        E_base_tip = Eigen::Isometry3d::Identity();
+        E_base_tip.translation() = Eigen::Vector3d(base_T_tip.p.x(), base_T_tip.p.y(), base_T_tip.p.z());
+
+        double qx, qy, qz, qw;
+        base_T_tip.M.GetQuaternion(qx, qy, qz, qw);
+        Eigen::Quaterniond qe(qw, qx, qy, qz);
+        E_base_tip.linear() = qe.toRotationMatrix();
+        return true;
+    }
+
+    // 현재 q 기준으로 target_xyz가 base/world 중 어느 쪽에 더 자연스러운지 추정
+    // - monitor(FK)는 world pose를 보여주므로, 그 값을 base로 잘못 넣었을 때 자동 보정
+    std::string inferLikelyFrameFromCurrentQ_(const std::vector<double>& current_q,
+                                              const std::array<double,3>& target_xyz) const
+    {
+        Eigen::Isometry3d E_base_tip;
+        if (!currentBaseTipFromQ_(current_q, E_base_tip)) {
+            return "base"; // 추정 실패 시 기존 동작 유지
+        }
+
+        const Eigen::Vector3d p_target(target_xyz[0], target_xyz[1], target_xyz[2]);
+        const Eigen::Vector3d p_base_cur  = E_base_tip.translation();
+        const Eigen::Vector3d p_world_cur = (world_T_base_ * E_base_tip).translation();
+
+        const double d_to_base  = distance3_(p_target, p_base_cur);
+        const double d_to_world = distance3_(p_target, p_world_cur);
+
+        // 강한 조건일 때만 world로 판정 (오판 방지)
+        // 예: home pose 재전송 시 d_to_world ~ 0, d_to_base ~ 0.306
+        if (d_to_world + 0.05 < d_to_base) {
+            return "world";
+        }
+
+        // 추가 안전장치: z축 차이가 world-base z offset과 유사하면 world 가능성↑
+        const double dz = std::fabs((p_target.z() - p_base_cur.z()) - world_T_base_.translation().z());
+        if (d_to_world < 0.08 && dz < 0.03) {
+            return "world";
+        }
+
+        return "base";
+    }
 };
 
 #endif
