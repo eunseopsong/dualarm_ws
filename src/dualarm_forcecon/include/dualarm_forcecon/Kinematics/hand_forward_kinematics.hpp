@@ -1,3 +1,6 @@
+#ifndef DUALARM_FORCECON_KINEMATICS_HAND_FORWARD_KINEMATICS_HPP_
+#define DUALARM_FORCECON_KINEMATICS_HAND_FORWARD_KINEMATICS_HPP_
+
 #pragma once
 
 #include <cstdio>
@@ -6,6 +9,8 @@
 #include <array>
 #include <unordered_map>
 #include <algorithm>
+#include <limits>
+#include <cmath>
 
 #include <Eigen/Dense>
 
@@ -22,25 +27,27 @@ class HandForwardKinematics {
 public:
     HandForwardKinematics() = default;
 
-    // ✅ 기존 코드 호환용 생성자 (DualArmForceControl.cpp의 make_shared 호출을 그대로 살림)
+    // 기존 코드 호환용 생성자
     HandForwardKinematics(const std::string& urdf_path,
                           const std::string& base_name_unused,
-                          const std::vector<std::string>& tips_unused) {
+                          const std::vector<std::string>& tips_unused)
+    {
         (void)tips_unused;
         std::string side = InferSideFromBaseName_(base_name_unused);
         Init(urdf_path, side);
     }
 
-    // 기존 코드가 Init(urdf, base, tips) 같은 걸로 부를 수도 있어서 오버로드 유지
+    // 기존 코드 호환용 Init
     bool Init(const std::string& urdf_path,
               const std::string& base_name_unused,
-              const std::vector<std::string>& tips_unused) {
+              const std::vector<std::string>& tips_unused)
+    {
         (void)tips_unused;
         std::string side = InferSideFromBaseName_(base_name_unused);
         return Init(urdf_path, side);
     }
 
-    // 핵심 Init: side="left"/"right"
+    // 핵심 Init: side = "left" / "right"
     bool Init(const std::string& urdf_path, const std::string& side) {
         side_ = side;
         ok_   = false;
@@ -95,8 +102,8 @@ public:
             }
         }
 
-        // ---- hand joint mapping(20dof) 구성: (thumb 1~4, index 1~4, middle 1~4, ring 1~4, baby 1~4) ----
-        BuildHandJointMapping_();
+        // ---- v12: hand joint mapping 구성 (15DoF independent + mimic q4=q3) ----
+        BuildHandJointMapping15_();
 
         // ---- Print summary ----
         std::printf("[HandFK Info] Pinocchio OK?=1 base=%s side=%s nframes=%zu\n",
@@ -112,11 +119,16 @@ public:
             }
         }
 
-        // 기존 로그처럼 매핑도 보여주고 싶으면 유지
-        std::printf("[HandFK Info] Hand joint mapping (20 dof) idx->jointName:\n");
-        for (size_t i = 0; i < hand_joint_names_.size(); ++i) {
-            const int qidx = hand_qidx_[i];
-            std::printf("  [%zu] : %s (qidx=%d)\n", i, hand_joint_names_[i].c_str(), qidx);
+        std::printf("[HandFK Info] Independent hand joint mapping (15 dof) idx->jointName:\n");
+        for (size_t i = 0; i < hand15_joint_names_.size(); ++i) {
+            const int qidx = hand15_qidx_[i];
+            std::printf("  [%zu] : %s (qidx=%d)\n", i, hand15_joint_names_[i].c_str(), qidx);
+        }
+
+        std::printf("[HandFK Info] Mimic mapping (joint4 <- joint3):\n");
+        for (int f = 0; f < 5; ++f) {
+            std::printf("  finger[%d] qidx_joint4=%d <- qidx_joint3=%d\n",
+                        f, hand_qidx_joint4_[f], hand15_qidx_[f * 3 + 2]);
         }
 
         ok_ = (tips_found == 5);
@@ -130,15 +142,20 @@ public:
     const std::string& side() const { return side_; }
     const std::string& base_ref_name() const { return base_ref_name_; }
 
-    // ==============================
-    // computeFingertips: 기존 코드 호환 핵심 API
-    // 입력: hand 20dof (thumb1-4, index1-4, middle1-4, ring1-4, baby1-4)
-    // 출력: 5개 tip position (thumb, index, middle, ring, baby) in base(left_joint_6/right_joint_6)
-    // ==============================
+    // =========================================================================
+    // computeFingertips
+    // 입력 허용:
+    //  - 15DoF: [thumb1,2,3, index1,2,3, middle1,2,3, ring1,2,3, baby1,2,3]
+    //  - 20DoF: [thumb1..4, index1..4, middle1..4, ring1..4, baby1..4]
+    //           -> v12에서는 FK 계산 시 joint4 입력값을 무시하고 joint3로 mimic 적용
+    // 출력:
+    //  - 5개 tip positions in base(left_joint_6/right_joint_6)
+    //    order = thumb, index, middle, ring, baby
+    // =========================================================================
 
-    std::vector<Eigen::Vector3d> computeFingertips(const std::vector<double>& hand20) {
-        Eigen::VectorXd v((int)hand20.size());
-        for (int i = 0; i < (int)hand20.size(); ++i) v[i] = hand20[i];
+    std::vector<Eigen::Vector3d> computeFingertips(const std::vector<double>& hand) {
+        Eigen::VectorXd v((int)hand.size());
+        for (int i = 0; i < (int)hand.size(); ++i) v[i] = hand[i];
         return computeFingertips(v);
     }
 
@@ -152,20 +169,32 @@ public:
     std::vector<Eigen::Vector3d> computeFingertips(const Eigen::VectorXd& hand_vec) {
         std::vector<Eigen::Vector3d> out;
         out.reserve(5);
+
         if (!ok_) {
             out.assign(5, Eigen::Vector3d::Zero());
             return out;
         }
 
-        // q 전체는 neutral로 만들고, hand joint 20개만 심는다.
+        // 입력을 15DoF independent로 정규화
+        Eigen::VectorXd hand15 = NormalizeToHand15_(hand_vec);
+
+        // q 전체는 neutral로 만들고, hand joints만 심는다.
         Eigen::VectorXd q = pinocchio::neutral(model_);
 
-        const int n_in = (int)hand_vec.size();
-        const int n_use = std::min(n_in, 20);
-        for (int i = 0; i < n_use; ++i) {
-            const int qidx = hand_qidx_[i];
+        // 1) independent joints (joint1~3 for each finger, total 15)
+        for (int i = 0; i < 15; ++i) {
+            const int qidx = hand15_qidx_[i];
             if (qidx >= 0 && qidx < q.size()) {
-                q[qidx] = hand_vec[i];
+                q[qidx] = hand15[i];
+            }
+        }
+
+        // 2) mimic joints: joint4 = joint3
+        for (int f = 0; f < 5; ++f) {
+            const int qidx4 = hand_qidx_joint4_[f];
+            const int src15 = f * 3 + 2; // joint3 in independent vector
+            if (qidx4 >= 0 && qidx4 < q.size()) {
+                q[qidx4] = hand15[src15];
             }
         }
 
@@ -174,7 +203,6 @@ public:
 
         const pinocchio::SE3 oMb = GetWorldToBase_();
 
-        // tip order: thumb,index,middle,ring,baby (tip_names_도 이 순서로 들어있음)
         for (size_t i = 0; i < 5; ++i) {
             if (tip_fids_[i] >= model_.frames.size()) {
                 out.emplace_back(Eigen::Vector3d::Zero());
@@ -184,6 +212,7 @@ public:
             const pinocchio::SE3 bMt  = oMb.actInv(oMt);
             out.emplace_back(bMt.translation());
         }
+
         return out;
     }
 
@@ -193,11 +222,9 @@ private:
     }
 
     std::string InferSideFromBaseName_(const std::string& base_name) const {
-        // 네 기존 호출이 "left_hand_base_link"/"right_hand_base_link"라서 여기서 side 추론
         if (base_name.find("left") != std::string::npos)  return "left";
         if (base_name.find("right") != std::string::npos) return "right";
-        // 못 찾으면 안전하게 left로(원하면 right로 바꿔도 됨)
-        return "left";
+        return "left"; // fallback
     }
 
     void ResolveBaseReference_() {
@@ -233,44 +260,98 @@ private:
                     ((side_ == "left") ? "left_link_6" : "right_link_6"));
     }
 
-    void BuildHandJointMapping_() {
-        hand_joint_names_.clear();
-        hand_joint_names_.reserve(20);
+    // v12: independent 15DoF mapping + mimic joint4 mapping
+    void BuildHandJointMapping15_() {
+        hand15_joint_names_.clear();
+        hand15_joint_names_.reserve(15);
 
-        auto push4 = [&](const std::string& prefix) {
-            hand_joint_names_.push_back(prefix + "1");
-            hand_joint_names_.push_back(prefix + "2");
-            hand_joint_names_.push_back(prefix + "3");
-            hand_joint_names_.push_back(prefix + "4");
+        hand15_qidx_.assign(15, -1);
+        hand_qidx_joint4_.assign(5, -1);
+
+        auto push3 = [&](const std::string& prefix) {
+            hand15_joint_names_.push_back(prefix + "1");
+            hand15_joint_names_.push_back(prefix + "2");
+            hand15_joint_names_.push_back(prefix + "3");
         };
 
-        // ✅ 기존 로그 스타일(thumb block -> index -> middle -> ring -> baby)로 유지
         if (side_ == "left") {
-            push4("left_thumb_joint");
-            push4("left_index_joint");
-            push4("left_middle_joint");
-            push4("left_ring_joint");
-            push4("left_baby_joint");
+            push3("left_thumb_joint");
+            push3("left_index_joint");
+            push3("left_middle_joint");
+            push3("left_ring_joint");
+            push3("left_baby_joint");
         } else {
-            push4("right_thumb_joint");
-            push4("right_index_joint");
-            push4("right_middle_joint");
-            push4("right_ring_joint");
-            push4("right_baby_joint");
+            push3("right_thumb_joint");
+            push3("right_index_joint");
+            push3("right_middle_joint");
+            push3("right_ring_joint");
+            push3("right_baby_joint");
         }
 
-        hand_qidx_.assign(20, -1);
-
-        for (int i = 0; i < 20; ++i) {
-            const std::string& jn = hand_joint_names_[i];
+        // independent qidx (15)
+        for (int i = 0; i < 15; ++i) {
+            const std::string& jn = hand15_joint_names_[i];
             const pinocchio::JointIndex jid = model_.getJointId(jn);
             if (jid == 0) {
-                hand_qidx_[i] = -1;
+                hand15_qidx_[i] = -1;
                 continue;
             }
-            // revolute는 nq=1이라 idx_q로 바로 넣으면 됨
-            hand_qidx_[i] = model_.joints[jid].idx_q();
+            hand15_qidx_[i] = model_.joints[jid].idx_q();
         }
+
+        // mimic qidx for joint4 (5)
+        for (int f = 0; f < 5; ++f) {
+            std::string j4;
+            if (side_ == "left") {
+                if      (f == 0) j4 = "left_thumb_joint4";
+                else if (f == 1) j4 = "left_index_joint4";
+                else if (f == 2) j4 = "left_middle_joint4";
+                else if (f == 3) j4 = "left_ring_joint4";
+                else             j4 = "left_baby_joint4";
+            } else {
+                if      (f == 0) j4 = "right_thumb_joint4";
+                else if (f == 1) j4 = "right_index_joint4";
+                else if (f == 2) j4 = "right_middle_joint4";
+                else if (f == 3) j4 = "right_ring_joint4";
+                else             j4 = "right_baby_joint4";
+            }
+
+            const pinocchio::JointIndex jid4 = model_.getJointId(j4);
+            if (jid4 == 0) {
+                hand_qidx_joint4_[f] = -1;
+            } else {
+                hand_qidx_joint4_[f] = model_.joints[jid4].idx_q();
+            }
+        }
+    }
+
+    // 입력 hand_vec를 independent 15DoF로 정규화
+    // - size >= 20: [f1..4]*5 로 보고 각 finger의 1,2,3만 사용 (joint4는 무시)
+    // - size >= 15: independent 15로 간주
+    // - size < 15 : 가능한 만큼만 채우고 나머지는 0
+    Eigen::VectorXd NormalizeToHand15_(const Eigen::VectorXd& hand_vec) const {
+        Eigen::VectorXd h15(15);
+        h15.setZero();
+
+        const int n = static_cast<int>(hand_vec.size());
+
+        if (n >= 20) {
+            // legacy 20DoF input -> compress to independent 15DoF
+            for (int f = 0; f < 5; ++f) {
+                const int b20 = f * 4;
+                const int b15 = f * 3;
+                h15[b15 + 0] = hand_vec[b20 + 0];
+                h15[b15 + 1] = hand_vec[b20 + 1];
+                h15[b15 + 2] = hand_vec[b20 + 2];
+                // hand_vec[b20+3] is ignored (mimic assumed)
+            }
+            return h15;
+        }
+
+        // assume 15DoF input (or partial)
+        const int n_use = std::min(n, 15);
+        for (int i = 0; i < n_use; ++i) h15[i] = hand_vec[i];
+        return h15;
     }
 
     pinocchio::SE3 GetWorldToBase_() const {
@@ -285,7 +366,7 @@ private:
     bool ok_ = false;
     std::string side_;
 
-    // base reference (forced to *_joint_6, fallback to *_link_6 frame)
+    // base reference
     std::string base_joint_name_;
     std::string base_ref_name_;
     bool base_is_joint_ = false;
@@ -296,9 +377,13 @@ private:
     std::vector<std::string> tip_names_;          // size 5
     std::vector<pinocchio::FrameIndex> tip_fids_; // size 5
 
-    // hand joint mapping
-    std::vector<std::string> hand_joint_names_; // size 20
-    std::vector<int> hand_qidx_;                // size 20 (q index)
+    // v12 hand mapping
+    // independent 15DoF: [thumb1..3, index1..3, middle1..3, ring1..3, baby1..3]
+    std::vector<std::string> hand15_joint_names_; // size 15
+    std::vector<int> hand15_qidx_;                // size 15
+    std::vector<int> hand_qidx_joint4_;           // size 5 (mimic joint4 qidx)
 };
 
 } // namespace dualarm_forcecon
+
+#endif
