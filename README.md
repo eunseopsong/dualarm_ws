@@ -229,8 +229,8 @@ ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose s
 #### (6) 핸드 힘제어 준비 자세
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5371,  0.2988,  0.00,   2.8018, 1.57079, -1.2500,
-  0.5371, -0.2991,  0.1332,  -2.7962, 1.57079, -1.8800
+  0.5371,  0.2988,  0.00,   1.0217, 1.5429, 0.5493,
+  0.5371, -0.2991,  0.1332,  -1.0020, 1.5437, 2.5726
 ]}"
 
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
