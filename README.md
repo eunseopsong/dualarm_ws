@@ -227,6 +227,15 @@ ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose s
 
 ```
 
+#### (6) 핸드 힘제어 준비 자세
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
+  0.2000,  0.2988,  0.1200,   2.8018, 1.3013, -1.2500,
+  0.5371, -0.2991,  0.4355,  -2.7962, 1.3011, -1.8800
+]}"
+
+```
+
 ### 6.2 Hand IK only 예시 (`/target_hand_fingertips`)
 
 #### (1) Home/open 기준 포즈 (기준점)
