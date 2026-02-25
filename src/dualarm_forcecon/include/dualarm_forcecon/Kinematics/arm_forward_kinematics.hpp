@@ -7,6 +7,7 @@
 #include <memory>
 #include <array>
 #include <cmath>
+#include <algorithm>
 
 #include <kdl/chain.hpp>
 #include <kdl/chainfksolverpos_recursive.hpp>
@@ -21,11 +22,19 @@
 
 class ArmForwardKinematics {
 public:
+    enum class PoseFrame {
+        BASE = 0,
+        WORLD = 1
+    };
+
+public:
     ArmForwardKinematics(const std::string& urdf_path,
                          const std::string& base_link,
                          const std::string& left_tip_link,
                          const std::string& right_tip_link)
-    : ok_(false), world_T_base_(Eigen::Isometry3d::Identity())
+    : ok_(false),
+      world_T_base_(Eigen::Isometry3d::Identity()),
+      default_output_frame_(PoseFrame::BASE)   // ★ 패치: 기본 출력은 BASE (TAR_POS와 프레임 일치)
     {
         urdf::Model robot_model;
         if (!robot_model.initFile(urdf_path)) {
@@ -52,14 +61,14 @@ public:
         right_fk_solver_ = std::make_shared<KDL::ChainFkSolverPos_recursive>(right_chain_);
 
         ok_ = true;
-        std::cout << "[FK Info] ArmForwardKinematics OK." << std::endl;
+        std::cout << "[FK Info] ArmForwardKinematics OK. default_output_frame=BASE" << std::endl;
     }
 
     bool isOk() const { return ok_; }
 
     // Isaac UI 매칭용: world<-base transform (기본 z offset 포함)
     void setWorldBaseTransformXYZEulerDeg(const std::array<double,3>& xyz,
-                                         const std::array<double,3>& euler_xyz_deg)
+                                          const std::array<double,3>& euler_xyz_deg)
     {
         world_T_base_ = Eigen::Isometry3d::Identity();
         world_T_base_.translation() = Eigen::Vector3d(xyz[0], xyz[1], xyz[2]);
@@ -68,27 +77,54 @@ public:
         Eigen::AngleAxisd Rx(e.x(), Eigen::Vector3d::UnitX());
         Eigen::AngleAxisd Ry(e.y(), Eigen::Vector3d::UnitY());
         Eigen::AngleAxisd Rz(e.z(), Eigen::Vector3d::UnitZ());
+
+        // 기존 프로젝트 convention 유지
         Eigen::Quaterniond q = Rx * Ry * Rz;
+        q.normalize();
         world_T_base_.linear() = q.toRotationMatrix();
     }
 
     const Eigen::Isometry3d& world_T_base() const { return world_T_base_; }
 
-    // ===== v6 표준 API =====
+    // -----------------------------
+    // 출력 프레임 설정 (선택사항)
+    // -----------------------------
+    void setDefaultOutputFrame(PoseFrame frame) { default_output_frame_ = frame; }
+
+    void setDefaultOutputFrameFromString(const std::string& frame_str)
+    {
+        std::string s = toLower_(frame_str);
+        if (s == "world" || s == "global") default_output_frame_ = PoseFrame::WORLD;
+        else                               default_output_frame_ = PoseFrame::BASE;
+    }
+
+    PoseFrame defaultOutputFrame() const { return default_output_frame_; }
+
+    // ===== 명시적 API (권장) =====
+    geometry_msgs::msg::Pose fkLeftBase(const std::vector<double>& joint_positions) const {
+        return computeFK(left_chain_, left_fk_solver_, joint_positions, PoseFrame::BASE);
+    }
+
+    geometry_msgs::msg::Pose fkRightBase(const std::vector<double>& joint_positions) const {
+        return computeFK(right_chain_, right_fk_solver_, joint_positions, PoseFrame::BASE);
+    }
+
     geometry_msgs::msg::Pose fkLeftWorld(const std::vector<double>& joint_positions) const {
-        return computeFKWorld(left_chain_, left_fk_solver_, joint_positions);
+        return computeFK(left_chain_, left_fk_solver_, joint_positions, PoseFrame::WORLD);
     }
 
     geometry_msgs::msg::Pose fkRightWorld(const std::vector<double>& joint_positions) const {
-        return computeFKWorld(right_chain_, right_fk_solver_, joint_positions);
+        return computeFK(right_chain_, right_fk_solver_, joint_positions, PoseFrame::WORLD);
     }
 
-    // ===== 호환 API (네 코드가 getLeftFK/getRightFK를 호출해도 OK) =====
+    // ===== 호환 API =====
+    // 기존 코드가 getLeftFK/getRightFK를 호출하면 default_output_frame_ 기준으로 반환
     geometry_msgs::msg::Pose getLeftFK(const std::vector<double>& joint_positions) const {
-        return fkLeftWorld(joint_positions);
+        return computeFK(left_chain_, left_fk_solver_, joint_positions, default_output_frame_);
     }
+
     geometry_msgs::msg::Pose getRightFK(const std::vector<double>& joint_positions) const {
-        return fkRightWorld(joint_positions);
+        return computeFK(right_chain_, right_fk_solver_, joint_positions, default_output_frame_);
     }
 
     // Isaac UI Euler XYZ(deg) 변환(Quaternion -> EulerXYZdeg)
@@ -135,12 +171,23 @@ private:
     std::shared_ptr<KDL::ChainFkSolverPos_recursive> right_fk_solver_;
 
     Eigen::Isometry3d world_T_base_;
+    PoseFrame default_output_frame_;
 
-    geometry_msgs::msg::Pose computeFKWorld(const KDL::Chain& chain,
-                                           const std::shared_ptr<KDL::ChainFkSolverPos_recursive>& solver,
-                                           const std::vector<double>& joint_positions) const
+private:
+    static std::string toLower_(std::string s)
     {
-        geometry_msgs::msg::Pose pose_msg;
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+        return s;
+    }
+
+    geometry_msgs::msg::Pose computeFK(const KDL::Chain& chain,
+                                       const std::shared_ptr<KDL::ChainFkSolverPos_recursive>& solver,
+                                       const std::vector<double>& joint_positions,
+                                       PoseFrame out_frame) const
+    {
+        geometry_msgs::msg::Pose pose_msg{};
+        pose_msg.orientation.w = 1.0;  // invalid return 대비 기본값
 
         if (!ok_ || !solver) return pose_msg;
 
@@ -166,21 +213,25 @@ private:
         double qx, qy, qz, qw;
         base_T_tip.M.GetQuaternion(qx, qy, qz, qw);
         Eigen::Quaterniond q_e(qw, qx, qy, qz);
+        q_e.normalize();
         E_base_tip.linear() = q_e.toRotationMatrix();
 
-        // world_T_tip = world_T_base * base_T_tip
-        Eigen::Isometry3d E_world_tip = world_T_base_ * E_base_tip;
+        Eigen::Isometry3d E_out = E_base_tip;
+        if (out_frame == PoseFrame::WORLD) {
+            E_out = world_T_base_ * E_base_tip;
+        }
 
-        Eigen::Quaterniond q_w(E_world_tip.linear());
+        Eigen::Quaterniond q_out(E_out.linear());
+        q_out.normalize();
 
-        pose_msg.position.x = E_world_tip.translation().x();
-        pose_msg.position.y = E_world_tip.translation().y();
-        pose_msg.position.z = E_world_tip.translation().z();
+        pose_msg.position.x = E_out.translation().x();
+        pose_msg.position.y = E_out.translation().y();
+        pose_msg.position.z = E_out.translation().z();
 
-        pose_msg.orientation.x = q_w.x();
-        pose_msg.orientation.y = q_w.y();
-        pose_msg.orientation.z = q_w.z();
-        pose_msg.orientation.w = q_w.w();
+        pose_msg.orientation.x = q_out.x();
+        pose_msg.orientation.y = q_out.y();
+        pose_msg.orientation.z = q_out.z();
+        pose_msg.orientation.w = q_out.w();
 
         return pose_msg;
     }

@@ -186,16 +186,16 @@ ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
 
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.2988,  0.4345,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.2991,  0.4355,  -2.7962, 1.3011, -1.8800
+  0.5357,  0.2988,  0.1332,   2.8018, 1.3013, -1.2500,
+  0.5371, -0.2991,  0.1332,  -2.7962, 1.3011, -1.8800
 ]}"
 ```
 
 #### (2) 양팔 앞으로 조금 뻗기 (+x)
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.6357,  0.2988,  0.4345,   2.8018, 1.3013, -1.2500,
-  0.6371, -0.2991,  0.4355,  -2.7962, 1.3011, -1.8800
+  0.6357,  0.2988,  0.1332,   2.8018, 1.3013, -1.2500,
+  0.6371, -0.2991,  0.1332,  -2.7962, 1.3011, -1.8800
 ]}"
 
 ```
@@ -203,8 +203,8 @@ ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose s
 #### (3) 양팔 위로 조금 올리기 (+z)
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.2988,  0.5345,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.2991,  0.5355,  -2.7962, 1.3011, -1.8800
+  0.5357,  0.2988,  0.1332,   2.8018, 1.3013, -1.2500,
+  0.5371, -0.2991,  0.1332,  -2.7962, 1.3011, -1.8800
 ]}"
 
 ```
@@ -212,8 +212,8 @@ ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose s
 #### (4) 양팔 벌리기 (|y| 증가)
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.400,  0.4345,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.400,  0.4355,  -2.7962, 1.3011, -1.8800
+  0.5357,  0.400,  0.1332,   2.8018, 1.3013, -1.2500,
+  0.5371, -0.400,  0.1332,  -2.7962, 1.3011, -1.8800
 ]}"
 
 ```
@@ -221,8 +221,8 @@ ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose s
 #### (5) 양팔 모으기 (|y| 감소)
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.200,  0.4345,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.200,  0.4355,  -2.7962, 1.3011, -1.8800
+  0.5357,  0.200,  0.1332,   2.8018, 1.3013, -1.2500,
+  0.5371, -0.200,  0.1332,  -2.7962, 1.3011, -1.8800
 ]}"
 
 ```
@@ -230,8 +230,8 @@ ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose s
 #### (6) 핸드 힘제어 준비 자세
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.2000,  0.2988,  0.1200,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.2991,  0.4355,  -2.7962, 1.3011, -1.8800
+  0.2000,  0.2988,  -0.1800,   2.8018, 1.3013, -1.2500,
+  0.5371, -0.2991,  0.1332,  -2.7962, 1.3011, -1.8800
 ]}"
 
 ```

@@ -161,10 +161,10 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
 }
 
 // ============================================================================
-// v13 fix: TargetArmPositionCallback (inverse arm IK)
+// v13 patched: TargetArmPositionCallback (inverse arm IK)
 // msg: 12 = [L x y z r p y, R x y z r p y]
-// - /target_arm_cartesian_pose 입력 xyz는 "world frame" 기준이라고 가정
-// - ik_targets_frame_ == "base" 인 경우 world->base z offset 보정 (z만)
+// - /target_arm_cartesian_pose 입력 xyz는 "base frame" 기준이라고 가정 (현재 패치)
+// - ik_targets_frame_ == "base" 인 경우에도 추가 z offset 보정하지 않음
 // - raw / ik-input / IK 성공여부 디버그 로그 추가
 // ============================================================================
 void DualArmForceControl::TargetArmPositionCallback(
@@ -197,11 +197,15 @@ void DualArmForceControl::TargetArmPositionCallback(
     // -----------------------------
     // [B] frame / z-offset 처리
     // -----------------------------
-    // 가정: /target_arm_cartesian_pose 입력은 world 기준
-    constexpr bool kInputPoseIsWorldFrame = true;
+    // 현재 패치:
+    // /target_arm_cartesian_pose 입력은 base frame 기준으로 사용한다.
+    // 따라서 world->base z offset 보정을 적용하지 않는다.
+    //
+    // (나중에 world frame 입력으로 다시 바꾸고 싶으면 true로 변경)
+    constexpr bool kInputPoseIsWorldFrame = false;
 
     // TODO: 네 프로젝트에서 실제 offset 멤버명이 있다면 아래 상수 대신 그 멤버로 교체
-    // 예) const double z_offset = world_base_z_offset; / base_z_offset_ / ...
+    // 예) const double z_offset = world_base_z_offset_; / base_z_offset_ / ...
     constexpr double z_offset = 0.306;  // [m] dualarm_forcecon baseline default (memory 기준)
 
     auto toLower = [](std::string s) {
@@ -219,6 +223,7 @@ void DualArmForceControl::TargetArmPositionCallback(
     bool l_offset_applied = false;
     bool r_offset_applied = false;
 
+    // 입력이 world이고 IK가 base를 기대할 때만 z offset 1회 적용
     if (kInputPoseIsWorldFrame && ik_expects_base) {
         l_xyz_ik[2] -= z_offset;
         r_xyz_ik[2] -= z_offset;

@@ -25,7 +25,10 @@ public:
     ArmInverseKinematics(const std::string& urdf_path,
                          const std::string& base_link,
                          const std::string& tip_link)
-    : ok_(false), world_T_base_(Eigen::Isometry3d::Identity())
+    : ok_(false),
+      num_joints_(0),
+      world_T_base_(Eigen::Isometry3d::Identity()),
+      auto_frame_inference_enabled_(false)   // ★ 패치: 기본은 strict mode
     {
         KDL::Tree tree;
         if (!kdl_parser::treeFromFile(urdf_path, tree)) {
@@ -41,7 +44,7 @@ public:
         fk_solver_  = std::make_shared<KDL::ChainFkSolverPos_recursive>(chain_);
         vel_solver_ = std::make_shared<KDL::ChainIkSolverVel_pinv>(chain_);
 
-        // Joint limits (기본 [-pi, pi], 필요하면 URDF에서 읽어오도록 확장 가능)
+        // Joint limits (기본 [-pi, pi], 필요하면 URDF limit 파싱으로 확장)
         KDL::JntArray q_min(num_joints_), q_max(num_joints_);
         for (unsigned int i = 0; i < num_joints_; ++i) {
             q_min(i) = -M_PI;
@@ -53,13 +56,13 @@ public:
         );
 
         ok_ = true;
-        std::cout << "[IK Info] ArmInverseKinematics OK." << std::endl;
+        std::cout << "[IK Info] ArmInverseKinematics OK. auto_frame_inference=OFF (strict)" << std::endl;
     }
 
     bool isOk() const { return ok_; }
 
     void setWorldBaseTransformXYZEulerDeg(const std::array<double,3>& xyz,
-                                         const std::array<double,3>& euler_xyz_deg)
+                                          const std::array<double,3>& euler_xyz_deg)
     {
         world_T_base_ = Eigen::Isometry3d::Identity();
         world_T_base_.translation() = Eigen::Vector3d(xyz[0], xyz[1], xyz[2]);
@@ -68,9 +71,18 @@ public:
         Eigen::AngleAxisd Rx(e.x(), Eigen::Vector3d::UnitX());
         Eigen::AngleAxisd Ry(e.y(), Eigen::Vector3d::UnitY());
         Eigen::AngleAxisd Rz(e.z(), Eigen::Vector3d::UnitZ());
+
+        // 프로젝트 convention 유지
         Eigen::Quaterniond q = Rx * Ry * Rz;
+        q.normalize();
         world_T_base_.linear() = q.toRotationMatrix();
     }
+
+    const Eigen::Isometry3d& world_T_base() const { return world_T_base_; }
+
+    // 필요할 때만 사용 (기본 OFF 유지 권장)
+    void setAutoFrameInferenceEnabled(bool en) { auto_frame_inference_enabled_ = en; }
+    bool autoFrameInferenceEnabled() const { return auto_frame_inference_enabled_; }
 
     // ==========================
     // v6 시그니처(7 args)
@@ -79,19 +91,25 @@ public:
                  const std::array<double,3>& target_xyz,
                  const std::array<double,3>& target_euler,
                  const std::string& targets_frame,   // "base" or "world"
-                 const std::string& euler_conv,      // "rpy" or "xyz"
+                 const std::string& euler_conv,      // "rpy" or "xyz" or "zyx"
                  const std::string& angle_unit,      // "rad" or "deg" or "auto"
                  std::vector<double>& result_q) const
     {
         if (!ok_ || !ik_solver_) return false;
         if (current_q.size() < num_joints_) return false;
 
+        auto frame_s = toLower_(targets_frame);
+        auto conv_s  = toLower_(euler_conv);
+        auto unit_s  = toLower_(angle_unit);
+
+        if (frame_s.empty()) frame_s = "base";
+
         // --------------------------
         // angle unit 처리
         // --------------------------
         auto toRad = [&](double a)->double{
-            if (angle_unit == "rad") return a;
-            if (angle_unit == "deg") return a * M_PI / 180.0;
+            if (unit_s == "rad") return a;
+            if (unit_s == "deg") return a * M_PI / 180.0;
             // auto: 값이 크면 deg로 판단
             if (std::fabs(a) > 3.5) return a * M_PI / 180.0;
             return a;
@@ -101,15 +119,20 @@ public:
         const double a1 = toRad(target_euler[1]);
         const double a2 = toRad(target_euler[2]);
 
-        // Rotation 만들기 (Isaac UI Euler XYZ 기준 or RPY)
+        // --------------------------
+        // Rotation 생성
+        // 주의: 프로젝트 기존 관례 유지
+        // - "zyx"/"rzyx": Rz*Ry*Rx
+        // - 그 외 ("xyz","rpy"): Rx*Ry*Rz
+        // --------------------------
         Eigen::AngleAxisd Rx(a0, Eigen::Vector3d::UnitX());
         Eigen::AngleAxisd Ry(a1, Eigen::Vector3d::UnitY());
         Eigen::AngleAxisd Rz(a2, Eigen::Vector3d::UnitZ());
 
         Eigen::Quaterniond q;
-        // "xyz"든 "rpy"든 현재 v6/v10 UI 매칭 방식 유지: Rx * Ry * Rz
-        (void)euler_conv;
-        q = Rx * Ry * Rz;
+        if (conv_s == "zyx" || conv_s == "rzyx") q = Rz * Ry * Rx;
+        else                                     q = Rx * Ry * Rz;  // default ("xyz","rpy")
+        q.normalize();
 
         // 입력 target pose (입력 frame 기준)
         Eigen::Isometry3d E_target_input = Eigen::Isometry3d::Identity();
@@ -117,21 +140,30 @@ public:
         E_target_input.linear() = q.toRotationMatrix();
 
         // --------------------------
-        // v13 patch:
-        // targets_frame=="base"인데 실제로 world 좌표(모니터 값)를 넣는 경우 자동 보정
+        // frame 해석 (strict 기본)
         // --------------------------
-        std::string effective_frame = targets_frame;
-        if (effective_frame.empty()) effective_frame = "base";
+        bool target_is_world = false;
 
-        // heuristic: 사용자가 base로 지정했지만 world pose를 넣은 경우 감지
-        if (effective_frame == "base") {
-            std::string inferred = inferLikelyFrameFromCurrentQ_(current_q, target_xyz);
+        if (frame_s == "base" || frame_s == "robot_base" || frame_s == "local") {
+            target_is_world = false;
+        } else if (frame_s == "world" || frame_s == "global") {
+            target_is_world = true;
+        } else {
+            // 알 수 없는 frame 문자열은 base로 취급 (기존 동작 최대한 유지)
+            std::cerr << "[IK Warn] Unknown targets_frame='" << targets_frame
+                      << "'. Treat as 'base'." << std::endl;
+            target_is_world = false;
+        }
+
+        // --------------------------
+        // (선택) auto-frame inference
+        // 기본 OFF. 정말 필요할 때만 켜기.
+        // --------------------------
+        if (auto_frame_inference_enabled_ && !target_is_world) {
+            const std::string inferred = inferLikelyFrameFromCurrentQ_(current_q, target_xyz);
             if (inferred == "world") {
-                effective_frame = "world";
-                // 디버그 로그 (너무 시끄러우면 주석처리 가능)
-                std::cout << "[IK Info] solveIK auto-frame patch: input targets_frame='base' "
-                          << "but target looks like WORLD (monitor pose). Interpreting as world."
-                          << std::endl;
+                target_is_world = true;
+                std::cout << "[IK Info] solveIK auto-frame inference: base -> world" << std::endl;
             }
         }
 
@@ -139,8 +171,8 @@ public:
         // target를 base frame으로 변환
         // --------------------------
         Eigen::Isometry3d E_base_target = E_target_input;
-        if (effective_frame == "world") {
-            Eigen::Isometry3d E_base_world = world_T_base_.inverse();
+        if (target_is_world) {
+            const Eigen::Isometry3d E_base_world = world_T_base_.inverse();
             E_base_target = E_base_world * E_target_input;
         }
 
@@ -151,13 +183,14 @@ public:
                                      E_base_target.translation().z());
 
         Eigen::Quaterniond qb(E_base_target.linear());
+        qb.normalize();
         target_frame.M = KDL::Rotation::Quaternion(qb.x(), qb.y(), qb.z(), qb.w());
 
         KDL::JntArray q_init(num_joints_);
         for (unsigned int i = 0; i < num_joints_; ++i) q_init(i) = current_q[i];
 
         KDL::JntArray q_out(num_joints_);
-        int ret = ik_solver_->CartToJnt(q_init, target_frame, q_out);
+        const int ret = ik_solver_->CartToJnt(q_init, target_frame, q_out);
         if (ret < 0) return false;
 
         result_q.resize(num_joints_);
@@ -188,10 +221,18 @@ private:
     std::shared_ptr<KDL::ChainIkSolverPos_NR_JL> ik_solver_;
 
     Eigen::Isometry3d world_T_base_;
+    bool auto_frame_inference_enabled_;
 
 private:
+    static std::string toLower_(std::string s)
+    {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+        return s;
+    }
+
     // --------------------------
-    // Helpers for v13 auto-frame patch
+    // Helpers for optional auto-frame inference
     // --------------------------
     static double distance3_(const Eigen::Vector3d& a, const Eigen::Vector3d& b) {
         return (a - b).norm();
@@ -213,12 +254,13 @@ private:
         double qx, qy, qz, qw;
         base_T_tip.M.GetQuaternion(qx, qy, qz, qw);
         Eigen::Quaterniond qe(qw, qx, qy, qz);
+        qe.normalize();
         E_base_tip.linear() = qe.toRotationMatrix();
         return true;
     }
 
     // 현재 q 기준으로 target_xyz가 base/world 중 어느 쪽에 더 자연스러운지 추정
-    // - monitor(FK)는 world pose를 보여주므로, 그 값을 base로 잘못 넣었을 때 자동 보정
+    // (기본 OFF)
     std::string inferLikelyFrameFromCurrentQ_(const std::vector<double>& current_q,
                                               const std::array<double,3>& target_xyz) const
     {
@@ -235,12 +277,10 @@ private:
         const double d_to_world = distance3_(p_target, p_world_cur);
 
         // 강한 조건일 때만 world로 판정 (오판 방지)
-        // 예: home pose 재전송 시 d_to_world ~ 0, d_to_base ~ 0.306
         if (d_to_world + 0.05 < d_to_base) {
             return "world";
         }
 
-        // 추가 안전장치: z축 차이가 world-base z offset과 유사하면 world 가능성↑
         const double dz = std::fabs((p_target.z() - p_base_cur.z()) - world_T_base_.translation().z());
         if (d_to_world < 0.08 && dz < 0.03) {
             return "world";
