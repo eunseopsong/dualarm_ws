@@ -161,51 +161,185 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
 }
 
 // ============================================================================
-// v11: TargetArmPositionCallback (inverse arm IK)
-// msg: 12 = [L x y z r p y, R x y z r p y]  (euler는 기존 arm IK 규칙)
+// v13 fix: TargetArmPositionCallback (inverse arm IK)
+// msg: 12 = [L x y z r p y, R x y z r p y]
+// - /target_arm_cartesian_pose 입력 xyz는 "world frame" 기준이라고 가정
+// - ik_targets_frame_ == "base" 인 경우 world->base z offset 보정 (z만)
+// - raw / ik-input / IK 성공여부 디버그 로그 추가
 // ============================================================================
-void DualArmForceControl::TargetArmPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+void DualArmForceControl::TargetArmPositionCallback(
+    const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+{
     if (current_control_mode_ != "inverse") return;
     if (!msg || msg->data.size() < 12) return;
     if (!arm_ik_l_ || !arm_ik_r_) return;
 
-    std::array<double,3> l_xyz{msg->data[0], msg->data[1], msg->data[2]};
-    std::array<double,3> l_eul{msg->data[3], msg->data[4], msg->data[5]};
-    std::array<double,3> r_xyz{msg->data[6], msg->data[7], msg->data[8]};
-    std::array<double,3> r_eul{msg->data[9], msg->data[10], msg->data[11]};
+    // ROS logger (DualArmForceControl는 Node 상속이 아닐 수 있으므로 node_ 사용)
+    auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
 
+    // -----------------------------
+    // [A] 입력 파싱 (RAW command)
+    // -----------------------------
+    std::array<double,3> l_xyz_raw{msg->data[0], msg->data[1], msg->data[2]};
+    std::array<double,3> l_eul    {msg->data[3], msg->data[4], msg->data[5]};
+    std::array<double,3> r_xyz_raw{msg->data[6], msg->data[7], msg->data[8]};
+    std::array<double,3> r_eul    {msg->data[9], msg->data[10], msg->data[11]};
+
+    auto finite3 = [](const std::array<double,3>& v) {
+        return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+    };
+
+    if (!finite3(l_xyz_raw) || !finite3(l_eul) || !finite3(r_xyz_raw) || !finite3(r_eul)) {
+        RCLCPP_WARN(logger, "[TargetArmPositionCallback] Non-finite input detected. Ignore.");
+        return;
+    }
+
+    // -----------------------------
+    // [B] frame / z-offset 처리
+    // -----------------------------
+    // 가정: /target_arm_cartesian_pose 입력은 world 기준
+    constexpr bool kInputPoseIsWorldFrame = true;
+
+    // TODO: 네 프로젝트에서 실제 offset 멤버명이 있다면 아래 상수 대신 그 멤버로 교체
+    // 예) const double z_offset = world_base_z_offset; / base_z_offset_ / ...
+    constexpr double z_offset = 0.306;  // [m] dualarm_forcecon baseline default (memory 기준)
+
+    auto toLower = [](std::string s) {
+        for (auto &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+
+    const std::string ik_frame = toLower(ik_targets_frame_);
+    const bool ik_expects_base =
+        (ik_frame == "base" || ik_frame == "robot_base" || ik_frame == "local");
+
+    std::array<double,3> l_xyz_ik = l_xyz_raw;
+    std::array<double,3> r_xyz_ik = r_xyz_raw;
+
+    bool l_offset_applied = false;
+    bool r_offset_applied = false;
+
+    if (kInputPoseIsWorldFrame && ik_expects_base) {
+        l_xyz_ik[2] -= z_offset;
+        r_xyz_ik[2] -= z_offset;
+        l_offset_applied = true;
+        r_offset_applied = true;
+    }
+
+    // -----------------------------
+    // [C] 현재 joint seed 준비
+    // -----------------------------
     std::vector<double> ql(6), qr(6);
-    for (int i=0;i<6;i++){ ql[i]=q_l_c_(i); qr[i]=q_r_c_(i); }
+    for (int i = 0; i < 6; ++i) {
+        ql[i] = q_l_c_(i);
+        qr[i] = q_r_c_(i);
+    }
 
+    // -----------------------------
+    // [D] IK solve
+    // -----------------------------
     std::vector<double> rl, rr;
-    if (arm_ik_l_->solveIK(ql, l_xyz, l_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rl) && rl.size()>=6) {
-        for (int i=0;i<6;i++) q_l_t_(i)=rl[i];
+    bool l_ok = arm_ik_l_->solveIK(
+        ql, l_xyz_ik, l_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rl);
+
+    bool r_ok = arm_ik_r_->solveIK(
+        qr, r_xyz_ik, r_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rr);
+
+    if (l_ok && rl.size() >= 6) {
+        for (int i = 0; i < 6; ++i) q_l_t_(i) = rl[i];
+    } else {
+        RCLCPP_WARN(logger, "[IK][L] solveIK failed or invalid output size. ok=%d size=%zu",
+                    static_cast<int>(l_ok), rl.size());
     }
-    if (arm_ik_r_->solveIK(qr, r_xyz, r_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rr) && rr.size()>=6) {
-        for (int i=0;i<6;i++) q_r_t_(i)=rr[i];
+
+    if (r_ok && rr.size() >= 6) {
+        for (int i = 0; i < 6; ++i) q_r_t_(i) = rr[i];
+    } else {
+        RCLCPP_WARN(logger, "[IK][R] solveIK failed or invalid output size. ok=%d size=%zu",
+                    static_cast<int>(r_ok), rr.size());
     }
 
-    target_pose_l_.position.x = l_xyz[0];
-    target_pose_l_.position.y = l_xyz[1];
-    target_pose_l_.position.z = l_xyz[2];
+    // -----------------------------
+    // [E] 모니터용 target pose 저장 (RAW 입력값 기준)
+    //     => UI에서 사용자가 보낸 값 그대로 표시되게 유지
+    // -----------------------------
+    target_pose_l_.position.x = l_xyz_raw[0];
+    target_pose_l_.position.y = l_xyz_raw[1];
+    target_pose_l_.position.z = l_xyz_raw[2];
 
-    target_pose_r_.position.x = r_xyz[0];
-    target_pose_r_.position.y = r_xyz[1];
-    target_pose_r_.position.z = r_xyz[2];
+    target_pose_r_.position.x = r_xyz_raw[0];
+    target_pose_r_.position.y = r_xyz_raw[1];
+    target_pose_r_.position.z = r_xyz_raw[2];
 
-    auto eulToQuat = [&](double ex, double ey, double ez){
+    // Euler -> Quaternion (표시용; IK 규칙과 최대한 맞춤)
+    auto eulToQuat = [&](double ex, double ey, double ez) {
         double a0 = ex, a1 = ey, a2 = ez;
-        if (ik_angle_unit_ == "deg") { a0*=M_PI/180.0; a1*=M_PI/180.0; a2*=M_PI/180.0; }
+        if (ik_angle_unit_ == "deg") {
+            a0 *= M_PI / 180.0;
+            a1 *= M_PI / 180.0;
+            a2 *= M_PI / 180.0;
+        }
+
         Eigen::AngleAxisd Rx(a0, Eigen::Vector3d::UnitX());
         Eigen::AngleAxisd Ry(a1, Eigen::Vector3d::UnitY());
         Eigen::AngleAxisd Rz(a2, Eigen::Vector3d::UnitZ());
-        Eigen::Quaterniond q = Rx*Ry*Rz;
+
+        Eigen::Quaterniond q;
+        const std::string conv = toLower(ik_euler_conv_);
+
+        if (conv == "zyx" || conv == "rzyx") q = Rz * Ry * Rx;
+        else                                 q = Rx * Ry * Rz;  // default
+
         geometry_msgs::msg::Quaternion qq;
-        qq.x=q.x(); qq.y=q.y(); qq.z=q.z(); qq.w=q.w();
+        qq.x = q.x();
+        qq.y = q.y();
+        qq.z = q.z();
+        qq.w = q.w();
         return qq;
     };
+
     target_pose_l_.orientation = eulToQuat(l_eul[0], l_eul[1], l_eul[2]);
     target_pose_r_.orientation = eulToQuat(r_eul[0], r_eul[1], r_eul[2]);
+
+    // -----------------------------
+    // [F] 디버그 로그 (과도한 스팸 방지: 20회당 1회)
+    // -----------------------------
+    static int dbg_decim = 0;
+    const bool do_dbg = ((dbg_decim++ % 20) == 0);
+
+    if (do_dbg) {
+        RCLCPP_INFO(logger,
+            "[TargetArmPosCb] mode=inverse frame=%s euler_conv=%s angle_unit=%s z_offset=%.4f input_is_world=%d",
+            ik_targets_frame_.c_str(), ik_euler_conv_.c_str(), ik_angle_unit_.c_str(),
+            z_offset, static_cast<int>(kInputPoseIsWorldFrame));
+
+        RCLCPP_INFO(logger,
+            "[L] raw xyz=(%.4f %.4f %.4f) -> ik xyz=(%.4f %.4f %.4f) offset=%d | eul=(%.3f %.3f %.3f) | ok=%d",
+            l_xyz_raw[0], l_xyz_raw[1], l_xyz_raw[2],
+            l_xyz_ik[0],  l_xyz_ik[1],  l_xyz_ik[2],
+            static_cast<int>(l_offset_applied),
+            l_eul[0], l_eul[1], l_eul[2],
+            static_cast<int>(l_ok && rl.size() >= 6));
+
+        RCLCPP_INFO(logger,
+            "[R] raw xyz=(%.4f %.4f %.4f) -> ik xyz=(%.4f %.4f %.4f) offset=%d | eul=(%.3f %.3f %.3f) | ok=%d",
+            r_xyz_raw[0], r_xyz_raw[1], r_xyz_raw[2],
+            r_xyz_ik[0],  r_xyz_ik[1],  r_xyz_ik[2],
+            static_cast<int>(r_offset_applied),
+            r_eul[0], r_eul[1], r_eul[2],
+            static_cast<int>(r_ok && rr.size() >= 6));
+
+        if (l_ok && rl.size() >= 6) {
+            RCLCPP_INFO(logger,
+                "[IK Q L] q_t=[%.3f %.3f %.3f %.3f %.3f %.3f]",
+                q_l_t_(0), q_l_t_(1), q_l_t_(2), q_l_t_(3), q_l_t_(4), q_l_t_(5));
+        }
+        if (r_ok && rr.size() >= 6) {
+            RCLCPP_INFO(logger,
+                "[IK Q R] q_t=[%.3f %.3f %.3f %.3f %.3f %.3f]",
+                q_r_t_(0), q_r_t_(1), q_r_t_(2), q_r_t_(3), q_r_t_(4), q_r_t_(5));
+        }
+    }
 }
 
 // ============================================================================
