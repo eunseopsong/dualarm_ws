@@ -186,68 +186,46 @@ ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
 
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.2988,  0.4345,   2.8018, 1.3013, -1.7200,
-  0.5371, -0.2991,  0.4355,  -2.7962, 1.3011, -1.4813
+  0.5357,  0.2988,  0.4345,   2.8018, 1.3013, -1.2500,
+  0.5371, -0.2991,  0.4355,  -2.7962, 1.3011, -1.8800
 ]}"
 ```
 
 #### (2) 양팔 앞으로 조금 뻗기 (+x)
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5650,  0.2988,  0.4345,   2.8018, 1.3013, -1.7200,
-  0.5650, -0.2991,  0.4355,  -2.7962, 1.3011, -1.4813
+  0.6357,  0.2988,  0.4345,   2.8018, 1.3013, -1.2500,
+  0.6371, -0.2991,  0.4355,  -2.7962, 1.3011, -1.8800
 ]}"
+
 ```
 
 #### (3) 양팔 위로 조금 올리기 (+z)
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.2988,  0.4650,   2.8018, 1.3013, -1.7200,
-  0.5371, -0.2991,  0.4660,  -2.7962, 1.3011, -1.4813
+  0.5357,  0.2988,  0.5345,   2.8018, 1.3013, -1.2500,
+  0.5371, -0.2991,  0.5355,  -2.7962, 1.3011, -1.8800
 ]}"
+
 ```
 
 #### (4) 양팔 벌리기 (|y| 증가)
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.3400,  0.4345,   2.8018, 1.3013, -1.7200,
-  0.5371, -0.3400,  0.4355,  -2.7962, 1.3011, -1.4813
+  0.5357,  0.400,  0.4345,   2.8018, 1.3013, -1.2500,
+  0.5371, -0.400,  0.4355,  -2.7962, 1.3011, -1.8800
 ]}"
+
 ```
 
 #### (5) 양팔 모으기 (|y| 감소)
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.2400,  0.4345,   2.8018, 1.3013, -1.7200,
-  0.5371, -0.2400,  0.4355,  -2.7962, 1.3011, -1.4813
+  0.5357,  0.200,  0.4345,   2.8018, 1.3013, -1.2500,
+  0.5371, -0.200,  0.4355,  -2.7962, 1.3011, -1.8800
 ]}"
-```
 
-#### (6) 비대칭 자세 (왼팔 위 / 오른팔 아래)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5450,  0.3000,  0.4850,   2.8018, 1.3013, -1.7200,
-  0.5450, -0.3000,  0.3950,  -2.7962, 1.3011, -1.4813
-]}"
 ```
-
-#### (7) 손목 Euler만 약간 변경 (회전 테스트)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.2988,  0.4345,   2.9018, 1.2013, -1.6200,
-  0.5371, -0.2991,  0.4355,  -2.8962, 1.2011, -1.5813
-]}"
-```
-
-#### (8) 왼팔만 이동, 오른팔 유지
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5750,  0.3150,  0.4500,   2.8018, 1.3013, -1.7200,
-  0.5371, -0.2991,  0.4355,  -2.7962, 1.3011, -1.4813
-]}"
-```
-
----
 
 ### 6.2 Hand IK only 예시 (`/target_hand_fingertips`)
 
