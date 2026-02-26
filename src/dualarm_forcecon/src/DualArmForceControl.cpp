@@ -55,6 +55,11 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "/target_hand_fingertips", qos,
         std::bind(&DualArmForceControl::TargetHandPositionCallback, this, std::placeholders::_1));
 
+    // ✅ v15: Delta Cartesian target (inverse mode)
+    delta_arm_pos_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+        "/delta_arm_cartesian_pose", qos,
+        std::bind(&DualArmForceControl::DeltaArmPositionCallback, this, std::placeholders::_1));
+
     // ✅ Forward joint targets (split)
     target_arm_joint_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/forward_arm_joint_targets", qos,
