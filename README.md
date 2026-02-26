@@ -1,50 +1,69 @@
-# dualarm_forcecon v13 README
+# dualarm_forcecon v14 README
 
-## 0) 버전 요약
-
-- **패키지명**: `dualarm_forcecon`
-- **워크스페이스**: `~/dualarm_ws`
-- **현재 버전**: **v13**
-
-### v13 핵심 변경사항 (v12 대비)
-
-1. **Hand IK를 15DoF 구조로 재구성**
-   - 손가락당 독립 변수 3개(`joint1~joint3`) 사용
-   - `joint4`는 **mimic(`joint4 = joint3`)**로 가정
-   - 내부 IK는 15DoF로 풀고, 출력/명령은 20DoF 표현으로 확장하여 사용
-
-2. **모든 손가락 독립 IK (finger-wise independent IK)**
-   - 엄지/검지/중지/약지/소지 각각 독립적으로 position-only IK 수행
-   - 특정 fingertip target 변경 시 다른 손가락 동반 움직임 최소화
-
-3. **Arm IK auto-frame patch 적용 (world/base 혼동 자동 보정)**
-   - 모니터에 표시되는 Arm pose(FK)는 world 좌표계 기준
-   - 사용자가 모니터 값을 그대로 `/target_arm_cartesian_pose`에 넣었을 때,
-     기존 `ik_targets_frame=base` 설정 때문에 z-offset(0.306m) 오차가 발생하던 문제 수정
-   - 현재 관절값 기준으로 target이 `world`처럼 보이면 IK 내부에서 자동으로 world→base 변환
-   - 결과적으로 **home pose 유지 명령**이 정상 동작
-
-4. **v12 유지 사항 포함**
-   - Hand FK는 15DoF 모델링 기반 + `joint4` mimic 가정
-   - Forward target 입력에서 hand 쪽은 **42값 포맷(arm12 + hand30)** 지원
+> **Version**: v14  
+> **Target**: `dualarm_forcecon` (ROS 2 Humble / Isaac Sim 연동)  
+> **핵심 변경점**:  
+> - **Arm / Hand forward joint command 분리** (`TargetArmJointsCallback`, `TargetHandJointsCallback`)  
+> - **Arm FK/IK frame 정합성 개선** (target z vs current z mismatch 완화)  
+> - **Arm IK strict frame 처리** (의도치 않은 world/base 자동 해석 최소화)  
+> - v13 기능(dual arm + hand monitor, inverse arm/hand, forward 12/42/52 포맷 호환)을 유지하면서 v14 확장
 
 ---
 
-## 1) 패키지 구조 (고정)
+## 0) v14에서 달라진 점 (요약)
 
-> 아래 구조는 유지 (추가/삭제/이동 금지 원칙)
+### ✅ v14 핵심 업데이트
+1. **Forward 모드에서 Arm / Hand를 따로 움직일 수 있도록 콜백 분리**
+   - `TargetArmJointsCallback` (arm 전용)
+   - `TargetHandJointsCallback` (hand 전용)
+   - 따라서 **팔 자세 유지 + 손만 변경**, 혹은 **손 유지 + 팔만 변경**을 더 명확하게 제어 가능
 
-```text
-~/dualarm_ws/src/dualarm_forcecon
+2. **Arm FK/IK frame/z-offset 정합성 개선**
+   - `TargetArmPositionCallback`에서 z-offset 이슈로 인해 발생하던 `target z` vs `curr z` 혼선을 줄이도록 패치
+   - `arm_forward_kinematics.hpp`, `arm_inverse_kinematics.hpp`도 함께 정합성 패치 적용
+   - v14에서는 **입력 좌표 프레임(base/world)을 더 엄격하게 유지**하는 방향
+
+3. **기존 통합 forward 토픽 호환 유지(권장: 분리 토픽 사용)**
+   - `/forward_joint_targets` (12 / 42 / 52) 사용 가능
+   - 하지만 v14부터는 **분리 토픽 사용**이 디버깅/운용에 더 안정적
+
+---
+
+## 1) 패키지 개요
+
+`dualarm_forcecon`는 다음 기능을 수행합니다.
+
+- **Dual Arm + Dual Hand 상태 모니터링**
+  - 양팔 TCP pose (position + orientation)
+  - 양손 fingertip position (thumb/index/middle/ring/baby)
+  - arm force / hand finger force 모니터링
+- **Forward control**
+  - arm joint target 명령
+  - hand joint target 명령
+  - arm+hand 통합 joint target 명령(legacy 호환)
+- **Inverse control**
+  - arm Cartesian target (양팔 12 values)
+  - hand fingertip target (양손 30 values)
+- **모드 전환 서비스**
+  - idle / forward / inverse 순환(기존 Trigger 기반)
+
+---
+
+## 2) v14 기준 패키지 구조 (변경 금지 규칙 포함)
+
+> 아래 트리와 파일 역할 분리는 v14 기준으로 유지 권장
+
+```bash
+dualarm_forcecon/
 ├── CMakeLists.txt
 ├── package.xml
 ├── include/
 │   └── dualarm_forcecon/
 │       └── Kinematics/
 │           ├── arm_forward_kinematics.hpp
-│           ├── arm_inverse_kinematics.hpp        # v13 auto-frame patch 반영
-│           ├── hand_forward_kinematics.hpp       # v12 15DoF + mimic FK 구조
-│           ├── hand_inverse_kinematics.hpp       # v13 15DoF independent finger IK
+│           ├── arm_inverse_kinematics.hpp
+│           ├── hand_forward_kinematics.hpp
+│           ├── hand_inverse_kinematics.hpp
 │           └── kinematics_utils.hpp
 └── src/
     ├── DualArmForceControl.cpp
@@ -53,202 +72,234 @@
     └── states_callback_dualarm.cpp
 ```
 
+### 파일 역할 분리 규칙 (중요)
+- `DualArmForceControl.cpp`
+  - **생성자 / 소멸자 / `ControlLoop()` 중심**
+- `states_callback_dualarm.cpp`
+  - **모든 callback 함수들**
+  - 예: `JointsCallback`, `TargetArmPositionCallback`, `TargetHandPositionCallback`,
+    `TargetArmJointsCallback`, `TargetHandJointsCallback`, `TargetJointCallback`, ...
+- `DualArmForceControl.h`
+  - 클래스 선언 / ROS 인터페이스 / 상태 변수 / kinematics 객체 선언
+- `node_dualarm_main.cpp`
+  - 노드 실행 엔트리포인트
+
 ---
 
-## 2) 빌드 / 실행
+## 3) v14 주요 기능 상세
 
-### 빌드
+### 3.1 Control Modes
+- `idle`
+  - 현재 joint state를 target으로 동기화
+- `forward`
+  - joint target 기반 제어 (arm/hand 분리 가능)
+- `inverse`
+  - arm Cartesian IK + hand fingertip IK 기반 제어
+
+> `Trigger` 서비스 기반으로 모드를 순환하는 기존 방식 유지
+
+---
+
+### 3.2 Arm Kinematics (v14)
+- **ArmForwardKinematics**
+  - dual arm FK (left/right)
+  - world-base transform 설정 가능
+  - 모니터 출력용 pose 계산
+- **ArmInverseKinematics**
+  - KDL 기반 IK
+  - `targets_frame`, `euler_conv`, `angle_unit` 처리
+  - v14에서 frame 혼선 최소화를 위한 패치 적용 (strict 해석 중심)
+
+#### v14 frame 관련 실무 포인트
+- `ik_targets_frame` 기본값이 `"base"`이면, `/target_arm_cartesian_pose`도 **base frame 기준**으로 보내는 것을 권장
+- v14는 v13 대비 **자동 프레임 추정/보정 의존도를 낮춤**
+- `curr`와 `target` z가 다르게 보이던 문제를 줄이기 위해, FK/IK/Callback 쪽 frame 해석을 맞추는 방향으로 정리됨
+
+---
+
+### 3.3 Hand Kinematics
+- **HandForwardKinematics (Pinocchio)**
+  - 각 손 5개 fingertip 위치 계산
+  - 독립 15DoF + mimic(q4=q3) 구조 반영
+- **HandInverseKinematics**
+  - fingertip target 기반 손가락 관절 target 생성
+  - 손 task space가 좁기 때문에 **입력 workspace를 벗어나면 IK 실패 가능**
+
+#### Hand IK 입력이 task space 범위를 벗어나는 경우 (운용 관점)
+- 일반적으로 hand는 arm보다 workspace가 매우 작음
+- 과도한 fingertip target 입력 시:
+  - IK 실패(또는 일부 손가락 실패) 가능
+  - 보통은 **해당 target 반영 실패 → 이전/현재 target 유지** 형태로 운용하는 것이 안전
+- 따라서 실무에서는:
+  - home pose 기준으로 작은 변화부터 테스트
+  - 손가락별로 단계적으로 이동
+  - 큰 점프 명령 대신 작은 step command 사용
+
+---
+
+## 4) v14 토픽 / 서비스 인터페이스 (권장)
+
+### 4.1 Subscribe (입력)
+- `/isaac_joint_states` (`sensor_msgs/msg/JointState`)
+  - Isaac Sim joint states (current)
+- `/isaac_contact_states` (`std_msgs/msg/Float64MultiArray`)
+  - 접촉/힘 상태 (프로젝트 설정에 맞춤)
+- `/target_arm_cartesian_pose` (`std_msgs/msg/Float64MultiArray`)
+  - inverse arm target (12 values)
+- `/target_hand_fingertips` (`std_msgs/msg/Float64MultiArray`)
+  - inverse hand target (30 values)
+- `/forward_joint_targets` (`std_msgs/msg/Float64MultiArray`)
+  - **legacy 통합 forward target** (12 / 42 / 52)
+- **(v14) `/target_arm_joint_targets`** (`std_msgs/msg/Float64MultiArray`)
+  - arm-only forward target (12)
+- **(v14) `/target_hand_joint_targets`** (`std_msgs/msg/Float64MultiArray`)
+  - hand-only forward target (30 or 40)
+
+> 위 2개 분리 토픽 이름은 v14 분리 콜백(`TargetArmJointsCallback`, `TargetHandJointsCallback`)에 맞춰 사용 권장  
+> (실제 코드에서 토픽명을 다르게 선언했다면 그 이름에 맞춰 사용)
+
+### 4.2 Publish (출력)
+- `/isaac_joint_command` (`sensor_msgs/msg/JointState`)
+  - 최종 명령 joint vector
+
+### 4.3 Service
+- `/change_control_mode` (`std_srvs/srv/Trigger`)
+  - 모드 전환 (idle → forward → inverse → ...)
+
+---
+
+## 5) 파라미터 (v14)
+
+생성자 기준 주요 파라미터 예시:
+
+- `urdf_path`
+- `world_base_xyz` (default `[0,0,0.306]`)
+- `world_base_euler_xyz_deg` (default `[0,0,0]`)
+- `ik_targets_frame` (`base` / `world`)
+- `ik_euler_conv` (`rpy` / `xyz`)
+- `ik_angle_unit` (`rad` / `deg` / `auto`)
+
+### 권장 기본값 (v14)
+- `ik_targets_frame := base`
+- `ik_euler_conv := rpy`
+- `ik_angle_unit := rad`
+
+---
+
+## 6) 실행 방법
+
+### 6.1 빌드
 ```bash
 cd ~/dualarm_ws
-colcon build --symlink-install
+colcon build --packages-select dualarm_forcecon
+source install/setup.bash
 ```
 
-### 환경 설정
-```bash
-source ~/dualarm_ws/install/setup.bash
-```
-
-### 실행
+### 6.2 실행
 ```bash
 ros2 run dualarm_forcecon dualarm_forcecon_node
 ```
 
 ---
 
-## 3) 제어 모드 전환 (idle → forward → inverse → idle)
+## 7) 현재 Home Pose 기준 정보 (사용자 제공 실제 로그 기반, v14 기준)
 
-서비스는 호출할 때마다 모드가 순환합니다.
+아래 값은 사용자가 제공한 `/isaac_joint_states` 및 모니터 출력의 **home pose 기준값**입니다.
+
+### 7.1 Home pose arm joint values (rad)
+> `/isaac_joint_states` 이름 순서가 interleaved + extra joints(`yaw_joint`, `pitch_joint`) 포함이므로, arm 6+6만 추출한 값
+
+- **Left Arm (home)**
+  - `qL_home = [1.4869, -0.0022, -2.1753, 1.4835, 1.4835, -0.1920]`
+- **Right Arm (home)**
+  - `qR_home = [-0.0054, 0.7796, 2.0043, 0.0000, -1.1869, -0.7854]`
+
+### 7.2 Home pose arm monitor pose (v14 monitor 출력값)
+- **Left Arm CUR/TAR**
+  - `P = (0.1522, 0.2721, -0.2425)`
+  - `RPY(deg) = (162.05, 87.40, -72.96)`
+- **Right Arm CUR/TAR**
+  - `P = (0.5393, -0.3083, 0.1586)`
+  - `RPY(deg) = (-66.05, 88.64, 156.05)`
+
+### 7.3 Home pose hand fingertip positions (각 hand base frame)
+#### Left Hand (home)
+- THMB = `(-0.0590, -0.1297, 0.1145)`
+- INDX = `(-0.0403, -0.0144, 0.2465)`
+- MIDL = `(-0.0135, -0.0144, 0.2640)`
+- RING = `( 0.0133, -0.0144, 0.2465)`
+- BABY = `( 0.0401, -0.0144, 0.2310)`
+
+#### Right Hand (home)
+- THMB = `( 0.0590, -0.1297, 0.1145)`
+- INDX = `( 0.0403, -0.0144, 0.2465)`
+- MIDL = `( 0.0135, -0.0144, 0.2640)`
+- RING = `(-0.0133, -0.0144, 0.2465)`
+- BABY = `(-0.0401, -0.0144, 0.2310)`
+
+---
+
+## 8) 모드 전환 예시
+
+> `Trigger` 서비스가 순환형이라면 현재 모드 상태에 따라 1~2회 호출 필요할 수 있음
 
 ```bash
 ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
 ```
 
-예시:
-- 현재 `idle`에서 `forward`로 전환: 1번 호출
-- `forward`에서 `inverse`로 전환: 1번 더 호출
+- `idle -> forward`
+- 다시 호출 시 `forward -> inverse`
+- 다시 호출 시 `inverse -> idle` (프로젝트 구현에 따라 다를 수 있음)
 
-즉, `idle -> inverse`로 가려면 보통 2번 호출:
+---
 
+## 9) Inverse 모드 예시 명령어 (v14, Home Pose 기준)
+
+> 아래 예시들은 **inverse 모드**에서 실행하세요.  
+> 권장 파라미터: `ik_targets_frame=base`, `ik_euler_conv=rpy`, `ik_angle_unit=rad`
+
+### 9.0 inverse 모드 진입
 ```bash
-ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
-ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"   # idle->forward
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"   # forward->inverse
 ```
 
 ---
 
-## 4) 사용 토픽 요약
+### 9.1 Arm inverse: Home pose 재전송 (base frame, rad)
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
+  0.1522,  0.2721, -0.2425,   2.8283, 1.5254, -1.2734,
+  0.5393, -0.3083,  0.1586,  -1.1528, 1.5461,  2.7236
+]}"
+```
 
-### Forward 모드용
-- `/forward_joint_targets` (`std_msgs/msg/Float64MultiArray`)
-  - **42값 포맷 지원**: `arm12 + hand30(양손 각 15)`
-  - 기존 52값 포맷(`arm12 + hand40`)도 코드가 유지 중이면 함께 지원 가능
-
-### Inverse 모드용 (분리 토픽)
-- `/target_arm_cartesian_pose` (`std_msgs/msg/Float64MultiArray`)
-  - 12개 값: `L(xyz+rpy) + R(xyz+rpy)`
-- `/target_hand_fingertips` (`std_msgs/msg/Float64MultiArray`)
-  - 30개 값: `L hand 5tip xyz + R hand 5tip xyz`
-  - 각 hand base frame 기준 좌표
+> 위 RPY(rad)는 모니터의 deg 값을 rad로 변환한 근사값입니다.  
+> (L: 162.05,87.40,-72.96 / R: -66.05,88.64,156.05)
 
 ---
 
-## 5) 데이터 포맷 상세
-
-### 5.1 `/target_arm_cartesian_pose` (12 values)
-순서:
-- Left arm: `x y z rx ry rz`
-- Right arm: `x y z rx ry rz`
-
-> 각도는 기본적으로 rad 기준 (현재 파라미터 설정에 따름)
-
-```text
-[data:
-  Lx, Ly, Lz, Lrx, Lry, Lrz,
-  Rx, Ry, Rz, Rrx, Rry, Rrz]
+### 9.2 Arm inverse: 양팔 조금 앞으로 (home 기준 small step)
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
+  0.1900,  0.2850, -0.2200,   2.8283, 1.5254, -1.2734,
+  0.5150, -0.2950,  0.1800,  -1.1528, 1.5461,  2.7236
+]}"
 ```
 
 ---
 
-### 5.2 `/target_hand_fingertips` (30 values)
-순서:
-- Left hand (thumb, index, middle, ring, baby): 각 fingertip `x y z`
-- Right hand (thumb, index, middle, ring, baby): 각 fingertip `x y z`
-
-```text
-[data:
-  L_thumb_x, L_thumb_y, L_thumb_z,
-  L_index_x, L_index_y, L_index_z,
-  L_middle_x, L_middle_y, L_middle_z,
-  L_ring_x,  L_ring_y,  L_ring_z,
-  L_baby_x,  L_baby_y,  L_baby_z,
-  R_thumb_x, R_thumb_y, R_thumb_z,
-  R_index_x, R_index_y, R_index_z,
-  R_middle_x,R_middle_y,R_middle_z,
-  R_ring_x,  R_ring_y,  R_ring_z,
-  R_baby_x,  R_baby_y,  R_baby_z]
+### 9.3 Arm inverse: 왼팔 위로 / 오른팔 약간 아래 (비대칭 테스트)
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
+  0.1800,  0.2900, -0.1700,   2.8283, 1.5254, -1.2734,
+  0.5250, -0.3000,  0.1100,  -1.1528, 1.5461,  2.7236
+]}"
 ```
 
 ---
 
-### 5.3 `/forward_joint_targets` (42 values, v12+ 권장 포맷)
-순서:
-- Arm 12개: `left arm 6 + right arm 6`
-- Hand 30개: `left hand 15 + right hand 15`
-  - hand15 순서(각 손): `thumb(1,2,3), index(1,2,3), middle(1,2,3), ring(1,2,3), baby(1,2,3)`
-  - `joint4`는 mimic로 내부/명령 경로에서 처리 (`q4=q3`)
-
-```text
-[data:
-  L_arm_1..6,
-  R_arm_1..6,
-  L_thumb_1..3, L_index_1..3, L_middle_1..3, L_ring_1..3, L_baby_1..3,
-  R_thumb_1..3, R_index_1..3, R_middle_1..3, R_ring_1..3, R_baby_1..3]
-```
-
----
-
-## 6) Inverse 모드 예시 명령어 (v13)
-
-> 아래 예시들은 **inverse 모드**에서 테스트하세요.
-
-### 6.0 inverse 모드 진입
-```bash
-ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
-ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
-```
-
----
-
-### 6.1 Arm IK only 예시 (`/target_arm_cartesian_pose`)
-
-#### (1) Home pose 유지 (모니터 값 재전송)
-> v13 arm IK auto-frame patch로 정상 유지되어야 함
-
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.2988,  0.1332,   2.8018, 1.57079, -1.2500,
-  0.5371, -0.2991,  0.1332,  -2.7962, 1.57079, -1.8800
-]}"
-```
-
-#### (2) 양손 앞으로 뻗기 (+x)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.6357,  0.2988,  0.1332,   2.8018, 1.3013, -1.2500,
-  0.6371, -0.2991,  0.1332,  -2.7962, 1.3011, -1.8800
-]}"
-
-```
-
-#### (3) 양손 위로 올리기 (+z)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.2988,  0.2332,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.2991,  0.2332,  -2.7962, 1.3011, -1.8800
-]}"
-```
-
-#### (4) 양팔 벌리기 (|y| 증가)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.400,  0.1332,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.400,  0.1332,  -2.7962, 1.3011, -1.8800
-]}"
-
-```
-
-#### (5) 양팔 모으기 (|y| 감소)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5357,  0.200,  0.1332,   2.8018, 1.3013, -1.2500,
-  0.5371, -0.200,  0.1332,  -2.7962, 1.3011, -1.8800
-]}"
-
-```
-
-#### (6) 핸드 힘제어 준비 자세
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5371,  0.2988,  0.00,   1.0217, 1.5429, 0.5493,
-  0.5371, -0.2991,  0.1332,  -1.0020, 1.5437, 2.5726
-]}"
-
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.2000,  0.2988,  0.00,   2.8018, 1.57079, -1.2500,
-  0.5371, -0.2991,  0.1332,  -2.7962, 1.57079, -1.8800
-]}"
-
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.2000,  0.2988,  -0.1800,   2.8018, 1.57079, -1.2500,
-  0.5371, -0.2991,  0.1332,  -2.7962, 1.57079, -1.8800
-]}"
-
-
-```
-
-### 6.2 Hand IK only 예시 (`/target_hand_fingertips`)
-
-#### (1) Home/open 기준 포즈 (기준점)
+### 9.4 Hand inverse: Home pose 재전송 (양손 open)
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
   -0.0590, -0.1297,  0.1145,
@@ -265,58 +316,9 @@ ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_
 ]}"
 ```
 
-#### (2) 왼손 엄지만 크게 이동 (thumb independence 테스트)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
-  -0.0950, -0.1200,  0.0900,
-  -0.0403, -0.0144,  0.2465,
-  -0.0135, -0.0144,  0.2640,
-   0.0133, -0.0144,  0.2465,
-   0.0401, -0.0144,  0.2310,
+---
 
-   0.0590, -0.1297,  0.1145,
-   0.0403, -0.0144,  0.2465,
-   0.0135, -0.0144,  0.2640,
-  -0.0133, -0.0144,  0.2465,
-  -0.0401, -0.0144,  0.2310
-]}"
-```
-
-#### (3) 왼손 검지 가리키기 (index만 전방/상방)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
-  -0.0590, -0.1297,  0.1145,
-  -0.0403, -0.0120,  0.2900,
-  -0.0135, -0.0144,  0.2250,
-   0.0133, -0.0144,  0.2100,
-   0.0401, -0.0144,  0.2000,
-
-   0.0590, -0.1297,  0.1145,
-   0.0403, -0.0144,  0.2465,
-   0.0135, -0.0144,  0.2640,
-  -0.0133, -0.0144,  0.2465,
-  -0.0401, -0.0144,  0.2310
-]}"
-```
-
-#### (4) 왼손 V-sign (검지/중지만 펴기)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
-  -0.0550, -0.1250,  0.1100,
-  -0.0450, -0.0100,  0.2850,
-  -0.0050, -0.0100,  0.3000,
-   0.0150, -0.0140,  0.2100,
-   0.0400, -0.0140,  0.1950,
-
-   0.0590, -0.1297,  0.1145,
-   0.0403, -0.0144,  0.2465,
-   0.0135, -0.0144,  0.2640,
-  -0.0133, -0.0144,  0.2465,
-  -0.0401, -0.0144,  0.2310
-]}"
-```
-
-#### (5) 양손 소프트 그립 (모든 fingertip z 낮춤)
+### 9.5 Hand inverse: 양손 소프트 그립
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
   -0.0510, -0.1128,  0.1000,
@@ -333,31 +335,16 @@ ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_
 ]}"
 ```
 
-#### (6) 양손 주먹 느낌 (강한 굴곡)
+---
+
+### 9.6 Hand inverse: 왼손 V-sign / 오른손 open
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
-  -0.0450, -0.1050,  0.0850,
-  -0.0380, -0.0180,  0.1450,
-  -0.0120, -0.0180,  0.1500,
-   0.0120, -0.0180,  0.1450,
-   0.0360, -0.0180,  0.1380,
-
-   0.0450, -0.1050,  0.0850,
-   0.0380, -0.0180,  0.1450,
-   0.0120, -0.0180,  0.1500,
-  -0.0120, -0.0180,  0.1450,
-  -0.0360, -0.0180,  0.1380
-]}"
-```
-
-#### (7) 왼손 pinch (엄지+검지 접근), 오른손 open
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
-  -0.0300, -0.0900,  0.1550,
-  -0.0280, -0.0120,  0.2050,
-  -0.0135, -0.0144,  0.2550,
-   0.0133, -0.0144,  0.2400,
-   0.0401, -0.0144,  0.2250,
+  -0.0550, -0.1250,  0.1100,
+  -0.0450, -0.0100,  0.2850,
+  -0.0050, -0.0100,  0.3000,
+   0.0150, -0.0140,  0.2100,
+   0.0400, -0.0140,  0.1950,
 
    0.0590, -0.1297,  0.1145,
    0.0403, -0.0144,  0.2465,
@@ -367,50 +354,14 @@ ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_
 ]}"
 ```
 
-#### (8) 오른손만 가리키기 (mirror 테스트)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
-  -0.0590, -0.1297,  0.1145,
-  -0.0403, -0.0144,  0.2465,
-  -0.0135, -0.0144,  0.2640,
-   0.0133, -0.0144,  0.2465,
-   0.0401, -0.0144,  0.2310,
-
-   0.0590, -0.1297,  0.1145,
-   0.0403, -0.0120,  0.2900,
-   0.0135, -0.0144,  0.2250,
-  -0.0133, -0.0144,  0.2100,
-  -0.0401, -0.0144,  0.2000
-]}"
-```
-
-#### (9) 양손 비대칭 (왼손 V-sign + 오른손 소프트그립)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
-  -0.0550, -0.1250,  0.1100,
-  -0.0450, -0.0100,  0.2850,
-  -0.0050, -0.0100,  0.3000,
-   0.0150, -0.0140,  0.2100,
-   0.0400, -0.0140,  0.1950,
-
-   0.0510, -0.1128,  0.1000,
-   0.0403, -0.0151,  0.1800,
-   0.0135, -0.0151,  0.1900,
-  -0.0133, -0.0151,  0.1800,
-  -0.0401, -0.0151,  0.1700
-]}"
-```
-
 ---
 
-### 6.3 Arm + Hand 동시 테스트 (inverse)
-
-#### (1) 양팔 약간 앞으로 + 양손 소프트 그립
+### 9.7 Arm + Hand inverse 동시 예시 (양팔 소폭 이동 + 소프트그립)
 ```bash
 # Arm
 ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5600,  0.3000,  0.4450,   2.8018, 1.3013, -1.7200,
-  0.5600, -0.3000,  0.4450,  -2.7962, 1.3011, -1.4813
+  0.1900,  0.2850, -0.2200,   2.8283, 1.5254, -1.2734,
+  0.5150, -0.2950,  0.1800,  -1.1528, 1.5461,  2.7236
 ]}"
 
 # Hand
@@ -429,143 +380,223 @@ ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_
 ]}"
 ```
 
-#### (2) 왼팔 위/오른팔 아래 + 왼손 pinch / 오른손 open
-```bash
-# Arm
-ros2 topic pub --once --qos-reliability best_effort /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
-  0.5450,  0.3050,  0.4900,   2.8018, 1.3013, -1.7200,
-  0.5450, -0.3050,  0.4000,  -2.7962, 1.3011, -1.4813
-]}"
-
-# Hand
-ros2 topic pub --once --qos-reliability best_effort /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
-  -0.0300, -0.0900,  0.1550,
-  -0.0280, -0.0120,  0.2050,
-  -0.0135, -0.0144,  0.2550,
-   0.0133, -0.0144,  0.2400,
-   0.0401, -0.0144,  0.2250,
-
-   0.0590, -0.1297,  0.1145,
-   0.0403, -0.0144,  0.2465,
-   0.0135, -0.0144,  0.2640,
-  -0.0133, -0.0144,  0.2465,
-  -0.0401, -0.0144,  0.2310
-]}"
-```
-
 ---
 
-## 7) Forward 모드 예시 명령어 (42값 포맷)
+## 10) Forward 모드 예시 명령어 (v14: 분리 토픽 중심)
 
-> 아래 예시들은 **forward 모드**에서 테스트하세요.
+> 아래 예시들은 **forward 모드**에서 테스트하세요.  
+> v14에서는 **arm / hand 분리 토픽** 사용을 권장합니다.
 
-### 7.0 forward 모드 진입
-(현재 `idle`이면 1번 호출)
+### 10.0 forward 모드 진입
 ```bash
 ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
 ```
 
 ---
 
-### 7.1 Forward 기준 홈 자세 (42 values)
-- arm12 + hand30(15+15)
-- hand15 순서: thumb123, index123, middle123, ring123, baby123
+## 10.1 Arm-only forward (v14 분리 콜백)
 
+### (A) Home pose arm 재전송 (12 values)
 ```bash
-ros2 topic pub --once --qos-reliability best_effort /forward_joint_targets std_msgs/msg/Float64MultiArray "{data: [
-  0.0046, -0.7842, -2.0022, -0.2409,  1.3370,  0.3665,
- -0.0028,  0.7876,  1.9970,  0.2444, -1.3335, -0.4224,
+ros2 topic pub --once --qos-reliability best_effort /target_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  1.4869, -0.0022, -2.1753,  1.4835,  1.4835, -0.1920,
+ -0.0054,  0.7796,  2.0043,  0.0000, -1.1869, -0.7854
+]}"
+```
 
+### (B) 양팔 약간 벌리기 (home 기준 small perturbation)
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  1.4200,  0.0300, -2.1000,  1.3800,  1.4200, -0.1500,
+  0.0400,  0.7300,  1.9500,  0.0800, -1.1200, -0.7200
+]}"
+```
+
+### (C) 왼팔 들기 / 오른팔 내리기 (비대칭)
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  1.5200,  0.0500, -1.9800,  1.2000,  1.3500, -0.0500,
+ -0.0300,  0.8800,  2.1500, -0.1500, -1.2500, -0.9200
+]}"
+```
+
+---
+
+## 10.2 Hand-only forward (v14 분리 콜백)
+
+### Hand input format (권장)
+- **30 values** = left 15 + right 15
+- 각 hand 15 순서:
+  - `[thumb1, thumb2, thumb3, index1, index2, index3, middle1, middle2, middle3, ring1, ring2, ring3, baby1, baby2, baby3]`
+- 내부적으로 `joint4 = joint3` mimic 적용 (20DoF canonicalization)
+
+> 구현에 따라 **40 values (20+20)**도 받을 수 있도록 해두면 legacy와 호환성이 좋음
+
+### (A) 양손 open (home-like hand)
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,
   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0
 ]}"
 ```
 
-### 7.2 Forward: 양손 소프트 그립 (arm 유지, hand만 굽힘)
+### (B) 양손 소프트 그립
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  0.0, 0.25, 0.20,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,
+  0.0, 0.25, 0.20,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35
+]}"
+```
+
+### (C) 왼손 V-sign / 오른손 주먹
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  0.10, 0.30, 0.25,   0.00, 0.05, 0.05,   0.00, 0.05, 0.05,   0.00, 0.80, 0.70,   0.00, 0.85, 0.75,
+  0.00, 0.60, 0.50,   0.00, 1.00, 0.90,   0.00, 1.00, 0.90,   0.00, 1.00, 0.90,   0.00, 1.00, 0.90
+]}"
+```
+
+### (D) 왼손 pinch-like / 오른손 open
+```bash
+ros2 topic pub --once --qos-reliability best_effort /target_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  0.25, 0.65, 0.55,   0.00, 0.55, 0.45,   0.00, 0.10, 0.10,   0.00, 0.15, 0.10,   0.00, 0.15, 0.10,
+  0.00, 0.00, 0.00,   0.00, 0.00, 0.00,   0.00, 0.00, 0.00,   0.00, 0.00, 0.00,   0.00, 0.00, 0.00
+]}"
+```
+
+---
+
+## 10.3 Combined forward (legacy `/forward_joint_targets`) — 호환 유지
+
+> v14에서도 기존 통합 포맷 사용 가능 (권장 우선순위는 분리 토픽)
+
+### 포맷
+- `12` : arm only
+- `42` : arm(12) + hand15(left) + hand15(right)
+- `52` : arm(12) + hand20(left) + hand20(right)  
+  (`joint4 = joint3` canonicalization 적용)
+
+### (A) 12값: arm-only home
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /forward_joint_targets std_msgs/msg/Float64MultiArray "{data: [
-  0.0046, -0.7842, -2.0022, -0.2409,  1.3370,  0.3665,
- -0.0028,  0.7876,  1.9970,  0.2444, -1.3335, -0.4224,
+  1.4869, -0.0022, -2.1753,  1.4835,  1.4835, -0.1920,
+ -0.0054,  0.7796,  2.0043,  0.0000, -1.1869, -0.7854
+]}"
+```
+
+### (B) 42값: arm(home) + 양손 소프트 그립
+```bash
+ros2 topic pub --once --qos-reliability best_effort /forward_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  1.4869, -0.0022, -2.1753,  1.4835,  1.4835, -0.1920,
+ -0.0054,  0.7796,  2.0043,  0.0000, -1.1869, -0.7854,
 
   0.0, 0.25, 0.20,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,
   0.0, 0.25, 0.20,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35
 ]}"
 ```
 
-### 7.3 Forward: 왼손 V-sign / 오른손 주먹
+### (C) 52값: arm(home) + hand20(left/right)
 ```bash
 ros2 topic pub --once --qos-reliability best_effort /forward_joint_targets std_msgs/msg/Float64MultiArray "{data: [
-  0.0046, -0.7842, -2.0022, -0.2409,  1.3370,  0.3665,
- -0.0028,  0.7876,  1.9970,  0.2444, -1.3335, -0.4224,
+  1.4869, -0.0022, -2.1753,  1.4835,  1.4835, -0.1920,
+ -0.0054,  0.7796,  2.0043,  0.0000, -1.1869, -0.7854,
 
-  0.1, 0.30, 0.25,   0.0, 0.05, 0.05,   0.0, 0.05, 0.05,   0.0, 0.80, 0.70,   0.0, 0.85, 0.75,
-  0.0, 0.60, 0.50,   0.0, 1.00, 0.90,   0.0, 1.00, 0.90,   0.0, 1.00, 0.90,   0.0, 1.00, 0.90
+  # left hand 20 (thumb1..4, index1..4, middle1..4, ring1..4, baby1..4)
+  0.0, 0.25, 0.20, 0.20,   0.0, 0.45, 0.35, 0.35,   0.0, 0.45, 0.35, 0.35,   0.0, 0.45, 0.35, 0.35,   0.0, 0.45, 0.35, 0.35,
+
+  # right hand 20
+  0.0, 0.25, 0.20, 0.20,   0.0, 0.45, 0.35, 0.35,   0.0, 0.45, 0.35, 0.35,   0.0, 0.45, 0.35, 0.35,   0.0, 0.45, 0.35, 0.35
 ]}"
 ```
 
-### 7.4 Forward: 양팔 약간 벌리고 + 양손 open 유지
-```bash
-ros2 topic pub --once --qos-reliability best_effort /forward_joint_targets std_msgs/msg/Float64MultiArray "{data: [
-  0.10, -0.70, -1.95, -0.10, 1.28, 0.30,
- -0.10,  0.70,  1.95,  0.10,-1.28,-0.30,
-
-  0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,
-  0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0
-]}"
-```
-
-### 7.5 Forward: Pinch-like hand command (양손)
-```bash
-ros2 topic pub --once --qos-reliability best_effort /forward_joint_targets std_msgs/msg/Float64MultiArray "{data: [
-  0.0046, -0.7842, -2.0022, -0.2409,  1.3370,  0.3665,
- -0.0028,  0.7876,  1.9970,  0.2444, -1.3335, -0.4224,
-
-  0.25, 0.55, 0.45,   0.10, 0.40, 0.25,   0.0, 0.20, 0.15,   0.0, 0.20, 0.15,   0.0, 0.20, 0.15,
-  0.25, 0.55, 0.45,   0.10, 0.40, 0.25,   0.0, 0.20, 0.15,   0.0, 0.20, 0.15,   0.0, 0.20, 0.15
-]}"
-```
+> 주의: 일부 CLI/YAML 파서는 inline 주석(`# ...`) 포함 문자열을 싫어할 수 있으니, 실패 시 주석 제거 후 사용하세요.
 
 ---
 
-## 8) 디버깅/검증 팁
+## 11) 운영 팁 (v14)
 
-### 8.1 현재 모드 확인
-`/change_control_mode` 서비스 응답 메시지에서 `Mode: idle/forward/inverse` 확인
+### 11.1 Arm IK 실패 시 점검 순서
+- `ik_targets_frame`와 입력 좌표 frame이 일치하는지 확인 (`base` vs `world`)
+- `ik_angle_unit`가 실제 입력과 일치하는지 확인 (`rad`/`deg`)
+- home pose 기준으로 작은 step부터 시도
+- 한 번에 큰 position jump 지양
 
-### 8.2 토픽 존재 확인
+### 11.2 Hand IK 실패/불안정 시 팁
+- fingertip target을 home pose 기준으로 조금씩 변경
+- 먼저 엄지/검지 1~2개 finger만 테스트
+- z를 급격히 내리는 명령보다 단계적 명령 사용
+- inverse 실패가 반복되면 forward hand joint command로 자세를 먼저 만든 뒤 inverse 미세조정
+
+### 11.3 모니터 값 해석
+- `CUR`와 `TAR`가 다르면:
+  - 아직 이동 중
+  - IK 실패로 target joint 갱신이 반영되지 않았을 수 있음
+  - frame mismatch 가능성 확인
+
+---
+
+## 12) 알려진 주의사항 / v14 메모
+
+- hand task space는 arm보다 훨씬 좁음 (workspace 바깥 입력 주의)
+- `/isaac_joint_states`에는 arm/hand 외 보조 조인트(`yaw_joint`, `pitch_joint`)가 포함될 수 있음
+- hand q4는 mimic 관계로 내부 canonicalization(`q4=q3`) 적용
+- v14에서는 **분리 토픽 기반 forward 제어**를 우선 권장
+  - arm과 hand를 독립 테스트 가능
+  - 디버깅 시 어느 subsystem 문제가 났는지 분리하기 쉬움
+
+---
+
+## 13) v13 → v14 마이그레이션 체크리스트
+
+- [ ] `TargetArmJointsCallback` / `TargetHandJointsCallback` 추가
+- [ ] 분리 토픽 subscription 추가 (`/target_arm_joint_targets`, `/target_hand_joint_targets`)
+- [ ] 기존 `TargetJointCallback`는 호환용으로 유지(선택)
+- [ ] `DualArmForceControl.h`에 콜백 선언 및 subscriber 멤버 반영
+- [ ] `DualArmForceControl.cpp` 생성자에서 분리 토픽 subscribe 반영
+- [ ] `states_callback_dualarm.cpp`에서 arm/hand forward parsing 로직 분리
+- [ ] arm FK/IK frame 정책(v14 strict) 일관성 확인
+- [ ] home pose 기준 명령어로 smoke test 완료
+
+---
+
+## 14) 빠른 테스트 시나리오 (추천 순서)
+
+1. **idle 상태에서 모니터 안정 확인**
+2. **forward 모드**
+   - `/target_arm_joint_targets`로 arm-only home 재전송
+   - `/target_hand_joint_targets`로 hand soft grip
+3. **inverse 모드**
+   - `/target_hand_fingertips` home 재전송
+   - `/target_arm_cartesian_pose` home 재전송
+   - arm small step + hand soft grip 동시 테스트
+4. 실패 시 frame / angle_unit / workspace 점검
+
+---
+
+## 부록 A) Home pose 모니터 기준 inverse arm RPY(rad) 근사값
+
+- Left (162.05°, 87.40°, -72.96°)
+  - `(2.8283, 1.5254, -1.2734)`
+- Right (-66.05°, 88.64°, 156.05°)
+  - `(-1.1528, 1.5461, 2.7236)`
+
+> 필요하면 이후 v14.1에서 `deg` 입력 예시 버전도 추가 가능
+
+---
+
+## 부록 B) 자주 쓰는 확인 명령어
+
+### 현재 joint state 1회 확인
 ```bash
-ros2 topic list | grep target
-```
-예상 예시:
-- `/forward_joint_targets`
-- `/target_arm_cartesian_pose`
-- `/target_hand_fingertips`
-
-### 8.3 손가락 독립 IK 검증 추천 절차 (v13)
-1. `6.2-(1)` 기준 포즈 전송
-2. `6.2-(2)` 엄지만 이동 전송
-3. 모니터에서 `L HAND THMB` 변화 확인
-4. 다른 손가락 변화가 크게 줄었는지 확인
-
-### 8.4 arm home pose 유지 확인 (v13 auto-frame patch)
-- 모니터의 home pose 값을 그대로 `/target_arm_cartesian_pose`에 재전송했을 때
-- z축으로 0.306m 올라가는 현상이 없어야 함
-
----
-
-## 9) 추천 커밋 메시지 (영문, 한 줄)
-
-```text
-v13: add 15-DoF independent finger IK and arm IK auto world/base frame correction
+ros2 topic echo --once /isaac_joint_states
 ```
 
----
+### 현재 모드 전환(순환)
+```bash
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+```
 
-## 10) 참고 메모 (개발 규칙)
-
-- Hand는 **15DoF 모델링(독립 변수)** + `joint4` mimic 가정 유지
-- 실제 내부 저장/명령 경로는 기존 호환을 위해 20DoF 표현을 사용할 수 있음
-- Arm/Hand 토픽 분리 구조 유지 (`/target_arm_cartesian_pose`, `/target_hand_fingertips`)
-- `PrintDualArmStates` 포맷/색상 규칙 유지 권장
-- world-base z offset 기본값(0.306m) 유지
-
+### 노드 실행
+```bash
+ros2 run dualarm_forcecon dualarm_forcecon_node
+```

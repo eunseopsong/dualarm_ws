@@ -20,7 +20,7 @@
 #include "dualarm_forcecon/Kinematics/arm_forward_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/arm_inverse_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"
-#include "dualarm_forcecon/Kinematics/hand_inverse_kinematics.hpp"   // ✅ v11
+#include "dualarm_forcecon/Kinematics/hand_inverse_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"
 
 class DualArmForceControl : public std::enable_shared_from_this<DualArmForceControl> {
@@ -36,12 +36,15 @@ public:
     void ArmPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
     void HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
 
-    // ✅ v11: arm/hand target 분리
+    // Cartesian target callbacks (inverse mode)
     void TargetArmPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetHandPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
 
+    // ✅ Forward joint target callbacks (split)
+    void TargetArmJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    void TargetHandJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+
     void ContactForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
-    void TargetJointCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                              std::shared_ptr<std_srvs::srv::Trigger::Response> res);
 
@@ -55,11 +58,14 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_sub_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr position_sub_;
 
-    // ✅ v11
+    // Cartesian targets (inverse mode)
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_pos_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_pos_sub_;
 
-    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_joint_sub_;
+    // ✅ Forward joint targets (split)
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_joint_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_joint_sub_;
+
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr contact_force_sub_;
 
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
@@ -102,8 +108,6 @@ private:
     std::shared_ptr<ArmInverseKinematics> arm_ik_l_, arm_ik_r_;
 
     std::shared_ptr<dualarm_forcecon::HandForwardKinematics> hand_fk_l_, hand_fk_r_;
-
-    // ✅ v11: hand IK
     std::shared_ptr<dualarm_forcecon::HandInverseKinematics> hand_ik_l_, hand_ik_r_;
 
     // poses (arm world pose)

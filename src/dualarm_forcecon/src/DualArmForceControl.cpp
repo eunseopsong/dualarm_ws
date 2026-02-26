@@ -39,12 +39,14 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     auto qos = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
 
     joint_states_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
-        "/isaac_joint_states", qos, std::bind(&DualArmForceControl::JointsCallback, this, std::placeholders::_1));
+        "/isaac_joint_states", qos,
+        std::bind(&DualArmForceControl::JointsCallback, this, std::placeholders::_1));
 
     position_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
-        "/isaac_joint_states", qos, std::bind(&DualArmForceControl::PositionCallback, this, std::placeholders::_1));
+        "/isaac_joint_states", qos,
+        std::bind(&DualArmForceControl::PositionCallback, this, std::placeholders::_1));
 
-    // ✅ v11: target_arm / target_hand 분리
+    // Cartesian targets (inverse mode)
     target_arm_pos_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/target_arm_cartesian_pose", qos,
         std::bind(&DualArmForceControl::TargetArmPositionCallback, this, std::placeholders::_1));
@@ -53,13 +55,21 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "/target_hand_fingertips", qos,
         std::bind(&DualArmForceControl::TargetHandPositionCallback, this, std::placeholders::_1));
 
+    // ✅ Forward joint targets (split)
+    target_arm_joint_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+        "/forward_arm_joint_targets", qos,
+        std::bind(&DualArmForceControl::TargetArmJointsCallback, this, std::placeholders::_1));
+
+    target_hand_joint_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+        "/forward_hand_joint_targets", qos,
+        std::bind(&DualArmForceControl::TargetHandJointsCallback, this, std::placeholders::_1));
+
     contact_force_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
-        "/isaac_contact_states", qos, std::bind(&DualArmForceControl::ContactForceCallback, this, std::placeholders::_1));
+        "/isaac_contact_states", qos,
+        std::bind(&DualArmForceControl::ContactForceCallback, this, std::placeholders::_1));
 
-    target_joint_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
-        "/forward_joint_targets", qos, std::bind(&DualArmForceControl::TargetJointCallback, this, std::placeholders::_1));
-
-    joint_command_pub_ = node_->create_publisher<sensor_msgs::msg::JointState>("/isaac_joint_command", 10);
+    joint_command_pub_ = node_->create_publisher<sensor_msgs::msg::JointState>(
+        "/isaac_joint_command", 10);
 
     mode_service_ = node_->create_service<std_srvs::srv::Trigger>(
         "/change_control_mode",
@@ -97,7 +107,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     hand_fk_l_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(urdf_path_, "left_hand_base_link", tips);
     hand_fk_r_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(urdf_path_, "right_hand_base_link", tips);
 
-    // ✅ v11: Hand IK (pos-only)
+    // Hand IK (pos-only)
     hand_ik_l_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(urdf_path_, "left_hand_base_link", tips);
     hand_ik_r_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(urdf_path_, "right_hand_base_link", tips);
 

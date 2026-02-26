@@ -493,28 +493,39 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
 
 
 // --------------------
-// TargetJointCallback (forward) - v12
+// TargetArmJointsCallback (forward)
 // supports:
-//   - 12  : arm only
-//   - 42  : arm(12) + hand15(left) + hand15(right)
-//   - 52  : arm(12) + hand20(left) + hand20(right)  (joint4 values are canonicalized to joint3)
+//   - 12 : [L arm 6, R arm 6]
 // --------------------
-void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+void DualArmForceControl::TargetArmJointsCallback(
+    const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
     if (current_control_mode_ != "forward") return;
     if (!msg) return;
-
-    const size_t n = msg->data.size();
-
-    // ----------------------------
-    // 1) Arm targets (always first 12 if present)
-    // ----------------------------
-    if (n < 12) return;
+    if (msg->data.size() < 12) return;
 
     for (int i = 0; i < 6; ++i) {
         q_l_t_(i) = msg->data[i + 0];
         q_r_t_(i) = msg->data[i + 6];
     }
+}
+
+// --------------------
+// TargetHandJointsCallback (forward)
+// supports:
+//   - 30 : hand15(left) + hand15(right)
+//   - 40 : hand20(left) + hand20(right)  (joint4 canonicalized to joint3)
+// legacy compatibility (optional):
+//   - 42 : arm12 + hand15 + hand15
+//   - 52 : arm12 + hand20 + hand20
+// --------------------
+void DualArmForceControl::TargetHandJointsCallback(
+    const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+{
+    if (current_control_mode_ != "forward") return;
+    if (!msg) return;
+
+    const size_t n = msg->data.size();
 
     // Helper: finger-wise mimic enforce on 20DoF hand vector
     // layout = [thumb1..4, index1..4, middle1..4, ring1..4, baby1..4]
@@ -545,26 +556,44 @@ void DualArmForceControl::TargetJointCallback(const std_msgs::msg::Float64MultiA
     auto assign_hand20_to_qh20 = [&](Eigen::VectorXd& qh20, const size_t offset) {
         if (qh20.size() < 20) return;
         for (int i = 0; i < 20; ++i) qh20(i) = msg->data[offset + i];
-        enforce_mimic_q4_eq_q3(qh20); // v12 canonicalization
+        enforce_mimic_q4_eq_q3(qh20);
     };
 
     // ----------------------------
-    // 2) Hand targets (optional)
+    // Preferred split formats
+    // ----------------------------
+    if (n >= 40) {
+        // 40 = left20 + right20
+        assign_hand20_to_qh20(q_l_h_t_, 0);
+        assign_hand20_to_qh20(q_r_h_t_, 20);
+        return;
+    }
+
+    if (n >= 30) {
+        // 30 = left15 + right15
+        assign_hand15_to_qh20(q_l_h_t_, 0);
+        assign_hand15_to_qh20(q_r_h_t_, 15);
+        return;
+    }
+
+    // ----------------------------
+    // Legacy compatibility (optional)
     // ----------------------------
     if (n >= 52) {
-        // legacy full format: 12 + 20 + 20
+        // 12 + 20 + 20
         assign_hand20_to_qh20(q_l_h_t_, 12);
         assign_hand20_to_qh20(q_r_h_t_, 32);
+        return;
     }
-    else if (n >= 42) {
-        // v12 compact format: 12 + 15 + 15
+
+    if (n >= 42) {
+        // 12 + 15 + 15
         assign_hand15_to_qh20(q_l_h_t_, 12);
         assign_hand15_to_qh20(q_r_h_t_, 27);
+        return;
     }
-    else {
-        // arm-only command (12 values): keep current hand targets as-is
-        // 필요하면 여기서 q_l_h_t_/q_r_h_t_ = q_l_h_c_/q_r_h_c_ 로 동기화 가능
-    }
+
+    // else: invalid hand message size -> ignore
 }
 
 // --------------------
