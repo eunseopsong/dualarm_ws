@@ -56,31 +56,137 @@ void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::S
 }
 
 // --------------------
-// ArmPositionCallback
+// ArmPositionCallback (v16 minor patch: output stabilization / deadband)
 // --------------------
 void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
     (void)msg;
     if (!is_initialized_) return;
     if (!arm_fk_) return;
 
-    std::vector<double> jl(6), jr(6);
-    for (int i=0;i<6;i++){ jl[i]=q_l_c_(i); jr[i]=q_r_c_(i); }
-    current_pose_l_ = arm_fk_->getLeftFK(jl);
-    current_pose_r_ = arm_fk_->getRightFK(jr);
+    // ---- tuning (display stability) ----
+    // position deadband: 1 um
+    constexpr double kPosDeadbandM = 1e-6;
+    // quaternion "same" threshold (component-wise max diff after hemisphere alignment)
+    constexpr double kQuatDeadband = 1e-9;
 
+    auto normalize_quat_msg = [](geometry_msgs::msg::Pose& p) {
+        Eigen::Quaterniond q(p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z);
+        if (!std::isfinite(q.w()) || !std::isfinite(q.x()) || !std::isfinite(q.y()) || !std::isfinite(q.z())) {
+            p.orientation.x = 0.0;
+            p.orientation.y = 0.0;
+            p.orientation.z = 0.0;
+            p.orientation.w = 1.0;
+            return;
+        }
+        const double n = q.norm();
+        if (n < 1e-12) {
+            p.orientation.x = 0.0;
+            p.orientation.y = 0.0;
+            p.orientation.z = 0.0;
+            p.orientation.w = 1.0;
+            return;
+        }
+        q.normalize();
+        p.orientation.x = q.x();
+        p.orientation.y = q.y();
+        p.orientation.z = q.z();
+        p.orientation.w = q.w();
+    };
+
+    auto quat_align_to_ref = [](geometry_msgs::msg::Pose& p, const geometry_msgs::msg::Pose& ref) {
+        Eigen::Quaterniond q (p.orientation.w,   p.orientation.x,   p.orientation.y,   p.orientation.z);
+        Eigen::Quaterniond qr(ref.orientation.w, ref.orientation.x, ref.orientation.y, ref.orientation.z);
+        if (q.norm() < 1e-12 || qr.norm() < 1e-12) return;
+        q.normalize();
+        qr.normalize();
+        if (q.dot(qr) < 0.0) {
+            q.coeffs() *= -1.0; // keep hemisphere consistent
+        }
+        p.orientation.x = q.x();
+        p.orientation.y = q.y();
+        p.orientation.z = q.z();
+        p.orientation.w = q.w();
+    };
+
+    auto apply_pose_deadband = [&](geometry_msgs::msg::Pose& dst,
+                                   const geometry_msgs::msg::Pose& src,
+                                   bool& is_init_cache)
+    {
+        if (!is_init_cache) {
+            dst = src;
+            normalize_quat_msg(dst);
+            is_init_cache = true;
+            return;
+        }
+
+        geometry_msgs::msg::Pose cand = src;
+        normalize_quat_msg(cand);
+        quat_align_to_ref(cand, dst);
+
+        // position (axis-wise sticky deadband)
+        if (std::fabs(cand.position.x - dst.position.x) >= kPosDeadbandM) dst.position.x = cand.position.x;
+        if (std::fabs(cand.position.y - dst.position.y) >= kPosDeadbandM) dst.position.y = cand.position.y;
+        if (std::fabs(cand.position.z - dst.position.z) >= kPosDeadbandM) dst.position.z = cand.position.z;
+
+        // orientation (update whole quaternion only if change is meaningful)
+        const double dx = std::fabs(cand.orientation.x - dst.orientation.x);
+        const double dy = std::fabs(cand.orientation.y - dst.orientation.y);
+        const double dz = std::fabs(cand.orientation.z - dst.orientation.z);
+        const double dw = std::fabs(cand.orientation.w - dst.orientation.w);
+        const double dmax = std::max(std::max(dx, dy), std::max(dz, dw));
+
+        if (dmax >= kQuatDeadband) {
+            dst.orientation = cand.orientation;
+            normalize_quat_msg(dst);
+        }
+    };
+
+    // static caches (callback-local; no header change required)
+    static bool s_cur_l_init = false;
+    static bool s_cur_r_init = false;
+    static bool s_tar_l_init = false;
+    static bool s_tar_r_init = false;
+
+    // ---------------- current pose (from q_c_) ----------------
+    std::vector<double> jl(6), jr(6);
+    for (int i = 0; i < 6; ++i) {
+        jl[i] = q_l_c_(i);
+        jr[i] = q_r_c_(i);
+    }
+
+    geometry_msgs::msg::Pose cur_l_fk = arm_fk_->getLeftFK(jl);
+    geometry_msgs::msg::Pose cur_r_fk = arm_fk_->getRightFK(jr);
+
+    apply_pose_deadband(current_pose_l_, cur_l_fk, s_cur_l_init);
+    apply_pose_deadband(current_pose_r_, cur_r_fk, s_cur_r_init);
+
+    // ---------------- target pose (mode-dependent) ----------------
     if (current_control_mode_ == "idle") {
+        // idle에서는 target을 current에 hard sync (표시 흔들림 최소화)
         target_pose_l_ = current_pose_l_;
         target_pose_r_ = current_pose_r_;
-    } else if (current_control_mode_ == "forward") {
-        std::vector<double> jl_t(6), jr_t(6);
-        for (int i=0;i<6;i++){ jl_t[i]=q_l_t_(i); jr_t[i]=q_r_t_(i); }
-        target_pose_l_ = arm_fk_->getLeftFK(jl_t);
-        target_pose_r_ = arm_fk_->getRightFK(jr_t);
+
+        s_tar_l_init = true;
+        s_tar_r_init = true;
     }
+    else if (current_control_mode_ == "forward") {
+        std::vector<double> jl_t(6), jr_t(6);
+        for (int i = 0; i < 6; ++i) {
+            jl_t[i] = q_l_t_(i);
+            jr_t[i] = q_r_t_(i);
+        }
+
+        geometry_msgs::msg::Pose tar_l_fk = arm_fk_->getLeftFK(jl_t);
+        geometry_msgs::msg::Pose tar_r_fk = arm_fk_->getRightFK(jr_t);
+
+        apply_pose_deadband(target_pose_l_, tar_l_fk, s_tar_l_init);
+        apply_pose_deadband(target_pose_r_, tar_r_fk, s_tar_r_init);
+    }
+    // inverse 모드에서는 target_pose_* 는 TargetArmPositionCallback / DeltaArmPositionCallback 이 관리
 }
 
 // --------------------
-// HandPositionCallback (v11: placeholder 제거, 실제 q_*_h_c_/q_*_h_t_ 사용)
+// HandPositionCallback (v16 minor patch: fingertip output stabilization / deadband)
 // --------------------
 void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
 {
@@ -88,15 +194,38 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     if (!is_initialized_) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
 
-    auto assign_point = [&](geometry_msgs::msg::Point& p, const Eigen::Vector3d& v) {
+    // ---- tuning (display stability) ----
+    // fingertip position deadband: 1 um
+    constexpr double kFingerPosDeadbandM = 1e-6;
+
+    auto safe_get = [&](const std::vector<Eigen::Vector3d>& v, int idx) -> Eigen::Vector3d {
+        if (idx < 0 || idx >= static_cast<int>(v.size())) return Eigen::Vector3d::Zero();
+        const Eigen::Vector3d& p = v[idx];
+        if (!std::isfinite(p.x()) || !std::isfinite(p.y()) || !std::isfinite(p.z())) {
+            return Eigen::Vector3d::Zero();
+        }
+        return p;
+    };
+
+    auto set_point_from_vec = [&](geometry_msgs::msg::Point& p, const Eigen::Vector3d& v) {
         p.x = v.x();
         p.y = v.y();
         p.z = v.z();
     };
 
-    auto safe_get = [&](const std::vector<Eigen::Vector3d>& v, int idx) -> Eigen::Vector3d {
-        if (idx < 0 || idx >= static_cast<int>(v.size())) return Eigen::Vector3d::Zero();
-        return v[idx];
+    auto apply_point_deadband = [&](geometry_msgs::msg::Point& dst,
+                                    const Eigen::Vector3d& src,
+                                    bool& is_init_cache)
+    {
+        if (!is_init_cache) {
+            set_point_from_vec(dst, src);
+            is_init_cache = true;
+            return;
+        }
+
+        if (std::fabs(src.x() - dst.x) >= kFingerPosDeadbandM) dst.x = src.x();
+        if (std::fabs(src.y() - dst.y) >= kFingerPosDeadbandM) dst.y = src.y();
+        if (std::fabs(src.z() - dst.z) >= kFingerPosDeadbandM) dst.z = src.z();
     };
 
     // v12: 20DoF(표현) -> 15DoF(독립) 압축
@@ -121,6 +250,12 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
         return h15;
     };
 
+    // static caches (callback-local; no header change required)
+    static bool s_l_cur_init[5] = {false, false, false, false, false};
+    static bool s_r_cur_init[5] = {false, false, false, false, false};
+    static bool s_l_tar_init[5] = {false, false, false, false, false};
+    static bool s_r_tar_init[5] = {false, false, false, false, false};
+
     // 현재/타겟 손 관절을 15DoF independent로 변환
     const std::vector<double> hl15   = compress20to15(q_l_h_c_);
     const std::vector<double> hr15   = compress20to15(q_r_h_c_);
@@ -133,31 +268,51 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     const std::vector<Eigen::Vector3d> tl_t = hand_fk_l_->computeFingertips(hl_t15);
     const std::vector<Eigen::Vector3d> tr_t = hand_fk_r_->computeFingertips(hr_t15);
 
-    // 현재 fingertip
-    assign_point(f_l_thumb_,  safe_get(tl, 0));
-    assign_point(f_l_index_,  safe_get(tl, 1));
-    assign_point(f_l_middle_, safe_get(tl, 2));
-    assign_point(f_l_ring_,   safe_get(tl, 3));
-    assign_point(f_l_baby_,   safe_get(tl, 4));
+    // ---------------- current fingertip (thumb,index,middle,ring,baby) ----------------
+    apply_point_deadband(f_l_thumb_,  safe_get(tl, 0), s_l_cur_init[0]);
+    apply_point_deadband(f_l_index_,  safe_get(tl, 1), s_l_cur_init[1]);
+    apply_point_deadband(f_l_middle_, safe_get(tl, 2), s_l_cur_init[2]);
+    apply_point_deadband(f_l_ring_,   safe_get(tl, 3), s_l_cur_init[3]);
+    apply_point_deadband(f_l_baby_,   safe_get(tl, 4), s_l_cur_init[4]);
 
-    assign_point(f_r_thumb_,  safe_get(tr, 0));
-    assign_point(f_r_index_,  safe_get(tr, 1));
-    assign_point(f_r_middle_, safe_get(tr, 2));
-    assign_point(f_r_ring_,   safe_get(tr, 3));
-    assign_point(f_r_baby_,   safe_get(tr, 4));
+    apply_point_deadband(f_r_thumb_,  safe_get(tr, 0), s_r_cur_init[0]);
+    apply_point_deadband(f_r_index_,  safe_get(tr, 1), s_r_cur_init[1]);
+    apply_point_deadband(f_r_middle_, safe_get(tr, 2), s_r_cur_init[2]);
+    apply_point_deadband(f_r_ring_,   safe_get(tr, 3), s_r_cur_init[3]);
+    apply_point_deadband(f_r_baby_,   safe_get(tr, 4), s_r_cur_init[4]);
 
-    // 타겟 fingertip (모니터 TAR 라인용)
-    assign_point(t_f_l_thumb_,  safe_get(tl_t, 0));
-    assign_point(t_f_l_index_,  safe_get(tl_t, 1));
-    assign_point(t_f_l_middle_, safe_get(tl_t, 2));
-    assign_point(t_f_l_ring_,   safe_get(tl_t, 3));
-    assign_point(t_f_l_baby_,   safe_get(tl_t, 4));
+    // ---------------- target fingertip (monitor TAR line) ----------------
+    if (current_control_mode_ == "idle") {
+        // idle에서는 target = current (표시 안정화)
+        t_f_l_thumb_  = f_l_thumb_;
+        t_f_l_index_  = f_l_index_;
+        t_f_l_middle_ = f_l_middle_;
+        t_f_l_ring_   = f_l_ring_;
+        t_f_l_baby_   = f_l_baby_;
 
-    assign_point(t_f_r_thumb_,  safe_get(tr_t, 0));
-    assign_point(t_f_r_index_,  safe_get(tr_t, 1));
-    assign_point(t_f_r_middle_, safe_get(tr_t, 2));
-    assign_point(t_f_r_ring_,   safe_get(tr_t, 3));
-    assign_point(t_f_r_baby_,   safe_get(tr_t, 4));
+        t_f_r_thumb_  = f_r_thumb_;
+        t_f_r_index_  = f_r_index_;
+        t_f_r_middle_ = f_r_middle_;
+        t_f_r_ring_   = f_r_ring_;
+        t_f_r_baby_   = f_r_baby_;
+
+        for (int i = 0; i < 5; ++i) {
+            s_l_tar_init[i] = true;
+            s_r_tar_init[i] = true;
+        }
+    } else {
+        apply_point_deadband(t_f_l_thumb_,  safe_get(tl_t, 0), s_l_tar_init[0]);
+        apply_point_deadband(t_f_l_index_,  safe_get(tl_t, 1), s_l_tar_init[1]);
+        apply_point_deadband(t_f_l_middle_, safe_get(tl_t, 2), s_l_tar_init[2]);
+        apply_point_deadband(t_f_l_ring_,   safe_get(tl_t, 3), s_l_tar_init[3]);
+        apply_point_deadband(t_f_l_baby_,   safe_get(tl_t, 4), s_l_tar_init[4]);
+
+        apply_point_deadband(t_f_r_thumb_,  safe_get(tr_t, 0), s_r_tar_init[0]);
+        apply_point_deadband(t_f_r_index_,  safe_get(tr_t, 1), s_r_tar_init[1]);
+        apply_point_deadband(t_f_r_middle_, safe_get(tr_t, 2), s_r_tar_init[2]);
+        apply_point_deadband(t_f_r_ring_,   safe_get(tr_t, 3), s_r_tar_init[3]);
+        apply_point_deadband(t_f_r_baby_,   safe_get(tr_t, 4), s_r_tar_init[4]);
+    }
 }
 
 // ============================================================================
