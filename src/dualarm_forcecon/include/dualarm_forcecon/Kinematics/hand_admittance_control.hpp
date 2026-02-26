@@ -52,58 +52,88 @@ public:
 
     struct Config {
         // Admittance params (axis: x,y,z in HAND BASE frame)
-        std::array<double,3> mass      {{0.03, 0.03, 0.03}};
-        std::array<double,3> damping   {{8.0,  8.0,  8.0 }};
-        std::array<double,3> stiffness {{120.0,120.0,120.0}};
+        std::array<double,3> mass;
+        std::array<double,3> damping;
+        std::array<double,3> stiffness;
 
         // 축별 force-admittance 활성화 여부
         // false인 축은 p_cmd(axis)=p_des(axis) (순수 위치 유지)
-        std::array<bool,3> force_ctrl_enable {{true, true, true}};
+        std::array<bool,3> force_ctrl_enable;
 
         // Admittance offset 제한: p_cmd = p_des + x_adm
-        std::array<double,3> max_offset_m {{0.010, 0.010, 0.010}};   // [m]
+        std::array<double,3> max_offset_m;   // [m]
 
         // 한 step 당 p_cmd 변화량 제한 (rate limit)
-        std::array<double,3> max_step_m {{0.0010, 0.0010, 0.0010}};  // [m/tick]
+        std::array<double,3> max_step_m;     // [m/tick]
 
         // dt clamp (수치 안정화)
-        double dt_min_s = 1e-4;
-        double dt_max_s = 5e-2;
+        double dt_min_s;
+        double dt_max_s;
 
         // Force error 정의
         // true : f_err = f_des - f_meas  (권장 기본)
         // false: f_err = f_meas - f_des
-        bool force_error_des_minus_meas = true;
+        bool force_error_des_minus_meas;
 
         // Contact gate (옵션)
         // - false면 항상 admittance 적용
         // - true면 contact_on일 때만 admittance 적용 (아니면 offset decay 또는 hold)
-        bool use_contact_gate = false;
-        double contact_force_threshold_N = 0.5;   // norm 기준
+        bool use_contact_gate;
+        double contact_force_threshold_N;   // norm 기준
 
         // contact off 상태에서 offset/velocity를 감쇠시킬지
-        bool decay_when_no_contact = true;
-        double no_contact_decay_ratio = 0.90;     // 0~1, tick당 감소율
+        bool decay_when_no_contact;
+        double no_contact_decay_ratio;      // 0~1, tick당 감소율
 
         // IK solver 옵션 (HandInverseKinematics::Options)
-        int    ik_max_iters = 80;
-        double ik_tol_pos_m = 5e-4;
-        double ik_lambda    = 1e-2;
-        double ik_lambda_min= 1e-5;
-        double ik_lambda_max= 1.0;
-        double ik_alpha     = 0.8;
-        double ik_alpha_min = 0.05;
-        double ik_max_step  = 0.15;   // rad
-        double ik_mu_posture= 1e-4;
-        bool   ik_verbose   = false;
+        int    ik_max_iters;
+        double ik_tol_pos_m;
+        double ik_lambda;
+        double ik_lambda_min;
+        double ik_lambda_max;
+        double ik_alpha;
+        double ik_alpha_min;
+        double ik_max_step;    // rad
+        double ik_mu_posture;
+        bool   ik_verbose;
 
         // IK 실패 시 처리
-        bool keep_last_success_on_ik_fail = true;
-        bool damp_velocity_on_ik_fail = true;
-        double ik_fail_velocity_damping = 0.2; // v <- v * factor
+        bool keep_last_success_on_ik_fail;
+        bool damp_velocity_on_ik_fail;
+        double ik_fail_velocity_damping; // v <- v * factor
 
         // 디버그
-        bool verbose = false;
+        bool verbose;
+
+        Config()
+        : mass{{0.03, 0.03, 0.03}},
+          damping{{8.0, 8.0, 8.0}},
+          stiffness{{120.0, 120.0, 120.0}},
+          force_ctrl_enable{{true, true, true}},
+          max_offset_m{{0.010, 0.010, 0.010}},
+          max_step_m{{0.0010, 0.0010, 0.0010}},
+          dt_min_s(1e-4),
+          dt_max_s(5e-2),
+          force_error_des_minus_meas(true),
+          use_contact_gate(false),
+          contact_force_threshold_N(0.5),
+          decay_when_no_contact(true),
+          no_contact_decay_ratio(0.90),
+          ik_max_iters(80),
+          ik_tol_pos_m(5e-4),
+          ik_lambda(1e-2),
+          ik_lambda_min(1e-5),
+          ik_lambda_max(1.0),
+          ik_alpha(0.8),
+          ik_alpha_min(0.05),
+          ik_max_step(0.15),
+          ik_mu_posture(1e-4),
+          ik_verbose(false),
+          keep_last_success_on_ik_fail(true),
+          damp_velocity_on_ik_fail(true),
+          ik_fail_velocity_damping(0.2),
+          verbose(false)
+        {}
     };
 
     struct StepInput {
@@ -144,18 +174,33 @@ public:
 public:
     HandAdmittanceControl() = default;
 
+    // C++14-safe: default Config() 를 default argument로 두지 않고 오버로드로 분리
+    HandAdmittanceControl(std::shared_ptr<HandForwardKinematics> hand_fk,
+                          std::shared_ptr<HandInverseKinematics> hand_ik,
+                          int finger_id)
+    {
+        initialize(hand_fk, hand_ik, finger_id, Config());
+    }
+
     HandAdmittanceControl(std::shared_ptr<HandForwardKinematics> hand_fk,
                           std::shared_ptr<HandInverseKinematics> hand_ik,
                           int finger_id,
-                          const Config& cfg = Config())
+                          const Config& cfg)
     {
         initialize(hand_fk, hand_ik, finger_id, cfg);
     }
 
     bool initialize(std::shared_ptr<HandForwardKinematics> hand_fk,
                     std::shared_ptr<HandInverseKinematics> hand_ik,
+                    int finger_id)
+    {
+        return initialize(hand_fk, hand_ik, finger_id, Config());
+    }
+
+    bool initialize(std::shared_ptr<HandForwardKinematics> hand_fk,
+                    std::shared_ptr<HandInverseKinematics> hand_ik,
                     int finger_id,
-                    const Config& cfg = Config())
+                    const Config& cfg)
     {
         hand_fk_ = hand_fk;
         hand_ik_ = hand_ik;
@@ -265,7 +310,7 @@ public:
         // 4) 상태 초기화
         // -----------------------------
         if (!initialized_) {
-            // UR10e 코드처럼 desired 기준으로 초기화하는 쪽이 command jump가 적음
+            // desired 기준으로 초기화 -> command jump 완화
             initialized_ = true;
             adm_x_.setZero();
             adm_v_.setZero();
@@ -336,9 +381,9 @@ public:
             p_cmd(ax) = p_cmd_prev_(ax) + clampScalar_(d, -dmax, dmax);
         }
 
-        out.p_cmd_base  = p_cmd;
-        out.adm_offset  = adm_x_;
-        out.adm_velocity= adm_v_;
+        out.p_cmd_base   = p_cmd;
+        out.adm_offset   = adm_x_;
+        out.adm_velocity = adm_v_;
 
         // -----------------------------
         // 7) Method 1: whole-hand IK 재사용

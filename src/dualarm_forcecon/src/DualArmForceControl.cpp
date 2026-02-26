@@ -55,12 +55,12 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "/target_hand_fingertips", qos,
         std::bind(&DualArmForceControl::TargetHandPositionCallback, this, std::placeholders::_1));
 
-    // ✅ v15: Delta Cartesian target (inverse mode)
+    // v15: Delta Cartesian target (inverse mode)
     delta_arm_pos_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/delta_arm_cartesian_pose", qos,
         std::bind(&DualArmForceControl::DeltaArmPositionCallback, this, std::placeholders::_1));
 
-    // ✅ Forward joint targets (split)
+    // Forward joint targets (split)
     target_arm_joint_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/forward_arm_joint_targets", qos,
         std::bind(&DualArmForceControl::TargetArmJointsCallback, this, std::placeholders::_1));
@@ -68,6 +68,11 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     target_hand_joint_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/forward_hand_joint_targets", qos,
         std::bind(&DualArmForceControl::TargetHandJointsCallback, this, std::placeholders::_1));
+
+    // ✅ v18: force-control target callback (forcecon mode)
+    target_hand_force_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+        "/target_hand_force", qos,
+        std::bind(&DualArmForceControl::TargetHandForceCallback, this, std::placeholders::_1));
 
     contact_force_sub_ = node_->create_subscription<std_msgs::msg::Float32MultiArray>(
         "/isaac_contact_states", qos,
@@ -116,6 +121,20 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     hand_ik_l_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(urdf_path_, "left_hand_base_link", tips);
     hand_ik_r_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(urdf_path_, "right_hand_base_link", tips);
 
+    // ✅ v18: per-finger hand admittance controllers (Strategy A)
+    for (int f = 0; f < 5; ++f) {
+        dualarm_forcecon::HandAdmittanceControl::Config cfg;
+        cfg.verbose = false;
+        cfg.ik_verbose = false;
+
+        // 기본값 유지 (필요시 ring 전용 튜닝 가능)
+        // 예: ring만 X축 force 위주로 사용하고 싶다면 아래처럼:
+        // if (f == 3) { cfg.force_ctrl_enable = {{true, false, false}}; }
+
+        hand_adm_l_[f] = std::make_shared<dualarm_forcecon::HandAdmittanceControl>(hand_fk_l_, hand_ik_l_, f, cfg);
+        hand_adm_r_[f] = std::make_shared<dualarm_forcecon::HandAdmittanceControl>(hand_fk_r_, hand_ik_r_, f, cfg);
+    }
+
     // -------------------------
     // Timers
     // -------------------------
@@ -128,6 +147,9 @@ DualArmForceControl::~DualArmForceControl() {}
 void DualArmForceControl::ControlLoop() {
     if (!is_initialized_ || joint_names_.empty()) return;
 
+    // idle 진입 시 1회 현재값으로 target sync
+    // (forcecon 모드에서는 TargetHandForceCallback이 선택 finger만 q_*_h_t_를 갱신하고,
+    //  나머지는 mode 진입 시 동기화된 값을 유지 -> "나머지 joint idle 유지" 충족)
     if (current_control_mode_ == "idle" && !idle_synced_) {
         q_l_t_   = q_l_c_;
         q_r_t_   = q_r_c_;
@@ -170,7 +192,7 @@ void DualArmForceControl::ControlLoop() {
                 continue;
             }
 
-            const int idx = hj.finger_id * 4 + hj.joint_id; // 0..19
+            const int idx = hj.finger_id * 4 + hj.joint_id; // 0..19 (canonical order)
             if (idx < 0 || idx >= 20) {
                 cmd.position.push_back(0.0);
                 continue;

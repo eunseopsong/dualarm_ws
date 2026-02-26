@@ -886,29 +886,78 @@ void DualArmForceControl::TargetHandJointsCallback(
 }
 
 // --------------------
-// ControlModeCallback  (v11: inverse 진입 시 target sync)
+// ControlModeCallback (v18: forcecon mode 추가, target-force zero issue fix)
+// mode cycle:
+//   idle -> forward -> inverse -> forcecon -> idle -> ...
+//
+// forcecon 진입 시:
+// - arm/hand target을 현재값으로 동기화 (비제어 joint idle 유지)
+// - hand target force는 여기서 setZero() 하지 않음 (TargetHandForceCallback 값 유지)
 // --------------------
 void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                                               std::shared_ptr<std_srvs::srv::Trigger::Response> res)
 {
     (void)req;
-    current_control_mode_ =
-        (current_control_mode_=="idle") ? "forward" :
-        (current_control_mode_=="forward") ? "inverse" : "idle";
 
-    if (current_control_mode_=="idle") {
+    // mode cycle
+    if (current_control_mode_ == "idle") {
+        current_control_mode_ = "forward";
+    } else if (current_control_mode_ == "forward") {
+        current_control_mode_ = "inverse";
+    } else if (current_control_mode_ == "inverse") {
+        current_control_mode_ = "forcecon";
+    } else {
+        current_control_mode_ = "idle";
+    }
+
+    // idle 진입 시 다음 ControlLoop에서 1회 sync 하도록
+    if (current_control_mode_ == "idle") {
         idle_synced_ = false;
     }
 
-    // ✅ inverse로 바뀌는 순간 "현재값=타겟"으로 동기화해서
-    //    hand 토픽만 테스트할 때 arm이 의도치 않게 움직이는 걸 방지
-    if (current_control_mode_=="inverse") {
-        for (int i=0;i<6;i++){ q_l_t_(i)=q_l_c_(i); q_r_t_(i)=q_r_c_(i); }
-        for (int i=0;i<20;i++){ q_l_h_t_(i)=q_l_h_c_(i); q_r_h_t_(i)=q_r_h_c_(i); }
+    // inverse / forcecon 진입 시 즉시 현재값으로 target sync
+    // - hand만 테스트할 때 arm이 갑자기 움직이지 않게
+    // - forcecon에서 비대상 joint는 idle 유지
+    if (current_control_mode_ == "inverse" || current_control_mode_ == "forcecon") {
+        for (int i = 0; i < 6; ++i) {
+            q_l_t_(i) = q_l_c_(i);
+            q_r_t_(i) = q_r_c_(i);
+        }
+        for (int i = 0; i < 20; ++i) {
+            q_l_h_t_(i) = q_l_h_c_(i);
+            q_r_h_t_(i) = q_r_h_c_(i);
+        }
+
+        // monitor pose/fingertip target도 현재 상태로 시작 (표시 안정화)
+        target_pose_l_ = current_pose_l_;
+        target_pose_r_ = current_pose_r_;
+
+        t_f_l_thumb_  = f_l_thumb_;
+        t_f_l_index_  = f_l_index_;
+        t_f_l_middle_ = f_l_middle_;
+        t_f_l_ring_   = f_l_ring_;
+        t_f_l_baby_   = f_l_baby_;
+
+        t_f_r_thumb_  = f_r_thumb_;
+        t_f_r_index_  = f_r_index_;
+        t_f_r_middle_ = f_r_middle_;
+        t_f_r_ring_   = f_r_ring_;
+        t_f_r_baby_   = f_r_baby_;
     }
 
-    res->success=true;
-    res->message="Mode: "+current_control_mode_;
+    // arm force monitor target은 현재 미사용이므로 항상 0 유지
+    f_l_t_.setZero();
+    f_r_t_.setZero();
+
+    // ✅ hand target force는 forcecon에서 지우지 않음
+    //    (TargetHandForceCallback에서 설정한 값을 print에서 볼 수 있게 유지)
+    if (current_control_mode_ != "forcecon") {
+        f_l_hand_t_.setZero();
+        f_r_hand_t_.setZero();
+    }
+
+    res->success = true;
+    res->message = "Mode: " + current_control_mode_;
 }
 
 // ============================================================================
@@ -1089,11 +1138,199 @@ void DualArmForceControl::HandContactForceCallback(
     assign_one_hand(f_r_hand_c_, Rr_base_tip, 5);
 }
 
+// --------------------
+// TargetHandForceCallback (v18, forcecon mode)
+// /target_hand_force : Float64MultiArray
+//   [hand_id, finger_id, px, py, pz, fx, fy, fz]
+//    hand_id   : 0=left, 1=right
+//    finger_id : 0=thumb,1=index,2=middle,3=ring,4=baby (canonical order)
+//    p*        : desired fingertip position in HAND BASE frame [m]
+//    f*        : desired force in HAND BASE frame [N]
+//
+// 동작:
+// - forcecon 모드에서만 동작
+// - 선택된 손가락만 hand_admittance_control + HandIK로 q1,q2,q3(q4=q3) 갱신
+// - 나머지 arm/hand joint는 현재/기존 target 유지 (mode 진입 시 sync된 값 유지)
+// - 실제 publish는 ControlLoop() 타이머가 담당 (/isaac_joint_command)
+// --------------------
+void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+{
+    if (current_control_mode_ != "forcecon") return;
+    if (!msg) return;
+    if (msg->data.size() < 8) return;
+
+    auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+
+    // ---- parse ----
+    const double hand_id_d   = msg->data[0];
+    const double finger_id_d = msg->data[1];
+
+    if (!std::isfinite(hand_id_d) || !std::isfinite(finger_id_d)) {
+        RCLCPP_WARN(logger, "[TargetHandForceCallback] non-finite hand_id/finger_id");
+        return;
+    }
+
+    const int hand_id   = static_cast<int>(std::llround(hand_id_d));     // 0=left, 1=right
+    const int finger_id = static_cast<int>(std::llround(finger_id_d));   // canonical order
+
+    if (!(hand_id == 0 || hand_id == 1)) {
+        RCLCPP_WARN(logger, "[TargetHandForceCallback] invalid hand_id=%d (use 0:left, 1:right)", hand_id);
+        return;
+    }
+    if (finger_id < 0 || finger_id > 4) {
+        RCLCPP_WARN(logger, "[TargetHandForceCallback] invalid finger_id=%d (use 0..4)", finger_id);
+        return;
+    }
+
+    Eigen::Vector3d p_des_base(msg->data[2], msg->data[3], msg->data[4]);
+    Eigen::Vector3d f_des_base(msg->data[5], msg->data[6], msg->data[7]);
+
+    if (!(std::isfinite(p_des_base.x()) && std::isfinite(p_des_base.y()) && std::isfinite(p_des_base.z()) &&
+          std::isfinite(f_des_base.x()) && std::isfinite(f_des_base.y()) && std::isfinite(f_des_base.z()))) {
+        RCLCPP_WARN(logger, "[TargetHandForceCallback] non-finite desired pose/force");
+        return;
+    }
+
+    const bool is_left = (hand_id == 0);
+
+    // ---- select side resources ----
+    auto& adm_arr = is_left ? hand_adm_l_ : hand_adm_r_;
+    auto  adm_ptr = adm_arr[static_cast<size_t>(finger_id)];
+
+    if (!adm_ptr || !adm_ptr->isOk()) {
+        RCLCPP_WARN(logger, "[TargetHandForceCallback] admittance controller not ready. side=%s finger=%d",
+                    is_left ? "L" : "R", finger_id);
+        return;
+    }
+
+    const Eigen::Matrix<double,5,3>& f_hand_c_mat = is_left ? f_l_hand_c_ : f_r_hand_c_;
+    Eigen::Matrix<double,5,3>&       f_hand_t_mat = is_left ? f_l_hand_t_ : f_r_hand_t_;
+    Eigen::VectorXd&                 q_h_c        = is_left ? q_l_h_c_    : q_r_h_c_;
+    Eigen::VectorXd&                 q_h_t        = is_left ? q_l_h_t_    : q_r_h_t_;
+
+    // ---- measured force in HAND BASE frame (already transformed in HandContactForceCallback) ----
+    // row order = canonical: thumb,index,middle,ring,baby
+    Eigen::Vector3d f_meas_base = f_hand_c_mat.row(finger_id).transpose();
+
+    // ---- current q20 ----
+    std::vector<double> q_cur20(20, 0.0);
+    for (int i = 0; i < 20 && i < q_h_c.size(); ++i) q_cur20[i] = q_h_c(i);
+
+    // ---- dt estimate (per hand/finger static timer) ----
+    // callback 기반 입력 주기를 그대로 사용. 첫 호출은 10ms fallback.
+    double dt_s = 0.01;
+    if (node_) {
+        static std::array<bool, 10>   s_valid = {false,false,false,false,false,false,false,false,false,false};
+        static std::array<int64_t,10> s_last_ns{};
+
+        const int key = (is_left ? 0 : 5) + finger_id;
+        const auto now = node_->get_clock()->now();
+        const int64_t now_ns = now.nanoseconds();
+
+        if (s_valid[key]) {
+            dt_s = static_cast<double>(now_ns - s_last_ns[key]) * 1e-9;
+        }
+        s_last_ns[key] = now_ns;
+        s_valid[key] = true;
+
+        if (!std::isfinite(dt_s) || dt_s <= 0.0) dt_s = 0.01;
+        dt_s = std::max(1e-4, std::min(dt_s, 5e-2));
+    }
+
+    // ---- run hand admittance (Strategy A, Method 1) ----
+    dualarm_forcecon::HandAdmittanceControl::StepInput in;
+    in.p_des_base = p_des_base;
+    in.f_des_base = f_des_base;
+    in.f_meas_base = f_meas_base;
+    in.q_hand_current20 = q_cur20;
+    in.dt_s = dt_s;
+
+    auto out = adm_ptr->step(in);
+
+    if (!out.controller_ok) {
+        RCLCPP_WARN(logger, "[TargetHandForceCallback] controller step failed (controller_ok=0)");
+        return;
+    }
+
+    // ---- forcecon policy: non-target joints stay idle/hold ----
+    // arms는 항상 현재값 유지 (forcecon은 hand만 제어)
+    for (int i = 0; i < 6; ++i) {
+        q_l_t_(i) = q_l_c_(i);
+        q_r_t_(i) = q_r_c_(i);
+    }
+
+    // selected hand finger만 q target 업데이트 (q4 = mimic(q3))
+    const int b = finger_id * 4;
+    if (b + 3 < q_h_t.size()) {
+        q_h_t(b + 0) = out.q_cmd_123[0];
+        q_h_t(b + 1) = out.q_cmd_123[1];
+        q_h_t(b + 2) = out.q_cmd_123[2];
+        q_h_t(b + 3) = out.q_cmd_4_mimic;
+    }
+
+    // ---- monitor target force 표시 업데이트 ----
+    // 해당 hand의 TAR force는 우선 모두 0으로 리셋 후, 선택 finger만 desired force 표시
+    f_hand_t_mat.setZero();
+    f_hand_t_mat.row(finger_id) = f_des_base.transpose();
+
+    // ---- monitor target fingertip position 표시 업데이트 (선택 finger만) ----
+    auto setFingerTargetPoint = [&](bool left, int fid, const Eigen::Vector3d& p) {
+        geometry_msgs::msg::Point pt;
+        pt.x = p.x(); pt.y = p.y(); pt.z = p.z();
+
+        if (left) {
+            switch (fid) {
+                case 0: t_f_l_thumb_  = pt; break;
+                case 1: t_f_l_index_  = pt; break;
+                case 2: t_f_l_middle_ = pt; break;
+                case 3: t_f_l_ring_   = pt; break;
+                case 4: t_f_l_baby_   = pt; break;
+                default: break;
+            }
+        } else {
+            switch (fid) {
+                case 0: t_f_r_thumb_  = pt; break;
+                case 1: t_f_r_index_  = pt; break;
+                case 2: t_f_r_middle_ = pt; break;
+                case 3: t_f_r_ring_   = pt; break;
+                case 4: t_f_r_baby_   = pt; break;
+                default: break;
+            }
+        }
+    };
+    setFingerTargetPoint(is_left, finger_id, p_des_base);
+
+    // ---- debug (decimated) ----
+    static int dbg_decim = 0;
+    if ((dbg_decim++ % 20) == 0) {
+        RCLCPP_INFO(logger,
+            "[TargetHandForceCb] side=%s finger=%d dt=%.4f ik_ok=%d | p_des=(%.4f %.4f %.4f) p_cmd=(%.4f %.4f %.4f) | f_des=(%.3f %.3f %.3f) f_meas=(%.3f %.3f %.3f)",
+            is_left ? "L" : "R",
+            finger_id,
+            dt_s,
+            static_cast<int>(out.ik_ok),
+            p_des_base.x(), p_des_base.y(), p_des_base.z(),
+            out.p_cmd_base.x(), out.p_cmd_base.y(), out.p_cmd_base.z(),
+            f_des_base.x(), f_des_base.y(), f_des_base.z(),
+            f_meas_base.x(), f_meas_base.y(), f_meas_base.z());
+    }
+
+    if (!out.ik_ok) {
+        RCLCPP_WARN(logger,
+            "[TargetHandForceCb] IK fallback used. side=%s finger=%d",
+            is_left ? "L" : "R", finger_id);
+    }
+
+    // 참고:
+    // 실제 /isaac_joint_command publish는 ControlLoop() 타이머가 수행함.
+}
+
+
 // ============================================================================
-// PrintDualArmStates (v15 hand-contact mapping fix)
+// PrintDualArmStates (v17+ target force visible)
 // - Finger print order: BABY -> RING -> MIDL -> INDX -> THMB
 // - Hand force row mapping (canonical): THMB=0, INDX=1, MIDL=2, RING=3, BABY=4
-// - Arm forces are printed as zeros (for now)
+// - ARM/HAND 모두 저장된 CUR_F / TAR_F를 그대로 출력
 // ============================================================================
 void DualArmForceControl::PrintDualArmStates() {
     if (!is_initialized_) return;
@@ -1108,8 +1345,6 @@ void DualArmForceControl::PrintDualArmStates() {
     constexpr const char* C_CUR_F   = "\033[1;31m";
     constexpr const char* C_TAR_F   = "\033[1;34m";
     constexpr const char* C_MODE    = "\033[1;92m";
-
-    const Eigen::Vector3d ZERO_ARM_F(0.0, 0.0, 0.0);
 
     auto fmtArmLine = [&](const char* tag,
                           const geometry_msgs::msg::Pose& pose,
@@ -1174,17 +1409,17 @@ void DualArmForceControl::PrintDualArmStates() {
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 
     // ------------------------------------------------------------------------
-    // ARM (force always zeros for now)
+    // ARM (stored CUR_F / TAR_F)
     // ------------------------------------------------------------------------
     printf("%s[L ARM]%s\n", C_TITLE, C_RESET);
-    fmtArmLine("CUR", current_pose_l_, ZERO_ARM_F, C_CUR_POS, C_CUR_F);
-    fmtArmLine("TAR", target_pose_l_,  ZERO_ARM_F, C_TAR_POS, C_TAR_F);
+    fmtArmLine("CUR", current_pose_l_, f_l_c_, C_CUR_POS, C_CUR_F);
+    fmtArmLine("TAR", target_pose_l_,  f_l_t_, C_TAR_POS, C_TAR_F);
 
     printf("%s------------------------------------------------------------------------------------------------------------%s\n", C_DIM, C_RESET);
 
     printf("%s[R ARM]%s\n", C_TITLE, C_RESET);
-    fmtArmLine("CUR", current_pose_r_, ZERO_ARM_F, C_CUR_POS, C_CUR_F);
-    fmtArmLine("TAR", target_pose_r_,  ZERO_ARM_F, C_TAR_POS, C_TAR_F);
+    fmtArmLine("CUR", current_pose_r_, f_r_c_, C_CUR_POS, C_CUR_F);
+    fmtArmLine("TAR", target_pose_r_,  f_r_t_, C_TAR_POS, C_TAR_F);
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 

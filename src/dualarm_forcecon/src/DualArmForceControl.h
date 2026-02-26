@@ -22,6 +22,7 @@
 #include "dualarm_forcecon/Kinematics/arm_inverse_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/hand_inverse_kinematics.hpp"
+#include "dualarm_forcecon/Kinematics/hand_admittance_control.hpp"   // ✅ v18
 #include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"
 
 class DualArmForceControl : public std::enable_shared_from_this<DualArmForceControl> {
@@ -52,6 +53,15 @@ public:
     // Contact force callback uses Float32MultiArray (Isaac ActionGraph)
     void HandContactForceCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
 
+    // ✅ v18: hand force-control target callback (forcecon mode)
+    // /target_hand_force : Float64MultiArray
+    // [hand_id, finger_id, px, py, pz, fx, fy, fz]
+    //   hand_id   : 0=left, 1=right
+    //   finger_id : 0=thumb,1=index,2=middle,3=ring,4=baby (canonical order)
+    //   p*        : desired fingertip position in HAND BASE frame [m]
+    //   f*        : desired fingertip force in HAND BASE frame [N]
+    void TargetHandForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+
     void ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                              std::shared_ptr<std_srvs::srv::Trigger::Response> res);
 
@@ -75,6 +85,9 @@ private:
     // Forward joint targets (split)
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_joint_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_joint_sub_;
+
+    // ✅ v18: force-control target topic (forcecon mode)
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_force_sub_;
 
     // Contact states topic from Isaac ActionGraph (Float32MultiArray)
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr contact_force_sub_;
@@ -109,6 +122,7 @@ private:
     Eigen::Vector3d f_l_t_{0,0,0}, f_r_t_{0,0,0};
 
     // forces (hand) : 5 fingers x 3
+    // row order = canonical (thumb,index,middle,ring,baby)
     Eigen::Matrix<double,5,3> f_l_hand_c_;
     Eigen::Matrix<double,5,3> f_r_hand_c_;
     Eigen::Matrix<double,5,3> f_l_hand_t_;
@@ -120,6 +134,11 @@ private:
 
     std::shared_ptr<dualarm_forcecon::HandForwardKinematics> hand_fk_l_, hand_fk_r_;
     std::shared_ptr<dualarm_forcecon::HandInverseKinematics> hand_ik_l_, hand_ik_r_;
+
+    // ✅ v18: per-finger admittance controllers (Strategy A)
+    // canonical order: 0 thumb,1 index,2 middle,3 ring,4 baby
+    std::array<std::shared_ptr<dualarm_forcecon::HandAdmittanceControl>,5> hand_adm_l_;
+    std::array<std::shared_ptr<dualarm_forcecon::HandAdmittanceControl>,5> hand_adm_r_;
 
     // poses (arm world/base pose as configured by arm_fk_ default frame)
     geometry_msgs::msg::Pose current_pose_l_, current_pose_r_;
