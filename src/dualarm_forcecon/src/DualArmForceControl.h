@@ -3,7 +3,8 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
-#include "std_msgs/msg/float64_multi_array.hpp"
+#include "std_msgs/msg/float32_multi_array.hpp"   // /isaac_contact_states 용
+#include "std_msgs/msg/float64_multi_array.hpp"   // arm/hand target 토픽들 용
 #include "std_srvs/srv/trigger.hpp"
 
 #include <geometry_msgs/msg/pose.hpp>
@@ -48,7 +49,9 @@ public:
     void TargetArmJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetHandJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
 
-    void ContactForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    // ✅ Contact force callback uses Float32MultiArray (Isaac ActionGraph)
+    void ContactForceHandCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
+
     void ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                              std::shared_ptr<std_srvs::srv::Trigger::Response> res);
 
@@ -73,7 +76,8 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_joint_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_joint_sub_;
 
-    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr contact_force_sub_;
+    // ✅ Contact states topic from Isaac ActionGraph (Float32MultiArray)
+    rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr contact_force_sub_;
 
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr mode_service_;

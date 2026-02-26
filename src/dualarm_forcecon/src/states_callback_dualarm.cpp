@@ -759,13 +759,88 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
 // --------------------
 // ContactForceCallback (arm)
 // --------------------
-void DualArmForceControl::ContactForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
-    if (msg->data.size() < 6) return;
-    f_l_c_ << msg->data[0], msg->data[1], msg->data[2];
-    f_r_c_ << msg->data[3], msg->data[4], msg->data[5];
+// ============================================================================
+// ContactForceHandCallback
+// /isaac_contact_states (std_msgs/msg/Float32MultiArray)
+// - 현재 Isaac Sim Action Graph에서 "손가락 10개"의 contact force만 publish
+// - data size = 10
+// - index order:
+//   [0] L baby, [1] L index, [2] L middle, [3] L ring, [4] L thumb,
+//   [5] R baby, [6] R index, [7] R middle, [8] R ring, [9] R thumb
+//
+// 내부 저장 정책:
+// - f_l_hand_c_, f_r_hand_c_는 (5x3) 이므로, scalar force를 z축 성분(2번 열)에 저장
+// - x/y 성분은 0으로 둠
+// - arm force(f_l_c_, f_r_c_)는 이 토픽에서 오지 않으므로 0으로 유지
+// ============================================================================
+void DualArmForceControl::ContactForceHandCallback(
+    const std_msgs::msg::Float32MultiArray::SharedPtr msg)
+{
+    if (!msg) return;
 
-    f_l_t_ = f_l_c_;
-    f_r_t_ = f_r_c_;
+    // 현재 토픽은 hand only 이므로 arm force는 항상 0으로 둔다.
+    f_l_c_.setZero();
+    f_r_c_.setZero();
+
+    // hand current force matrix 초기화 (5 fingers x 3 axes)
+    f_l_hand_c_.setZero();
+    f_r_hand_c_.setZero();
+
+    // 기대 길이: 10
+    if (msg->data.size() < 10) {
+        if (node_) {
+            RCLCPP_WARN_THROTTLE(
+                node_->get_logger(), *node_->get_clock(), 2000,
+                "[ContactForceHandCallback] /isaac_contact_states size=%zu (expected >=10). Ignore partial data.",
+                msg->data.size());
+        }
+        return;
+    }
+
+    auto finite_or_zero = [](float v) -> double {
+        return std::isfinite(v) ? static_cast<double>(v) : 0.0;
+    };
+
+    // finger row index in our internal matrix convention:
+    // [0]=thumb, [1]=index, [2]=middle, [3]=ring, [4]=baby
+    constexpr int THUMB  = 0;
+    constexpr int INDEX  = 1;
+    constexpr int MIDDLE = 2;
+    constexpr int RING   = 3;
+    constexpr int BABY   = 4;
+    constexpr int ZCOL   = 2;  // store scalar contact force as z component
+
+    // -------------------------
+    // Left hand (0..4)
+    // input: baby, index, middle, ring, thumb
+    // -------------------------
+    f_l_hand_c_(BABY,   ZCOL) = finite_or_zero(msg->data[0]);
+    f_l_hand_c_(INDEX,  ZCOL) = finite_or_zero(msg->data[1]);
+    f_l_hand_c_(MIDDLE, ZCOL) = finite_or_zero(msg->data[2]);
+    f_l_hand_c_(RING,   ZCOL) = finite_or_zero(msg->data[3]);
+    f_l_hand_c_(THUMB,  ZCOL) = finite_or_zero(msg->data[4]);
+
+    // -------------------------
+    // Right hand (5..9)
+    // input: baby, index, middle, ring, thumb
+    // -------------------------
+    f_r_hand_c_(BABY,   ZCOL) = finite_or_zero(msg->data[5]);
+    f_r_hand_c_(INDEX,  ZCOL) = finite_or_zero(msg->data[6]);
+    f_r_hand_c_(MIDDLE, ZCOL) = finite_or_zero(msg->data[7]);
+    f_r_hand_c_(RING,   ZCOL) = finite_or_zero(msg->data[8]);
+    f_r_hand_c_(THUMB,  ZCOL) = finite_or_zero(msg->data[9]);
+
+    // (선택) 디버그 로그가 필요하면 아래 주석 해제
+    // if (node_) {
+    //     RCLCPP_INFO_THROTTLE(
+    //         node_->get_logger(), *node_->get_clock(), 1000,
+    //         "[ContactForceHandCallback] L[ba,idx,mid,ring,th]=[%.3f %.3f %.3f %.3f %.3f] "
+    //         "R[ba,idx,mid,ring,th]=[%.3f %.3f %.3f %.3f %.3f]",
+    //         f_l_hand_c_(BABY,ZCOL), f_l_hand_c_(INDEX,ZCOL), f_l_hand_c_(MIDDLE,ZCOL),
+    //         f_l_hand_c_(RING,ZCOL), f_l_hand_c_(THUMB,ZCOL),
+    //         f_r_hand_c_(BABY,ZCOL), f_r_hand_c_(INDEX,ZCOL), f_r_hand_c_(MIDDLE,ZCOL),
+    //         f_r_hand_c_(RING,ZCOL), f_r_hand_c_(THUMB,ZCOL));
+    // }
 }
 
 // ============================================================================

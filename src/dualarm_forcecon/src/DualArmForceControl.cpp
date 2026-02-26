@@ -69,9 +69,9 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "/forward_hand_joint_targets", qos,
         std::bind(&DualArmForceControl::TargetHandJointsCallback, this, std::placeholders::_1));
 
-    contact_force_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+    contact_force_sub_ = node_->create_subscription<std_msgs::msg::Float32MultiArray>(
         "/isaac_contact_states", qos,
-        std::bind(&DualArmForceControl::ContactForceCallback, this, std::placeholders::_1));
+        std::bind(&DualArmForceControl::ContactForceHandCallback, this, std::placeholders::_1));
 
     joint_command_pub_ = node_->create_publisher<sensor_msgs::msg::JointState>(
         "/isaac_joint_command", 10);
