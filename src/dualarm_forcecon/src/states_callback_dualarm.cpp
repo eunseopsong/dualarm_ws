@@ -4,6 +4,9 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <array>
+#include <algorithm>
+#include <cctype>
 
 
 // --------------------
@@ -946,12 +949,16 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
     }
 
     // arm force monitor target은 현재 미사용이므로 항상 0 유지
+    // (센서 콜백에서 target force를 건드리지 않도록 정책 분리)
     f_l_t_.setZero();
     f_r_t_.setZero();
 
     // ✅ hand target force는 forcecon에서 지우지 않음
     //    (TargetHandForceCallback에서 설정한 값을 print에서 볼 수 있게 유지)
-    if (current_control_mode_ != "forcecon") {
+    //    forcecon 이외의 모드에서만 clear
+    if (current_control_mode_ == "idle" ||
+        current_control_mode_ == "forward" ||
+        current_control_mode_ == "inverse") {
         f_l_hand_t_.setZero();
         f_r_hand_t_.setZero();
     }
@@ -961,7 +968,7 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
 }
 
 // ============================================================================
-// HandContactForceCallback (v17/v18 patched)
+// HandContactForceCallback (v17/v18 patched + refactor)
 // ----------------------------------------------------------------------------
 // 역할:
 // - /isaac_contact_states (Float32MultiArray, 10 scalars) 를 읽어
@@ -988,14 +995,20 @@ void DualArmForceControl::HandContactForceCallback(
 
     // ------------------------------------------------------------------------
     // Reset CURRENT force buffers only
-    // (arm force is not measured yet -> keep zero)
-    // IMPORTANT: Do NOT reset target force buffers here.
+    // IMPORTANT:
+    // - Do NOT touch target force buffers here (f_*_t_, f_*_hand_t_)
+    // - Sensor callback updates ONLY current measurement buffers (*_c_)
     // ------------------------------------------------------------------------
-    f_l_c_.setZero();
-    f_r_c_.setZero();
+    auto reset_current_force_buffers_only = [&]() {
+        // arm force is not measured yet -> keep current monitor as zero
+        f_l_c_.setZero();
+        f_r_c_.setZero();
 
-    f_l_hand_c_.setZero();
-    f_r_hand_c_.setZero();
+        // hand current measured forces
+        f_l_hand_c_.setZero();
+        f_r_hand_c_.setZero();
+    };
+    reset_current_force_buffers_only();
 
     // Need 10 scalar values (5 left + 5 right)
     if (msg->data.size() < 10) {
@@ -1110,7 +1123,8 @@ void DualArmForceControl::HandContactForceCallback(
 
     // NOTE:
     // - f_l_hand_t_ / f_r_hand_t_ are intentionally NOT touched here.
-    // - They should be updated only by TargetHandForceCallback (desired force command).
+    // - They should be updated only by TargetHandForceCallback (desired force command),
+    //   or explicitly cleared in ControlModeCallback when leaving forcecon.
 }
 
 // --------------------
@@ -1127,6 +1141,10 @@ void DualArmForceControl::HandContactForceCallback(
 // - 선택된 손가락만 hand_admittance_control + HandIK로 q1,q2,q3(q4=q3) 갱신
 // - 나머지 arm/hand joint는 현재/기존 target 유지 (mode 진입 시 sync된 값 유지)
 // - 실제 publish는 ControlLoop() 타이머가 담당 (/isaac_joint_command)
+//
+// [중요 패치]
+// - TAR_F 표시값은 "파싱 직후" 먼저 갱신한다.
+//   => controller/IK 실패해도 print에서 target force는 보이게 함
 // --------------------
 void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
@@ -1168,20 +1186,55 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
 
     const bool is_left = (hand_id == 0);
 
-    // ---- select side resources ----
+    // ---- select side resources / state refs ----
     auto& adm_arr = is_left ? hand_adm_l_ : hand_adm_r_;
     auto  adm_ptr = adm_arr[static_cast<size_t>(finger_id)];
-
-    if (!adm_ptr || !adm_ptr->isOk()) {
-        RCLCPP_WARN(logger, "[TargetHandForceCallback] admittance controller not ready. side=%s finger=%d",
-                    is_left ? "L" : "R", finger_id);
-        return;
-    }
 
     const Eigen::Matrix<double,5,3>& f_hand_c_mat = is_left ? f_l_hand_c_ : f_r_hand_c_;
     Eigen::Matrix<double,5,3>&       f_hand_t_mat = is_left ? f_l_hand_t_ : f_r_hand_t_;
     Eigen::VectorXd&                 q_h_c        = is_left ? q_l_h_c_    : q_r_h_c_;
     Eigen::VectorXd&                 q_h_t        = is_left ? q_l_h_t_    : q_r_h_t_;
+
+    // ---- monitor target force 표시 업데이트 (먼저 수행) ----
+    // controller/IK 성공 여부와 무관하게 TAR_F는 사용자가 보낸 명령을 반영
+    {
+        f_hand_t_mat.setZero();
+        f_hand_t_mat.row(finger_id) = f_des_base.transpose();
+    }
+
+    // ---- monitor target fingertip position 표시 업데이트 (선택 finger만 먼저 반영) ----
+    auto setFingerTargetPoint = [&](bool left, int fid, const Eigen::Vector3d& p) {
+        geometry_msgs::msg::Point pt;
+        pt.x = p.x(); pt.y = p.y(); pt.z = p.z();
+
+        if (left) {
+            switch (fid) {
+                case 0: t_f_l_thumb_  = pt; break;
+                case 1: t_f_l_index_  = pt; break;
+                case 2: t_f_l_middle_ = pt; break;
+                case 3: t_f_l_ring_   = pt; break;
+                case 4: t_f_l_baby_   = pt; break;
+                default: break;
+            }
+        } else {
+            switch (fid) {
+                case 0: t_f_r_thumb_  = pt; break;
+                case 1: t_f_r_index_  = pt; break;
+                case 2: t_f_r_middle_ = pt; break;
+                case 3: t_f_r_ring_   = pt; break;
+                case 4: t_f_r_baby_   = pt; break;
+                default: break;
+            }
+        }
+    };
+    setFingerTargetPoint(is_left, finger_id, p_des_base);
+
+    // ---- admittance controller readiness check ----
+    if (!adm_ptr || !adm_ptr->isOk()) {
+        RCLCPP_WARN(logger, "[TargetHandForceCallback] admittance controller not ready. side=%s finger=%d (TAR_F monitor updated)",
+                    is_left ? "L" : "R", finger_id);
+        return;
+    }
 
     // ---- measured force in HAND BASE frame (already transformed in HandContactForceCallback) ----
     // row order = canonical: thumb,index,middle,ring,baby
@@ -1223,7 +1276,7 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
     auto out = adm_ptr->step(in);
 
     if (!out.controller_ok) {
-        RCLCPP_WARN(logger, "[TargetHandForceCallback] controller step failed (controller_ok=0)");
+        RCLCPP_WARN(logger, "[TargetHandForceCallback] controller step failed (controller_ok=0, TAR_F monitor kept)");
         return;
     }
 
@@ -1243,43 +1296,16 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
         q_h_t(b + 3) = out.q_cmd_4_mimic;
     }
 
-    // ---- monitor target force 표시 업데이트 ----
-    // 해당 hand의 TAR force는 우선 모두 0으로 리셋 후, 선택 finger만 desired force 표시
-    f_hand_t_mat.setZero();
-    f_hand_t_mat.row(finger_id) = f_des_base.transpose();
-
-    // ---- monitor target fingertip position 표시 업데이트 (선택 finger만) ----
-    auto setFingerTargetPoint = [&](bool left, int fid, const Eigen::Vector3d& p) {
-        geometry_msgs::msg::Point pt;
-        pt.x = p.x(); pt.y = p.y(); pt.z = p.z();
-
-        if (left) {
-            switch (fid) {
-                case 0: t_f_l_thumb_  = pt; break;
-                case 1: t_f_l_index_  = pt; break;
-                case 2: t_f_l_middle_ = pt; break;
-                case 3: t_f_l_ring_   = pt; break;
-                case 4: t_f_l_baby_   = pt; break;
-                default: break;
-            }
-        } else {
-            switch (fid) {
-                case 0: t_f_r_thumb_  = pt; break;
-                case 1: t_f_r_index_  = pt; break;
-                case 2: t_f_r_middle_ = pt; break;
-                case 3: t_f_r_ring_   = pt; break;
-                case 4: t_f_r_baby_   = pt; break;
-                default: break;
-            }
-        }
-    };
-    setFingerTargetPoint(is_left, finger_id, p_des_base);
+    // 참고:
+    // TAR_F / target fingertip display는 이미 위에서 갱신 완료.
+    // 여기서는 q target (실제 제어 입력)만 반영하면 됨.
 
     // ---- debug (decimated) ----
     static int dbg_decim = 0;
     if ((dbg_decim++ % 20) == 0) {
+        const Eigen::Vector3d f_tar_row = f_hand_t_mat.row(finger_id).transpose();
         RCLCPP_INFO(logger,
-            "[TargetHandForceCb] side=%s finger=%d dt=%.4f ik_ok=%d | p_des=(%.4f %.4f %.4f) p_cmd=(%.4f %.4f %.4f) | f_des=(%.3f %.3f %.3f) f_meas=(%.3f %.3f %.3f)",
+            "[TargetHandForceCb] side=%s finger=%d dt=%.4f ik_ok=%d | p_des=(%.4f %.4f %.4f) p_cmd=(%.4f %.4f %.4f) | f_des=(%.3f %.3f %.3f) f_meas=(%.3f %.3f %.3f) f_tar_row=(%.3f %.3f %.3f)",
             is_left ? "L" : "R",
             finger_id,
             dt_s,
@@ -1287,7 +1313,8 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
             p_des_base.x(), p_des_base.y(), p_des_base.z(),
             out.p_cmd_base.x(), out.p_cmd_base.y(), out.p_cmd_base.z(),
             f_des_base.x(), f_des_base.y(), f_des_base.z(),
-            f_meas_base.x(), f_meas_base.y(), f_meas_base.z());
+            f_meas_base.x(), f_meas_base.y(), f_meas_base.z(),
+            f_tar_row.x(), f_tar_row.y(), f_tar_row.z());
     }
 
     if (!out.ik_ok) {
