@@ -150,7 +150,7 @@ dualarm_forcecon/
   - inverse hand target (30 values)
 - `/forward_joint_targets` (`std_msgs/msg/Float64MultiArray`)
   - **legacy 통합 forward target** (12 / 42 / 52)
-- **(v14) `/target_arm_joint_targets`** (`std_msgs/msg/Float64MultiArray`)
+- **(v14) `/forward_arm_joint_targets`** (`std_msgs/msg/Float64MultiArray`)
   - arm-only forward target (12)
 - **(v14) `/target_hand_joint_targets`** (`std_msgs/msg/Float64MultiArray`)
   - hand-only forward target (30 or 40)
@@ -398,7 +398,7 @@ ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
 
 ### (A) Home pose arm 재전송 (12 values)
 ```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+ros2 topic pub --once --qos-reliability best_effort /forward_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
   1.4869, -0.0022, -2.1753,  1.4835,  1.4835, -0.1920,
  -0.0054,  0.7796,  2.0043,  0.0000, -1.1869, -0.7854
 ]}"
@@ -406,7 +406,7 @@ ros2 topic pub --once --qos-reliability best_effort /target_arm_joint_targets st
 
 ### (B) 양팔 약간 벌리기 (home 기준 small perturbation)
 ```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+ros2 topic pub --once --qos-reliability best_effort /forward_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
   1.4200,  0.0300, -2.1000,  1.3800,  1.4200, -0.1500,
   0.0400,  0.7300,  1.9500,  0.0800, -1.1200, -0.7200
 ]}"
@@ -414,7 +414,7 @@ ros2 topic pub --once --qos-reliability best_effort /target_arm_joint_targets st
 
 ### (C) 왼팔 들기 / 오른팔 내리기 (비대칭)
 ```bash
-ros2 topic pub --once --qos-reliability best_effort /target_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+ros2 topic pub --once --qos-reliability best_effort /forward_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
   1.5200,  0.0500, -1.9800,  1.2000,  1.3500, -0.0500,
  -0.0300,  0.8800,  2.1500, -0.1500, -1.2500, -0.9200
 ]}"
@@ -549,7 +549,7 @@ ros2 topic pub --once --qos-reliability best_effort /forward_joint_targets std_m
 ## 13) v13 → v14 마이그레이션 체크리스트
 
 - [ ] `TargetArmJointsCallback` / `TargetHandJointsCallback` 추가
-- [ ] 분리 토픽 subscription 추가 (`/target_arm_joint_targets`, `/target_hand_joint_targets`)
+- [ ] 분리 토픽 subscription 추가 (`/forward_arm_joint_targets`, `/target_hand_joint_targets`)
 - [ ] 기존 `TargetJointCallback`는 호환용으로 유지(선택)
 - [ ] `DualArmForceControl.h`에 콜백 선언 및 subscriber 멤버 반영
 - [ ] `DualArmForceControl.cpp` 생성자에서 분리 토픽 subscribe 반영
@@ -563,8 +563,8 @@ ros2 topic pub --once --qos-reliability best_effort /forward_joint_targets std_m
 
 1. **idle 상태에서 모니터 안정 확인**
 2. **forward 모드**
-   - `/target_arm_joint_targets`로 arm-only home 재전송
-   - `/target_hand_joint_targets`로 hand soft grip
+   - `/forward_arm_joint_targets`로 arm-only home 재전송
+   - `/forward_hand_joint_targets`로 hand soft grip
 3. **inverse 모드**
    - `/target_hand_fingertips` home 재전송
    - `/target_arm_cartesian_pose` home 재전송
