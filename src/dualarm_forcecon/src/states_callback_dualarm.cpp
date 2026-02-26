@@ -911,69 +911,168 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
     res->message="Mode: "+current_control_mode_;
 }
 
-// ============================================================================
-// ContactForceHandCallback (v15 fix)
-// - /isaac_contact_states : Float32MultiArray (10 values)
-// - Current Isaac ActionGraph observed order (per hand):
-//   [BABY, RING, MIDL, INDX, THMB]
-// - Internal hand force row order (canonical):
+// --------------------
+// ContactForceCallback (HAND ONLY, scalar -> base-frame Fx/Fy/Fz)
+// /isaac_contact_states : std_msgs/Float32MultiArray (size = 10)
+// index order (Isaac Action Graph):
+//   [0] L_BABY, [1] L_INDX, [2] L_MIDL, [3] L_RING, [4] L_THMB,
+//   [5] R_BABY, [6] R_INDX, [7] R_MIDL, [8] R_RING, [9] R_THMB
+//
+// [현재 실험 가정 - 중요]
+// 1) Isaac contact sensor는 벡터가 아닌 scalar contact force만 반환한다.
+// 2) 이 scalar 값을 "손가락 contact sensor frame 기준 +X축 힘(Fx)"로 간주한다.
+//    즉, f_sensor = [scalar, 0, 0]^T
+// 3) 이후 손가락 tip/sensor의 회전행렬을 이용해 hand base frame으로 변환하여
+//    f_base = R_base_sensor * f_sensor 를 계산한다.
+// 4) 현재는 특히 ring finger 실험을 위한 가정으로 시작하며, 동일 규칙을 모든 손가락에 적용한다.
+//
+// 내부 force row convention (기존 유지):
 //   row0=THMB, row1=INDX, row2=MIDL, row3=RING, row4=BABY
-// - Only Fz is used for now. Fx,Fy = 0
-// - Arm forces are forced to zero for monitor output
-// ============================================================================
-void DualArmForceControl::ContactForceHandCallback(
-    const std_msgs::msg::Float32MultiArray::SharedPtr msg)
+// --------------------
+void DualArmForceControl::HandContactForceCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
 {
-    // Arm force monitor values are not used for now -> always zero
+    if (!msg) return;
+
+    // Arm force는 현재 미사용 -> 항상 0으로 유지 (Print 용)
     f_l_c_.setZero();
     f_r_c_.setZero();
     f_l_t_.setZero();
     f_r_t_.setZero();
 
-    // Hand target force (if not used) -> keep zero for monitor
+    // Hand force target도 아직 미사용이면 0 유지
     f_l_hand_t_.setZero();
     f_r_hand_t_.setZero();
 
-    // Current hand force reset every callback
+    // measured current hand force 초기화
     f_l_hand_c_.setZero();
     f_r_hand_c_.setZero();
 
-    if (!msg) return;
+    // 입력 크기 체크 (10개 기대)
     if (msg->data.size() < 10) {
-        // 값이 부족하면 0 유지
+        auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+        RCLCPP_WARN_THROTTLE(
+            logger, *node_->get_clock(), 1000,
+            "[ContactForceCallback] /isaac_contact_states size=%zu (<10). Ignore.",
+            msg->data.size());
         return;
     }
 
-    auto fz = [&](size_t i) -> double {
-        if (i >= msg->data.size()) return 0.0;
-        const float v = msg->data[i];
-        return std::isfinite(v) ? static_cast<double>(v) : 0.0;
+    if (!hand_fk_l_ || !hand_fk_r_) return;
+
+    // -----------------------------
+    // 현재 hand joint (20DoF 표현) -> 15DoF independent 압축
+    // hand FK 회전행렬 계산 입력용
+    // order(15): [thumb1,2,3, index1,2,3, middle1,2,3, ring1,2,3, baby1,2,3]
+    // -----------------------------
+    auto compress20to15 = [&](const Eigen::VectorXd& qh) -> std::vector<double> {
+        std::vector<double> h15(15, 0.0);
+
+        if (qh.size() >= 20) {
+            for (int f = 0; f < 5; ++f) {
+                const int b20 = f * 4;
+                const int b15 = f * 3;
+                h15[b15 + 0] = qh(b20 + 0);
+                h15[b15 + 1] = qh(b20 + 1);
+                h15[b15 + 2] = qh(b20 + 2);
+                // q4는 mimic -> 무시
+            }
+            return h15;
+        }
+
+        const int n = std::min<int>(qh.size(), 15);
+        for (int i = 0; i < n; ++i) h15[i] = qh(i);
+        return h15;
     };
 
-    // ------------------------------------------------------------------------
-    // Topic index mapping (CURRENT observed ActionGraph order)
-    //   Left  hand: data[0..4] = [BABY, RING, MIDL, INDX, THMB]
-    //   Right hand: data[5..9] = [BABY, RING, MIDL, INDX, THMB]
+    const std::vector<double> hl15 = compress20to15(q_l_h_c_);
+    const std::vector<double> hr15 = compress20to15(q_r_h_c_);
+
+    // -----------------------------
+    // [필수] hand FK에서 각 손가락 tip frame의 rotation (hand base 기준) 얻기
+    // expected order: thumb, index, middle, ring, baby
+    // -----------------------------
+    // TODO: 네 hand_forward_kinematics API 이름에 맞게 아래 함수명만 바꾸면 됨.
+    //       반환형 예시: std::vector<Eigen::Matrix3d> (size=5)
+    const std::vector<Eigen::Matrix3d> Rl_base_tip = hand_fk_l_->computeTipRotationsBase(hl15);
+    const std::vector<Eigen::Matrix3d> Rr_base_tip = hand_fk_r_->computeTipRotationsBase(hr15);
+
+    if (Rl_base_tip.size() < 5 || Rr_base_tip.size() < 5) {
+        auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+        RCLCPP_WARN_THROTTLE(
+            logger, *node_->get_clock(), 1000,
+            "[ContactForceCallback] tip rotation array size invalid. L=%zu R=%zu",
+            Rl_base_tip.size(), Rr_base_tip.size());
+        return;
+    }
+
+    // -----------------------------
+    // tip frame -> contact sensor frame 고정 회전
+    // Isaac Sim screenshot 기준(예시): sensor prim orient XYZ(deg)=(-90, +90, 0)
+    // 여기서는 R_tip_sensor 로 사용.
     //
-    // Internal matrix row order (canonical):
-    //   row0=THMB, row1=INDX, row2=MIDL, row3=RING, row4=BABY
-    // ------------------------------------------------------------------------
+    // f_sensor = [scalar, 0, 0]
+    // f_base   = R_base_tip * R_tip_sensor * f_sensor
+    //
+    // 만약 실제 네 센서 프레임이 tip frame과 동일하다면
+    // R_tip_sensor = I 로 바꾸면 됨.
+    // -----------------------------
+    auto rotXYZdeg = [](double rx_deg, double ry_deg, double rz_deg) -> Eigen::Matrix3d {
+        const double rx = rx_deg * M_PI / 180.0;
+        const double ry = ry_deg * M_PI / 180.0;
+        const double rz = rz_deg * M_PI / 180.0;
+        Eigen::AngleAxisd Rx(rx, Eigen::Vector3d::UnitX());
+        Eigen::AngleAxisd Ry(ry, Eigen::Vector3d::UnitY());
+        Eigen::AngleAxisd Rz(rz, Eigen::Vector3d::UnitZ());
+        // 프로젝트/Isaac UI convention 유지: Rx * Ry * Rz
+        return (Rx * Ry * Rz).toRotationMatrix();
+    };
 
-    // LEFT hand Fz
-    f_l_hand_c_(4, 2) = fz(0); // BABY -> row4
-    f_l_hand_c_(3, 2) = fz(1); // RING -> row3   (<= 네 현재 문제 해결 핵심)
-    f_l_hand_c_(2, 2) = fz(2); // MIDL -> row2
-    f_l_hand_c_(1, 2) = fz(3); // INDX -> row1
-    f_l_hand_c_(0, 2) = fz(4); // THMB -> row0
+    // ★ 필요시 여기 값 튜닝 (sensor prim orientation과 정확히 일치시켜야 함)
+    const Eigen::Matrix3d R_tip_sensor = rotXYZdeg(-90.0, 90.0, 0.0);
 
-    // RIGHT hand Fz
-    f_r_hand_c_(4, 2) = fz(5); // BABY -> row4
-    f_r_hand_c_(3, 2) = fz(6); // RING -> row3
-    f_r_hand_c_(2, 2) = fz(7); // MIDL -> row2
-    f_r_hand_c_(1, 2) = fz(8); // INDX -> row1
-    f_r_hand_c_(0, 2) = fz(9); // THMB -> row0
+    // scalar -> sensor local +X force 가정
+    auto scalarToBaseForce = [&](float s, const Eigen::Matrix3d& R_base_tip) -> Eigen::Vector3d {
+        Eigen::Vector3d f_sensor(static_cast<double>(s), 0.0, 0.0);  // [Fx,0,0] in sensor frame
+        Eigen::Matrix3d R_base_sensor = R_base_tip * R_tip_sensor;
+        return R_base_sensor * f_sensor;
+    };
 
-    // Fx, Fy are intentionally zero (already zeroed by setZero)
+    // 내부 row convention: 0=THMB,1=INDX,2=MIDL,3=RING,4=BABY
+    auto set_row_force = [&](Eigen::Matrix<double,5,3>& F, int row, const Eigen::Vector3d& f_base) {
+        if (row < 0 || row >= 5) return;
+        F(row, 0) = f_base.x();
+        F(row, 1) = f_base.y();
+        F(row, 2) = f_base.z();
+    };
+
+    // FK rotation index convention: [0]thumb [1]index [2]middle [3]ring [4]baby
+    // Sensor msg index convention:
+    //   L: [0]baby [1]index [2]middle [3]ring [4]thumb
+    //   R: [5]baby [6]index [7]middle [8]ring [9]thumb
+
+    // ----- Left hand -----
+    set_row_force(f_l_hand_c_, 4, scalarToBaseForce(msg->data[0], Rl_base_tip[4])); // BABY
+    set_row_force(f_l_hand_c_, 1, scalarToBaseForce(msg->data[1], Rl_base_tip[1])); // INDX
+    set_row_force(f_l_hand_c_, 2, scalarToBaseForce(msg->data[2], Rl_base_tip[2])); // MIDL
+    set_row_force(f_l_hand_c_, 3, scalarToBaseForce(msg->data[3], Rl_base_tip[3])); // RING
+    set_row_force(f_l_hand_c_, 0, scalarToBaseForce(msg->data[4], Rl_base_tip[0])); // THMB
+
+    // ----- Right hand -----
+    set_row_force(f_r_hand_c_, 4, scalarToBaseForce(msg->data[5], Rr_base_tip[4])); // BABY
+    set_row_force(f_r_hand_c_, 1, scalarToBaseForce(msg->data[6], Rr_base_tip[1])); // INDX
+    set_row_force(f_r_hand_c_, 2, scalarToBaseForce(msg->data[7], Rr_base_tip[2])); // MIDL
+    set_row_force(f_r_hand_c_, 3, scalarToBaseForce(msg->data[8], Rr_base_tip[3])); // RING
+    set_row_force(f_r_hand_c_, 0, scalarToBaseForce(msg->data[9], Rr_base_tip[0])); // THMB
+
+    // (선택) 디버그 로그: ring만 간단히 확인
+    // static int dbg = 0;
+    // if ((dbg++ % 20) == 0) {
+    //     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+    //     RCLCPP_INFO(logger,
+    //         "[ContactForceCallback] L_RING scalar=%.3f -> baseF=(%.3f, %.3f, %.3f)",
+    //         static_cast<double>(msg->data[3]),
+    //         f_l_hand_c_(3,0), f_l_hand_c_(3,1), f_l_hand_c_(3,2));
+    // }
 }
 
 // ============================================================================

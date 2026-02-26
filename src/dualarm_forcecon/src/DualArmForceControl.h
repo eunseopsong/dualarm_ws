@@ -41,16 +41,16 @@ public:
     void TargetArmPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetHandPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
 
-    // ✅ v15: Delta arm Cartesian target callback (inverse mode)
+    // v15: Delta arm Cartesian target callback (inverse mode)
     // msg: 12 = [L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]
     void DeltaArmPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
 
-    // ✅ Forward joint target callbacks (split)
+    // Forward joint target callbacks (split)
     void TargetArmJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetHandJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
 
-    // ✅ Contact force callback uses Float32MultiArray (Isaac ActionGraph)
-    void ContactForceHandCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
+    // Contact force callback uses Float32MultiArray (Isaac ActionGraph)
+    void HandContactForceCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
 
     void ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                              std::shared_ptr<std_srvs::srv::Trigger::Response> res);
@@ -69,14 +69,14 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_pos_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_pos_sub_;
 
-    // ✅ v15: Delta Cartesian target (inverse mode)
+    // v15: Delta Cartesian target (inverse mode)
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr delta_arm_pos_sub_;
 
-    // ✅ Forward joint targets (split)
+    // Forward joint targets (split)
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_joint_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_joint_sub_;
 
-    // ✅ Contact states topic from Isaac ActionGraph (Float32MultiArray)
+    // Contact states topic from Isaac ActionGraph (Float32MultiArray)
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr contact_force_sub_;
 
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
@@ -121,7 +121,7 @@ private:
     std::shared_ptr<dualarm_forcecon::HandForwardKinematics> hand_fk_l_, hand_fk_r_;
     std::shared_ptr<dualarm_forcecon::HandInverseKinematics> hand_ik_l_, hand_ik_r_;
 
-    // poses (arm world pose)
+    // poses (arm world/base pose as configured by arm_fk_ default frame)
     geometry_msgs::msg::Pose current_pose_l_, current_pose_r_;
     geometry_msgs::msg::Pose target_pose_l_,  target_pose_r_;
 
