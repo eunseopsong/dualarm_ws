@@ -152,7 +152,7 @@ dualarm_forcecon/
   - **legacy 통합 forward target** (12 / 42 / 52)
 - **(v14) `/forward_arm_joint_targets`** (`std_msgs/msg/Float64MultiArray`)
   - arm-only forward target (12)
-- **(v14) `/target_hand_joint_targets`** (`std_msgs/msg/Float64MultiArray`)
+- **(v14) `/forward_hand_joint_targets`** (`std_msgs/msg/Float64MultiArray`)
   - hand-only forward target (30 or 40)
 
 > 위 2개 분리 토픽 이름은 v14 분리 콜백(`TargetArmJointsCallback`, `TargetHandJointsCallback`)에 맞춰 사용 권장  
@@ -434,7 +434,7 @@ ros2 topic pub --once --qos-reliability best_effort /forward_arm_joint_targets s
 
 ### (A) 양손 open (home-like hand)
 ```bash
-ros2 topic pub --once --qos-reliability best_effort /target_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+ros2 topic pub --once --qos-reliability best_effort /forward_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,
   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0,   0.0, 0.0, 0.0
 ]}"
@@ -442,7 +442,7 @@ ros2 topic pub --once --qos-reliability best_effort /target_hand_joint_targets s
 
 ### (B) 양손 소프트 그립
 ```bash
-ros2 topic pub --once --qos-reliability best_effort /target_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+ros2 topic pub --once --qos-reliability best_effort /forward_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
   0.0, 0.25, 0.20,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,
   0.0, 0.25, 0.20,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35,   0.0, 0.45, 0.35
 ]}"
@@ -450,7 +450,7 @@ ros2 topic pub --once --qos-reliability best_effort /target_hand_joint_targets s
 
 ### (C) 왼손 V-sign / 오른손 주먹
 ```bash
-ros2 topic pub --once --qos-reliability best_effort /target_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+ros2 topic pub --once --qos-reliability best_effort /forward_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
   0.10, 0.30, 0.25,   0.00, 0.05, 0.05,   0.00, 0.05, 0.05,   0.00, 0.80, 0.70,   0.00, 0.85, 0.75,
   0.00, 0.60, 0.50,   0.00, 1.00, 0.90,   0.00, 1.00, 0.90,   0.00, 1.00, 0.90,   0.00, 1.00, 0.90
 ]}"
@@ -458,7 +458,7 @@ ros2 topic pub --once --qos-reliability best_effort /target_hand_joint_targets s
 
 ### (D) 왼손 pinch-like / 오른손 open
 ```bash
-ros2 topic pub --once --qos-reliability best_effort /target_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+ros2 topic pub --once --qos-reliability best_effort /forward_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
   0.25, 0.65, 0.55,   0.00, 0.55, 0.45,   0.00, 0.10, 0.10,   0.00, 0.15, 0.10,   0.00, 0.15, 0.10,
   0.00, 0.00, 0.00,   0.00, 0.00, 0.00,   0.00, 0.00, 0.00,   0.00, 0.00, 0.00,   0.00, 0.00, 0.00
 ]}"
@@ -549,7 +549,7 @@ ros2 topic pub --once --qos-reliability best_effort /forward_joint_targets std_m
 ## 13) v13 → v14 마이그레이션 체크리스트
 
 - [ ] `TargetArmJointsCallback` / `TargetHandJointsCallback` 추가
-- [ ] 분리 토픽 subscription 추가 (`/forward_arm_joint_targets`, `/target_hand_joint_targets`)
+- [ ] 분리 토픽 subscription 추가 (`/forward_arm_joint_targets`, `/forward_hand_joint_targets`)
 - [ ] 기존 `TargetJointCallback`는 호환용으로 유지(선택)
 - [ ] `DualArmForceControl.h`에 콜백 선언 및 subscriber 멤버 반영
 - [ ] `DualArmForceControl.cpp` 생성자에서 분리 토픽 subscribe 반영
