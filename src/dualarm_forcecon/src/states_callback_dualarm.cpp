@@ -912,56 +912,71 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
 }
 
 // ============================================================================
-// HandContactForceCallback
-// /isaac_contact_states (Float32MultiArray) from Isaac ActionGraph
+// HandContactForceCallback (v17-prep)
+// ----------------------------------------------------------------------------
+// /isaac_contact_states : std_msgs/Float32MultiArray (10 scalars)
 //
-// [Assumption / temporary model for v17-prep]
-// - Isaac contact sensor publishes a scalar magnitude per fingertip (not vector).
-// - We temporarily interpret that scalar as +Fx in the fingertip sensor frame.
-// - Fingertip sensor frame and Pinocchio tip frame are not aligned, so we apply
-//   an empirical calibration rotation R_tip_sensor_calib.
-// - Then convert to hand-base frame using R_base_tip from HandForwardKinematics.
+// [Empirical mapping from Isaac ActionGraph -> message indices]
+//   Observed test shows LEFT RING contact appears at msg[1] (not msg[3]).
+//   We therefore use the following order (per hand):
+//     [BABY, RING, MIDL, INDX, THMB]
 //
-// Input order from /isaac_contact_states (10 scalars):
-//   [0] L_BABY, [1] L_INDX, [2] L_MIDL, [3] L_RING, [4] L_THMB,
-//   [5] R_BABY, [6] R_INDX, [7] R_MIDL, [8] R_RING, [9] R_THMB
+// msg indices:
+//   Left :  [0]=BABY, [1]=RING, [2]=MIDL, [3]=INDX, [4]=THMB
+//   Right:  [5]=BABY, [6]=RING, [7]=MIDL, [8]=INDX, [9]=THMB
 //
 // Internal hand force row order (f_*_hand_*):
 //   row0=THMB, row1=INDX, row2=MIDL, row3=RING, row4=BABY
+//
+// [Scalar-contact assumption]
+//   Isaac contact sensor returns a scalar magnitude only.
+//   Temporary assumption for v17-prep:
+//     scalar is force along fingertip sensor local +X axis.
+//
+// [Frame conversion]
+//   sensor(+X scalar) -> tip frame (calibrated) -> hand base frame
+//
+// [Extra calibration]
+//   Additional constant calibration is applied in HAND-BASE frame to match
+//   observed ring-finger test expectation:
+//     observed raw  ~= ( 0, -0.895, -7.105)
+//     desired       ~= ( 7.105, 0,  0.895)
 // ============================================================================
+//
 void DualArmForceControl::HandContactForceCallback(
     const std_msgs::msg::Float32MultiArray::SharedPtr msg)
 {
     if (!msg) return;
 
-    // -----------------------------
-    // Reset current force buffers
-    // -----------------------------
+    // ------------------------------------------------------------------------
+    // Reset current force buffers (arms are not measured yet -> keep zero)
+    // ------------------------------------------------------------------------
     f_l_c_.setZero();
     f_r_c_.setZero();
 
     f_l_hand_c_.setZero();
     f_r_hand_c_.setZero();
 
-    // (target force lines are not used yet; keep zero for monitor consistency)
+    // target force buffers are not commanded yet (for display TAR_F)
     f_l_t_.setZero();
     f_r_t_.setZero();
+    f_l_hand_t_.setZero();
+    f_r_hand_t_.setZero();
 
-    // 데이터 부족 시 그냥 0 유지
+    // Need 10 scalar values (5 left + 5 right)
     if (msg->data.size() < 10) {
         return;
     }
 
-    // Hand FK not ready -> scalar only fallback (Fz slots or zero)
     if (!hand_fk_l_ || !hand_fk_r_) {
         return;
     }
 
-    // -----------------------------
-    // Helper: 20DoF -> 15DoF compress
-    // internal 20DoF order = [thumb1..4, index1..4, middle1..4, ring1..4, baby1..4]
-    // compressed 15DoF     = [thumb1..3, index1..3, middle1..3, ring1..3, baby1..3]
-    // -----------------------------
+    // ------------------------------------------------------------------------
+    // Helper: 20DoF (internal hand joint vector) -> 15DoF independent vector
+    // order(20): [thumb1..4, index1..4, middle1..4, ring1..4, baby1..4]
+    // order(15): [thumb1..3, index1..3, middle1..3, ring1..3, baby1..3]
+    // ------------------------------------------------------------------------
     auto compress20to15 = [](const Eigen::VectorXd& qh) -> std::vector<double> {
         std::vector<double> h15(15, 0.0);
 
@@ -981,13 +996,11 @@ void DualArmForceControl::HandContactForceCallback(
         return h15;
     };
 
-    // -----------------------------
-    // Current fingertip rotations in HAND BASE frame
-    // order expected: [thumb, index, middle, ring, baby]
-    // -----------------------------
+    // Current hand joints -> fingertip rotation in hand-base frame
     const std::vector<double> hl15 = compress20to15(q_l_h_c_);
     const std::vector<double> hr15 = compress20to15(q_r_h_c_);
 
+    // Expected order of returned rotations: [thumb, index, middle, ring, baby]
     const std::vector<Eigen::Matrix3d> Rl_base_tip = hand_fk_l_->computeTipRotationsBase(hl15);
     const std::vector<Eigen::Matrix3d> Rr_base_tip = hand_fk_r_->computeTipRotationsBase(hr15);
 
@@ -996,53 +1009,71 @@ void DualArmForceControl::HandContactForceCallback(
         return Rs[idx];
     };
 
-    // -----------------------------
-    // Empirical calibration: sensor frame -> Pinocchio tip frame
-    //
-    // ring-finger test 기준 보정 (사용자 기대값 정렬):
-    //   observed (wrong) : (0, -0.895, -7.105)
-    //   expected         : (7.105, 0, 0.895)
-    //
-    // This calibration maps sensor +X (scalar force axis) to approximately
-    // Pinocchio tip -Z direction, with a right-handed completion.
-    // -----------------------------
-    Eigen::Matrix3d R_tip_sensor_calib;
-    R_tip_sensor_calib <<
-         0.0,  1.0,  0.0,
-         0.0,  0.0, -1.0,
-        -1.0,  0.0,  0.0;
+    // ------------------------------------------------------------------------
+    // [Calibration #1] sensor frame -> tip frame
+    // Temporary: keep identity first (sensor +X == tip +X assumption)
+    // If needed later, this can be tuned per finger / per hand.
+    // ------------------------------------------------------------------------
+    const Eigen::Matrix3d R_tip_sensor = Eigen::Matrix3d::Identity();
 
-    // -----------------------------
-    // Isaac topic index -> internal row index mapping
-    // internal rows: 0=THMB, 1=INDX, 2=MIDL, 3=RING, 4=BABY
-    // -----------------------------
-    const std::array<int,5> msgL_to_row = {4, 1, 2, 3, 0}; // [baby,index,middle,ring,thumb]
-    const std::array<int,5> msgR_to_row = {4, 1, 2, 3, 0}; // same order
+    // ------------------------------------------------------------------------
+    // [Calibration #2] hand-base-frame empirical correction
+    // Maps raw base vector to desired base vector.
+    //
+    // target mapping:
+    //   [x', y', z']^T = [ -z, x, -y ]^T
+    //
+    // Matrix:
+    //   [ 0  0 -1 ]
+    //   [ 1  0  0 ]
+    //   [ 0 -1  0 ]
+    //
+    // Example:
+    //   (0, -0.895, -7.105) -> (7.105, 0, 0.895)
+    // ------------------------------------------------------------------------
+    Eigen::Matrix3d R_base_corr;
+    R_base_corr <<  0.0,  0.0, -1.0,
+                    1.0,  0.0,  0.0,
+                    0.0, -1.0,  0.0;
 
-    // -----------------------------
-    // Convert scalar -> base-frame vector and store
-    // -----------------------------
+    // ------------------------------------------------------------------------
+    // Message-index -> internal row mapping
+    // Actual observed ActionGraph order per hand:
+    //   [BABY, RING, MIDL, INDX, THMB]
+    // Internal row order:
+    //   [THMB, INDX, MIDL, RING, BABY] = [0,1,2,3,4]
+    //
+    // so mapping becomes:
+    //   BABY->4, RING->3, MIDL->2, INDX->1, THMB->0
+    // ------------------------------------------------------------------------
+    const std::array<int,5> msg_to_row = {4, 3, 2, 1, 0};
+
+    // ------------------------------------------------------------------------
+    // Convert one hand (5 scalars) into hand-base-frame force vectors
+    // ------------------------------------------------------------------------
     auto assign_one_hand = [&](Eigen::Matrix<double,5,3>& F_hand_cur,
                                const std::vector<Eigen::Matrix3d>& R_base_tip_all,
-                               int msg_offset,
-                               const std::array<int,5>& msg_to_row)
+                               int msg_offset)
     {
         for (int k = 0; k < 5; ++k) {
-            const int row = msg_to_row[k];  // internal row (thumb/index/middle/ring/baby)
-            const float scalar_f32 = msg->data[msg_offset + k];
-            const double scalar = static_cast<double>(scalar_f32);
+            const int row = msg_to_row[k];  // internal row index
+            const double s = static_cast<double>(msg->data[msg_offset + k]);
 
-            // temporary assumption: Isaac scalar is +Fx in fingertip sensor frame
-            const Eigen::Vector3d f_sensor_scalar(scalar, 0.0, 0.0);
+            // Scalar contact -> sensor local force vector (temporary assumption)
+            // sensor local +X direction only
+            const Eigen::Vector3d f_sensor(s, 0.0, 0.0);
 
-            // sensor frame -> (calibrated) tip frame
-            const Eigen::Vector3d f_tip = R_tip_sensor_calib * f_sensor_scalar;
+            // sensor -> tip
+            const Eigen::Vector3d f_tip = R_tip_sensor * f_sensor;
 
-            // tip frame -> hand base frame
+            // tip -> hand base
             const Eigen::Matrix3d R_base_tip = safeR(R_base_tip_all, row);
-            Eigen::Vector3d f_base = R_base_tip * f_tip;
+            const Eigen::Vector3d f_base_raw = R_base_tip * f_tip;
 
-            // denoise tiny numerical residues
+            // empirical base-frame correction (to match expected axis convention)
+            Eigen::Vector3d f_base = R_base_corr * f_base_raw;
+
+            // tiny numerical cleanup
             for (int i = 0; i < 3; ++i) {
                 if (std::fabs(f_base(i)) < 1e-9) f_base(i) = 0.0;
             }
@@ -1051,15 +1082,11 @@ void DualArmForceControl::HandContactForceCallback(
         }
     };
 
-    // Left hand msg indices [0..4]
-    assign_one_hand(f_l_hand_c_, Rl_base_tip, 0, msgL_to_row);
+    // Left hand: msg[0..4]
+    assign_one_hand(f_l_hand_c_, Rl_base_tip, 0);
 
-    // Right hand msg indices [5..9]
-    assign_one_hand(f_r_hand_c_, Rr_base_tip, 5, msgR_to_row);
-
-    // NOTE:
-    // f_*_hand_t_ (target hand force) is still command-side placeholder for now.
-    // Admittance/force control implementation (v17) will populate it later.
+    // Right hand: msg[5..9]
+    assign_one_hand(f_r_hand_c_, Rr_base_tip, 5);
 }
 
 // ============================================================================
@@ -1136,7 +1163,7 @@ void DualArmForceControl::PrintDualArmStates() {
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v15 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v17 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
            C_MODE, current_control_mode_.c_str(), C_RESET,
            C_CUR_POS, C_RESET,
