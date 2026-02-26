@@ -60,11 +60,25 @@ public:
         // false인 축은 p_cmd(axis)=p_des(axis) (순수 위치 유지)
         std::array<bool,3> force_ctrl_enable;
 
+        // [PATCH] force error 축별 부호 보정 (빠른 디버그용)
+        // 실제 접촉/축 정의에 따라 +1/-1로 맞출 수 있음
+        std::array<double,3> force_error_axis_sign;
+
+        // [PATCH] 축별 force error deadband [N]
+        std::array<double,3> force_deadband_N;
+
+        // [PATCH] measured force LPF
+        bool use_force_lpf;
+        double force_lpf_tau_s;  // e.g., 0.03~0.08 s
+
         // Admittance offset 제한: p_cmd = p_des + x_adm
         std::array<double,3> max_offset_m;   // [m]
 
         // 한 step 당 p_cmd 변화량 제한 (rate limit)
         std::array<double,3> max_step_m;     // [m/tick]
+
+        // [PATCH] 축별 admittance velocity 제한 (내부 상태 폭주 방지)
+        std::array<double,3> max_adm_velocity_mps; // [m/s]
 
         // dt clamp (수치 안정화)
         double dt_min_s;
@@ -79,11 +93,28 @@ public:
         // - false면 항상 admittance 적용
         // - true면 contact_on일 때만 admittance 적용 (아니면 offset decay 또는 hold)
         bool use_contact_gate;
-        double contact_force_threshold_N;   // norm 기준
+        double contact_force_threshold_N;   // norm 기준 (legacy/simple gate)
+
+        // [PATCH] contact hysteresis (옵션)
+        bool use_contact_hysteresis;
+        double contact_on_threshold_N;
+        double contact_off_threshold_N;
+
+        // [PATCH] contact metric 계산 시 force_ctrl_enable 축만 볼지 여부
+        bool contact_gate_use_enabled_axes_only;
 
         // contact off 상태에서 offset/velocity를 감쇠시킬지
         bool decay_when_no_contact;
         double no_contact_decay_ratio;      // 0~1, tick당 감소율
+
+        // [PATCH] offset clamp anti-windup
+        bool antiwindup_on_offset_clamp;
+        bool zero_velocity_on_offset_clamp;
+        double offset_clamp_velocity_damping; // 0~1 (zero_velocity=false일 때 사용)
+
+        // [PATCH] 최종 step-limit 적용 후 내부 adm state를 실제 command에 동기화
+        // (중요: p_cmd는 제한됐는데 adm_x_가 그대로면 내부/외부 불일치 누적됨)
+        bool sync_adm_state_to_final_cmd;
 
         // IK solver 옵션 (HandInverseKinematics::Options)
         int    ik_max_iters;
@@ -96,6 +127,9 @@ public:
         double ik_max_step;    // rad
         double ik_mu_posture;
         bool   ik_verbose;
+
+        // [PATCH] IK seed 정책
+        bool prefer_last_success_q_seed;
 
         // IK 실패 시 처리
         bool keep_last_success_on_ik_fail;
@@ -110,15 +144,28 @@ public:
           damping{{8.0, 8.0, 8.0}},
           stiffness{{120.0, 120.0, 120.0}},
           force_ctrl_enable{{true, true, true}},
+          force_error_axis_sign{{1.0, 1.0, 1.0}},
+          force_deadband_N{{0.0, 0.0, 0.0}},
+          use_force_lpf(true),
+          force_lpf_tau_s(0.04),
           max_offset_m{{0.010, 0.010, 0.010}},
           max_step_m{{0.0010, 0.0010, 0.0010}},
+          max_adm_velocity_mps{{0.05, 0.05, 0.05}},
           dt_min_s(1e-4),
           dt_max_s(5e-2),
           force_error_des_minus_meas(true),
           use_contact_gate(false),
           contact_force_threshold_N(0.5),
+          use_contact_hysteresis(false),
+          contact_on_threshold_N(0.7),
+          contact_off_threshold_N(0.3),
+          contact_gate_use_enabled_axes_only(true),
           decay_when_no_contact(true),
           no_contact_decay_ratio(0.90),
+          antiwindup_on_offset_clamp(true),
+          zero_velocity_on_offset_clamp(true),
+          offset_clamp_velocity_damping(0.2),
+          sync_adm_state_to_final_cmd(true),
           ik_max_iters(80),
           ik_tol_pos_m(5e-4),
           ik_lambda(1e-2),
@@ -129,6 +176,7 @@ public:
           ik_max_step(0.15),
           ik_mu_posture(1e-4),
           ik_verbose(false),
+          prefer_last_success_q_seed(true),
           keep_last_success_on_ik_fail(true),
           damp_velocity_on_ik_fail(true),
           ik_fail_velocity_damping(0.2),
@@ -156,12 +204,19 @@ public:
         Eigen::Vector3d p_des_base{Eigen::Vector3d::Zero()};
         Eigen::Vector3d p_cmd_base{Eigen::Vector3d::Zero()};
 
-        Eigen::Vector3d f_meas_base{Eigen::Vector3d::Zero()};
+        // measured force diagnostics
+        Eigen::Vector3d f_meas_base_raw{Eigen::Vector3d::Zero()};
+        Eigen::Vector3d f_meas_base_filt{Eigen::Vector3d::Zero()};
+        Eigen::Vector3d f_meas_base{Eigen::Vector3d::Zero()};   // actually used in control
         Eigen::Vector3d f_des_base{Eigen::Vector3d::Zero()};
         Eigen::Vector3d f_err{Eigen::Vector3d::Zero()};
+        Eigen::Vector3d f_drive{Eigen::Vector3d::Zero()};       // sign/deadband processed force input to admittance
 
         Eigen::Vector3d adm_offset{Eigen::Vector3d::Zero()};
         Eigen::Vector3d adm_velocity{Eigen::Vector3d::Zero()};
+
+        std::array<bool,3> offset_clamped{{false,false,false}};
+        std::array<bool,3> step_limited{{false,false,false}};
 
         // outputs for selected finger only
         std::array<double,3> q_cmd_123 {{0.0, 0.0, 0.0}};
@@ -213,7 +268,13 @@ public:
         adm_x_.setZero();
         adm_v_.setZero();
         p_cmd_prev_.setZero();
+
+        f_meas_filt_.setZero();
+        f_lpf_initialized_ = false;
+        contact_state_ = false;
+
         last_q_cmd_123_ = {{0.0, 0.0, 0.0}};
+        last_q_cmd20_.clear();
 
         const bool ok_fk = (hand_fk_ != nullptr && hand_fk_->ok());
         const bool ok_ik = (hand_ik_ != nullptr && hand_ik_->ok());
@@ -239,6 +300,10 @@ public:
         adm_x_.setZero();
         adm_v_.setZero();
         p_cmd_prev_.setZero();
+
+        f_meas_filt_.setZero();
+        f_lpf_initialized_ = false;
+        contact_state_ = false;
     }
 
     void resetState(const Eigen::Vector3d& p_ref_base)
@@ -247,6 +312,10 @@ public:
         adm_x_.setZero();
         adm_v_.setZero();
         p_cmd_prev_ = p_ref_base;
+
+        f_meas_filt_.setZero();
+        f_lpf_initialized_ = false;
+        contact_state_ = false;
     }
 
     static std::string fingerName(int fid)
@@ -290,21 +359,94 @@ public:
 
         out.p_meas_base = p_meas;
         out.p_des_base  = in.p_des_base;
-        out.f_meas_base = in.f_meas_base;
-        out.f_des_base  = in.f_des_base;
+
+        // -----------------------------
+        // 1.5) measured force filtering (PATCH)
+        // -----------------------------
+        out.f_meas_base_raw = in.f_meas_base;
+
+        Eigen::Vector3d f_meas_used = in.f_meas_base;
+        if (cfg_.use_force_lpf) {
+            const double tau = std::max(1e-6, cfg_.force_lpf_tau_s);
+            const double alpha = clampScalar_(dt / (tau + dt), 0.0, 1.0);
+
+            if (!f_lpf_initialized_) {
+                f_meas_filt_ = in.f_meas_base;
+                f_lpf_initialized_ = true;
+            } else {
+                f_meas_filt_ = (1.0 - alpha) * f_meas_filt_ + alpha * in.f_meas_base;
+            }
+            f_meas_used = f_meas_filt_;
+        } else {
+            f_meas_filt_ = in.f_meas_base;
+            f_lpf_initialized_ = true;
+            f_meas_used = in.f_meas_base;
+        }
+
+        out.f_meas_base_filt = f_meas_filt_;
+        out.f_meas_base      = f_meas_used;
+        out.f_des_base       = in.f_des_base;
 
         // -----------------------------
         // 2) contact gate 판정 (옵션)
         // -----------------------------
-        out.contact_on = (in.f_meas_base.norm() >= cfg_.contact_force_threshold_N);
+        auto contact_metric_norm = [&](const Eigen::Vector3d& f)->double {
+            if (!cfg_.contact_gate_use_enabled_axes_only) {
+                return f.norm();
+            }
+            double s2 = 0.0;
+            bool any = false;
+            for (int ax = 0; ax < 3; ++ax) {
+                if (cfg_.force_ctrl_enable[ax]) {
+                    s2 += f(ax) * f(ax);
+                    any = true;
+                }
+            }
+            return any ? std::sqrt(s2) : f.norm();
+        };
+
+        const double f_metric = contact_metric_norm(f_meas_used);
+
+        if (cfg_.use_contact_hysteresis) {
+            const double on_thr  = std::max(0.0, cfg_.contact_on_threshold_N);
+            const double off_thr = std::max(0.0, std::min(on_thr, cfg_.contact_off_threshold_N));
+
+            if (contact_state_) {
+                if (f_metric <= off_thr) contact_state_ = false;
+            } else {
+                if (f_metric >= on_thr) contact_state_ = true;
+            }
+            out.contact_on = contact_state_;
+        } else {
+            // legacy/simple behavior
+            out.contact_on = (f_metric >= std::max(0.0, cfg_.contact_force_threshold_N));
+            contact_state_ = out.contact_on;
+        }
 
         // -----------------------------
         // 3) force error 계산
         // -----------------------------
         Eigen::Vector3d f_err;
-        if (cfg_.force_error_des_minus_meas) f_err = (in.f_des_base - in.f_meas_base);
-        else                                 f_err = (in.f_meas_base - in.f_des_base);
+        if (cfg_.force_error_des_minus_meas) f_err = (in.f_des_base - f_meas_used);
+        else                                 f_err = (f_meas_used - in.f_des_base);
         out.f_err = f_err;
+
+        // [PATCH] deadband + axis sign 적용된 admittance 입력 force
+        Eigen::Vector3d f_drive = f_err;
+        for (int ax = 0; ax < 3; ++ax) {
+            const double db = std::max(0.0, cfg_.force_deadband_N[ax]);
+            if (std::fabs(f_drive(ax)) <= db) {
+                f_drive(ax) = 0.0;
+            } else {
+                // deadband 이후 연속성 유지(선택): 부호 유지하며 db 만큼 차감
+                f_drive(ax) = (f_drive(ax) > 0.0) ? (f_drive(ax) - db) : (f_drive(ax) + db);
+            }
+
+            // axis sign (빠른 부호 뒤집기 디버그용)
+            const double sgn = (cfg_.force_error_axis_sign[ax] >= 0.0) ? 1.0 : -1.0;
+            f_drive(ax) *= sgn;
+        }
+        out.f_drive = f_drive;
 
         // -----------------------------
         // 4) 상태 초기화
@@ -314,12 +456,15 @@ public:
             initialized_ = true;
             adm_x_.setZero();
             adm_v_.setZero();
+
+            // p_cmd_prev는 desired/current 중 더 안전한 쪽으로 시작.
+            // 기존 동작 호환을 위해 desired 기준 유지.
             p_cmd_prev_ = in.p_des_base;
         }
 
         // -----------------------------
         // 5) 축별 1D Admittance (position-only)
-        //    M*xdd + D*xd + K*x = f_err
+        //    M*xdd + D*xd + K*x = f_drive
         //    p_cmd = p_des + x
         // -----------------------------
         Eigen::Vector3d p_cmd = in.p_des_base;
@@ -343,16 +488,39 @@ public:
                 // semi-implicit Euler
                 const double x   = adm_x_(ax);
                 const double xd  = adm_v_(ax);
-                const double xdd = (f_err(ax) - D * xd - K * x) / M;
+                const double xdd = (f_drive(ax) - D * xd - K * x) / M;
 
                 double xd_new = xd + xdd * dt;
+
+                // [PATCH] velocity clamp (internal state blow-up 방지)
+                const double vmax = std::fabs(cfg_.max_adm_velocity_mps[ax]);
+                if (vmax > 0.0) {
+                    xd_new = clampScalar_(xd_new, -vmax, vmax);
+                }
+
                 double x_new  = x  + xd_new * dt;
 
-                // offset clamp
-                x_new = clampScalar_(x_new, -std::fabs(cfg_.max_offset_m[ax]), std::fabs(cfg_.max_offset_m[ax]));
+                // offset clamp + anti-windup
+                const double x_lim = std::fabs(cfg_.max_offset_m[ax]);
+                bool offset_clamped = false;
+                if (x_lim > 0.0) {
+                    const double x_clamped = clampScalar_(x_new, -x_lim, x_lim);
+                    offset_clamped = (std::fabs(x_clamped - x_new) > 1e-15);
+                    x_new = x_clamped;
+                }
+
+                if (cfg_.antiwindup_on_offset_clamp && offset_clamped) {
+                    if (cfg_.zero_velocity_on_offset_clamp) {
+                        xd_new = 0.0;
+                    } else {
+                        const double r = clampScalar_(cfg_.offset_clamp_velocity_damping, 0.0, 1.0);
+                        xd_new *= r;
+                    }
+                }
 
                 adm_v_(ax) = xd_new;
                 adm_x_(ax) = x_new;
+                out.offset_clamped[static_cast<std::size_t>(ax)] = offset_clamped;
             } else {
                 // no-contact 시 감쇠/리셋
                 if (cfg_.decay_when_no_contact) {
@@ -378,7 +546,31 @@ public:
 
             const double dmax = std::fabs(cfg_.max_step_m[ax]);
             const double d    = p_cmd(ax) - p_cmd_prev_(ax);
-            p_cmd(ax) = p_cmd_prev_(ax) + clampScalar_(d, -dmax, dmax);
+
+            double d_applied = d;
+            if (dmax > 0.0) {
+                d_applied = clampScalar_(d, -dmax, dmax);
+                out.step_limited[static_cast<std::size_t>(ax)] = (std::fabs(d_applied - d) > 1e-15);
+            }
+            p_cmd(ax) = p_cmd_prev_(ax) + d_applied;
+        }
+
+        // [PATCH] 최종 command에 내부 adm state 동기화 (중요)
+        // step limit / final clamp 때문에 실제 command와 adm_x_가 어긋나면 누적 오차 유발
+        if (cfg_.sync_adm_state_to_final_cmd) {
+            for (int ax = 0; ax < 3; ++ax) {
+                if (!cfg_.force_ctrl_enable[ax]) {
+                    adm_x_(ax) = 0.0;
+                    adm_v_(ax) = 0.0;
+                    continue;
+                }
+                adm_x_(ax) = p_cmd(ax) - in.p_des_base(ax);
+
+                // step limit이 걸린 축은 속도도 보수적으로 감쇠
+                if (out.step_limited[static_cast<std::size_t>(ax)]) {
+                    adm_v_(ax) *= 0.5;
+                }
+            }
         }
 
         out.p_cmd_base   = p_cmd;
@@ -413,8 +605,14 @@ public:
         ik_opt.mask[static_cast<std::size_t>(finger_id_)] = true;
         ik_opt.weights[static_cast<std::size_t>(finger_id_)] = 1.0;
 
+        // [PATCH] IK seed: current q vs last successful q 선택
+        std::vector<double> q_seed = in.q_hand_current20;
+        if (cfg_.prefer_last_success_q_seed && last_success_valid_ && last_q_cmd20_.size() >= 20) {
+            q_seed = last_q_cmd20_;
+        }
+
         std::vector<double> q_sol20;
-        const bool ik_ok = hand_ik_->solveIKFingertips(in.q_hand_current20, tips_target, q_sol20, ik_opt);
+        const bool ik_ok = hand_ik_->solveIKFingertips(q_seed, tips_target, q_sol20, ik_opt);
         out.ik_ok = ik_ok;
 
         if (ik_ok && q_sol20.size() >= 20) {
@@ -428,6 +626,8 @@ public:
 
             last_success_valid_ = true;
             last_q_cmd_123_ = out.q_cmd_123;
+            last_q_cmd20_ = q_sol20;
+
             p_cmd_prev_ = p_cmd;  // IK 성공 시에만 command history 갱신
             return out;
         }
@@ -530,9 +730,17 @@ private:
     Eigen::Vector3d adm_v_{Eigen::Vector3d::Zero()};     // offset velocity [m/s]
     Eigen::Vector3d p_cmd_prev_{Eigen::Vector3d::Zero()};
 
+    // [PATCH] measured force filter state
+    Eigen::Vector3d f_meas_filt_{Eigen::Vector3d::Zero()};
+    bool f_lpf_initialized_{false};
+
+    // [PATCH] contact hysteresis state
+    bool contact_state_{false};
+
     // fallback
     bool last_success_valid_{false};
     std::array<double,3> last_q_cmd_123_ {{0.0, 0.0, 0.0}};
+    std::vector<double> last_q_cmd20_;
 };
 
 } // namespace dualarm_forcecon
