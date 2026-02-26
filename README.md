@@ -1,515 +1,583 @@
-# dualarm_forcecon v15 README
+# DualArmForceControl README (v16)
 
-> **Version:** v15  
-> **Key additions vs v14:** `DeltaArmPositionCallback()` (inverse mode, relative Cartesian arm motion)  
-> **This README reflects the updated home pose snapshot provided on 2026-02-26 and fixes topic-name mismatches from the previous README (e.g., `/forward_arm_joint_targets`, `/forward_hand_joint_targets`).**
+This README summarizes the current **v16** baseline of `dualarm_forcecon` (dual arm + hand force/control monitor) based on your latest code flow and runtime logs.
 
 ---
 
-## 1) Overview
+## 1) Version Summary (v16)
 
-`dualarm_forcecon` is a ROS 2 package for **dual-arm + dual-hand control** in Isaac Sim (and compatible pipelines), supporting:
+v16 keeps the **v15 inverse delta arm Cartesian control** feature and focuses on **Isaac Sim hand contact force integration** and **monitor consistency**.
 
-- **Forward mode** (joint-space command)
-  - Arm joint targets (left/right split command in one topic)
-  - Hand joint targets (left/right hand targets in one topic, 15DoF or 20DoF-per-hand format)
-- **Inverse mode** (task-space command)
-  - Arm Cartesian pose target (`TargetArmPositionCallback`)
-  - Hand fingertip Cartesian target (`TargetHandPositionCallback`)
-  - **Arm Cartesian delta target (`DeltaArmPositionCallback`)** ← **v15**
-- Live monitoring of:
-  - Current/target arm pose
-  - Fingertip positions (hand base frame)
-  - Contact forces (arm + finger-level buffers)
+### v16 major changes
+- **Hand contact force input is now aligned with Isaac Sim Action Graph**
+  - Topic: `/isaac_contact_states`
+  - Type: `std_msgs/msg/Float32MultiArray`
+- **Hand-only contact callback semantics**
+  - Existing contact callback is treated as **hand contact callback** (`ContactForceHandCallback` semantics)
+  - Arm forces are not measured from this topic
+- **Finger force mapping fix**
+  - Fixed mismatch where **left ring** contact was displayed as **index**
+- **Print order update for hand monitor**
+  - Hand fingers are printed in: **BABY → RING → MIDL → INDX → THMB**
+- **Display policy update**
+  - Arm forces: always shown as `(0, 0, 0)` for now
+  - Hand finger forces: `Fx = 0`, `Fy = 0`, `Fz = contact_topic_value`
+- **Home pose updated (v16)**
+  - README examples now use your latest `/isaac_joint_states` snapshot and monitor pose
 
-This version also preserves the frame-consistency fixes from v14 (FK/IK z mismatch issues around base/world handling).
+### v15 features preserved in v16
+- `DeltaArmPositionCallback()` (inverse mode relative arm Cartesian jogging)
+- Split forward callbacks
+  - `TargetArmJointsCallback()`
+  - `TargetHandJointsCallback()`
+- Arm FK/IK frame consistency patches (world/base handling + z-offset consistency from earlier fixes)
 
 ---
 
-## 2) Package Structure (v15 baseline)
+## 2) Package Structure (must preserve)
 
-> **Do not change the package tree / file-role separation rules** (handoff baseline preserved).
+> Keep the package tree and file-role separation rules unchanged.
 
 ```text
 dualarm_forcecon/
 ├── CMakeLists.txt
 ├── package.xml
-├── include/
-│   └── dualarm_forcecon/
-│       └── Kinematics/
-│           ├── arm_forward_kinematics.hpp
-│           ├── arm_inverse_kinematics.hpp
-│           ├── hand_forward_kinematics.hpp
-│           ├── hand_inverse_kinematics.hpp
-│           └── kinematics_utils.hpp
+├── include/dualarm_forcecon/Kinematics/
+│   ├── arm_forward_kinematics.hpp
+│   ├── arm_inverse_kinematics.hpp
+│   ├── hand_forward_kinematics.hpp
+│   ├── hand_inverse_kinematics.hpp
+│   └── kinematics_utils.hpp
 └── src/
-    ├── DualArmForceControl.cpp        # ctor/dtor/ControlLoop only (rule)
+    ├── DualArmForceControl.cpp            # ctor / dtor / ControlLoop only (rule)
     ├── DualArmForceControl.h
     ├── node_dualarm_main.cpp
-    └── states_callback_dualarm.cpp    # callbacks (including target callbacks)
+    └── states_callback_dualarm.cpp        # callbacks + PrintDualArmStates
 ```
 
-### File-role rules (important)
-
-- `DualArmForceControl.cpp`
-  - **Only** constructor / destructor / `ControlLoop()`
-- `states_callback_dualarm.cpp`
-  - All callback implementations (`JointsCallback`, `PositionCallback`, target callbacks, mode callback, print helpers)
-- Kinematics headers remain separated in `include/dualarm_forcecon/Kinematics/`
-
----
-
-## 3) Core Features by Mode
-
-### A. Idle mode
-- Targets are synchronized to current joints once (`idle_synced_`) to prevent jumps.
-
-### B. Forward mode
-- **Arm joint command callback:** `TargetArmJointsCallback`
-- **Hand joint command callback:** `TargetHandJointsCallback`
-- Arm and hand can be moved **independently** using separate topics.
-
-### C. Inverse mode
-- **Arm absolute Cartesian target:** `TargetArmPositionCallback`
-- **Hand fingertip Cartesian target:** `TargetHandPositionCallback`
-- **Arm relative Cartesian delta target:** `DeltaArmPositionCallback` (**v15**)
+### Important rules (carry-over)
+- **Do not change package tree**
+- **Do not move callback implementations into `DualArmForceControl.cpp`**
+- `DualArmForceControl.cpp` should keep only:
+  - constructor
+  - destructor
+  - `ControlLoop()`
+- Preserve:
+  - 52-DOF publish mapping
+  - Isaac UI Euler convention used in monitor
+  - world-base z offset default behavior (0.306 m unless parameterized)
+  - `PrintDualArmStates` formatting style (colors/layout), unless intentionally version-updated
 
 ---
 
-## 4) Topics (v15, corrected names)
+## 3) Core Functional Overview
 
-## 4.1 Subscribed topics
+### 3.1 Control modes
+- `idle`
+- `forward`
+- `inverse`
 
-### State inputs
-- `/isaac_joint_states` (`sensor_msgs/msg/JointState`)
-  - Used by both `JointsCallback` and `PositionCallback`
-- `/isaac_contact_states` (`std_msgs/msg/Float64MultiArray`)
+### 3.2 What each mode does
+- **idle**
+  - Synchronizes targets to current states once (safe holding)
+- **forward**
+  - Accepts **joint-space** commands
+  - Arm and hand are controlled through separate topics
+- **inverse**
+  - Accepts **Cartesian** commands
+  - Arm absolute pose (`/target_arm_cartesian_pose`)
+  - Arm delta pose (`/delta_arm_cartesian_pose`)  ← v15+, preserved in v16
+  - Hand fingertip target positions (`/target_hand_fingertips`)
 
-### Inverse mode targets
-- `/target_arm_cartesian_pose` (`std_msgs/msg/Float64MultiArray`)
-  - `TargetArmPositionCallback`
-- `/target_hand_fingertips` (`std_msgs/msg/Float64MultiArray`)
-  - `TargetHandPositionCallback`
-- **`/delta_arm_cartesian_pose`** (`std_msgs/msg/Float64MultiArray`) ← **v15**
-  - `DeltaArmPositionCallback`
-  - Relative Cartesian delta command (left + right arm)
+### 3.3 Monitor output (v16)
+- Arm:
+  - current/target pose in world display frame
+  - force currently displayed as zeros
+- Hand:
+  - fingertip current/target positions in each hand base frame
+  - force display uses hand contact Fz from `/isaac_contact_states` (Fx/Fy are zero-filled)
 
-### Forward mode targets (split)
-- `/forward_arm_joint_targets` (`std_msgs/msg/Float64MultiArray`)
-  - `TargetArmJointsCallback`
-- `/forward_hand_joint_targets` (`std_msgs/msg/Float64MultiArray`)
-  - `TargetHandJointsCallback`
+---
 
-> ✅ Previous README mismatch fixed: **NOT** `/target_arm_joint_targets` / `/target_hand_joint_targets`
+## 4) ROS Interfaces (v16)
 
-## 4.2 Published topics
-- `/isaac_joint_command` (`sensor_msgs/msg/JointState`)
+## 4.1 Subscriptions
+
+### Joint states
+- `/isaac_joint_states` — `sensor_msgs/msg/JointState`
+  - Used by:
+    - `JointsCallback`
+    - `PositionCallback`
+
+### Inverse mode (Cartesian)
+- `/target_arm_cartesian_pose` — `std_msgs/msg/Float64MultiArray`
+  - **12 values**
+  - `[L x y z r p y, R x y z r p y]`
+- `/delta_arm_cartesian_pose` — `std_msgs/msg/Float64MultiArray`
+  - **12 values**
+  - `[L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]`
+- `/target_hand_fingertips` — `std_msgs/msg/Float64MultiArray`
+  - **30 values**
+  - `left(5 fingertips × xyz) + right(5 fingertips × xyz)`
+
+### Forward mode (Joint-space)
+- `/forward_arm_joint_targets` — `std_msgs/msg/Float64MultiArray`
+  - **12 values**
+  - `[left arm 6, right arm 6]`
+- `/forward_hand_joint_targets` — `std_msgs/msg/Float64MultiArray`
+  - **30 or 40 values**
+  - 30 = `left15 + right15`
+  - 40 = `left20 + right20` (mimic canonicalization applied internally)
+
+### Hand contact force monitor input (v16)
+- `/isaac_contact_states` — `std_msgs/msg/Float32MultiArray`
+  - **10 values**
+  - hand fingertip scalar contact values (used as **Fz** only for monitor)
+  - arm force is **not** taken from this topic
+
+## 4.2 Publisher
+- `/isaac_joint_command` — `sensor_msgs/msg/JointState`
+  - Consolidated arm + hand command published by `ControlLoop()`
 
 ## 4.3 Service
-- `/change_control_mode` (`std_srvs/srv/Trigger`)
+- `/change_control_mode` — `std_srvs/srv/Trigger`
+  - Used to cycle/change control mode (implementation-dependent toggle/cycle)
+  - Check monitor header (`Mode: [ ... ]`) after each call
 
 ---
 
-## 5) Message Formats (important)
+## 5) Coordinate / Frame Conventions
 
-## 5.1 Forward arm joints (`/forward_arm_joint_targets`)
+### 5.1 Arm pose display (monitor)
+- `PrintDualArmStates()` arm pose is shown in the **monitor world display frame**
+- Euler display uses the project’s Isaac UI matching convention (already patched in FK utilities)
 
-**Length = 12**
+### 5.2 Arm inverse input
+- Arm inverse callbacks consume Cartesian targets with configuration from:
+  - `ik_targets_frame_` (`base` / `world`)
+  - `ik_euler_conv_`
+  - `ik_angle_unit_`
+- v15/v16 flow assumes your existing arm FK/IK frame patches are already applied (strict/no accidental double z-offset)
 
-```text
-[L_arm(6), R_arm(6)]
-= [L_j1..L_j6, R_j1..R_j6]
-```
+### 5.3 Hand pose display
+- Hand fingertip positions are printed in:
+  - `LEFT_HAND_BASE` frame (left hand)
+  - `RIGHT_HAND_BASE` frame (right hand)
 
-> Note: This order is **not** the same as `/isaac_joint_states` name order because Isaac state list contains extra joints like `yaw_joint`, `pitch_joint` in between.
-
----
-
-## 5.2 Forward hand joints (`/forward_hand_joint_targets`)
-
-### Supported formats (v14/v15 split-hand callback style)
-- **30 values** = left 15DoF + right 15DoF
-- **40 values** = left 20DoF + right 20DoF
-
-### 15DoF per hand layout (recommended for human-readable commands)
-
-```text
-[thumb1, thumb2, thumb3,
- index1, index2, index3,
- middle1, middle2, middle3,
- ring1, ring2, ring3,
- baby1, baby2, baby3]
-```
-
-For `/forward_hand_joint_targets` (30 values):
-
-```text
-[L_hand15(15), R_hand15(15)]
-```
-
-### 20DoF per hand layout
-```text
-[thumb1..4, index1..4, middle1..4, ring1..4, baby1..4]
-```
-
-- `joint4` is mimic/canonicalized (`q4 = q3`) internally where needed.
+### 5.4 Hand fingertip command order vs print order (important)
+- **Print order (v16 monitor)**: `BABY → RING → MIDL → INDX → THMB`
+- **`/target_hand_fingertips` command order (kept from earlier README/code usage)**:
+  - `THMB, INDX, MIDL, RING, BABY` for each hand (each fingertip = xyz)
 
 ---
 
-## 5.3 Inverse arm absolute pose (`/target_arm_cartesian_pose`)
+## 6) Home Pose Reference (updated in v16)
 
-**Length = 12**
+## 6.1 Home joint pose (v16 snapshot from `/isaac_joint_states`)
 
-```text
-[L x y z r p y,  R x y z r p y]
-```
+### Arm joints (canonical home reference)
+- **Left arm q_home [rad]**
+  - `[1.6646, -0.0087, -2.2179, 1.5727, 1.6135, -0.1204]`
+- **Right arm q_home [rad]**
+  - `[-0.0189, 0.7476, 1.9877, 0.0000, -1.1869, -0.7854]`
 
-- Position unit: **meters**
-- Orientation unit: follows `ik_angle_unit_` (`rad` default in v14/v15 snippets)
-- Euler convention: follows `ik_euler_conv_` (`rpy` default)
-- Frame handling follows `ik_targets_frame_` and v14 frame-consistency patch behavior
+### Hand joints (notable nonzero values in v16 home)
+- **Left hand**
+  - `left_ring_joint2 ≈ -0.0400`
+  - `left_thumb_joint2 ≈ 0.3948`
+  - `left_ring_joint3 ≈ 0.7854`
+  - `left_thumb_joint3 ≈ 0.3927`
+  - `left_ring_joint4 ≈ 0.5526`
+  - `left_thumb_joint4 ≈ 0.3998`
+- **Right hand**
+  - `right_thumb_joint2 ≈ 0.3955`
+  - `right_thumb_joint3 ≈ 0.3840`
+  - `right_thumb_joint4 ≈ 0.3908`
 
----
+> This means v16 home is **not a fully open hand** baseline anymore (left ring/thumb are intentionally flexed).
 
-## 5.4 Inverse arm delta pose (`/delta_arm_cartesian_pose`)  ← v15
+## 6.2 Home monitor pose snapshot (v16, from `PrintDualArmStates`)
 
-**Length = 12**
+### Arm (CUR/TAR at home)
+- **Left arm**
+  - `P[m,deg] = (0.0992, 0.2653, -0.2285 | 155.94, 86.32, -65.29)`
+- **Right arm**
+  - `P[m,deg] = (0.5464, -0.3184, 0.1380 | 174.49, 88.02, -84.52)`
 
-```text
-[L dx dy dz droll dpitch dyaw,  R dx dy dz droll dpitch dyaw]
-```
+### Hand fingertip positions at home (hand-base frame, print order)
 
-### Behavior (v15)
-- Applies a **relative delta** to the **current arm pose**
-- Conceptually:
-  - `target_pos = current_pos + dpos`
-  - `target_euler = current_euler + deuler`
-- Then the resulting absolute pose is solved through the same arm IK path (inverse mode)
+#### Left hand
+- `BABY = ( 0.0401, -0.0144, 0.2310 )`
+- `RING = ( 0.0133, -0.0309, 0.2391 )`
+- `MIDL = (-0.0135, -0.0144, 0.2640 )`
+- `INDX = (-0.0403, -0.0144, 0.2465 )`
+- `THMB = (-0.0470, -0.0999, 0.1524 )`
 
-### Notes
-- Position delta unit: **meters**
-- Orientation delta unit: follows `ik_angle_unit_` (default `rad`)
-- Should be used in **inverse mode**
-- Small increments are recommended (e.g., 1–30 mm, a few degrees) for stable IK behavior
+#### Right hand
+- `BABY = (-0.0401, -0.0144, 0.2310 )`
+- `RING = (-0.0133, -0.0144, 0.2465 )`
+- `MIDL = ( 0.0135, -0.0144, 0.2640 )`
+- `INDX = ( 0.0403, -0.0144, 0.2465 )`
+- `THMB = ( 0.0471, -0.1002, 0.1523 )`
 
----
+## 6.3 Home pose command examples
 
-## 5.5 Inverse hand fingertips (`/target_hand_fingertips`)
-
-Expected as fingertip Cartesian targets in **hand base frame** (left/right each 5 fingertips × xyz).
-
-Canonical fingertip order used in monitoring/kinematics:
-
-```text
-thumb, index, middle, ring, baby
-```
-
-So the common 30-value layout is:
-
-```text
-[L_thumb xyz, L_index xyz, L_middle xyz, L_ring xyz, L_baby xyz,
- R_thumb xyz, R_index xyz, R_middle xyz, R_ring xyz, R_baby xyz]
-```
-
----
-
-## 6) Home Pose (v15 snapshot, updated)
-
-This section reflects the **new home pose** you provided (latest `/isaac_joint_states` + monitor print), replacing the older v14 home reference.
-
-## 6.1 Home pose — arm joints (from `/isaac_joint_states`)
-
-### Left arm (rad)
-- `L = [1.4669, 0.0090, -2.4415, 1.4441, 1.4924, 0.0699]`
-
-### Right arm (rad)
-- `R = [-0.0135, 0.7709, 1.9998, 0.0000, -1.1869, -0.7854]`
-
-### Combined arm forward command order (12)
-```text
-[L_j1..L_j6, R_j1..R_j6]
-```
-
-```text
-[1.4669, 0.0090, -2.4415, 1.4441, 1.4924, 0.0699,
- -0.0135, 0.7709, 1.9998, 0.0000, -1.1869, -0.7854]
-```
-
-## 6.2 Home pose — arm Cartesian monitor values (from monitor print)
-
-> These are the values shown in `Dual Arm & Hand Monitor`.
-
-### Left arm (current/target at home)
-- Position `[m]` = `(0.1513, 0.2701, -0.1461)`
-- Euler `[deg]` = `(159.93, 87.07, -70.54)`
-
-### Right arm (current/target at home)
-- Position `[m]` = `(0.5414, -0.3094, 0.1513)`
-- Euler `[deg]` = `(-107.06, 88.92, -162.94)`
-
-## 6.3 Home pose — hand joints (15DoF format, practical command baseline)
-
-### Left hand 15DoF (rad)
-Format:
-```text
-[thumb1,thumb2,thumb3, index1,index2,index3, middle1,middle2,middle3, ring1,ring2,ring3, baby1,baby2,baby3]
-```
-
-```text
-[0.0000, 0.3936, 0.3927,
- 0.0000,-0.0005, 0.0000,
- 0.0000,-0.0004, 0.0000,
- 0.0000,-0.0002, 0.7854,
- 0.0000,-0.0005, 0.0000]
-```
-
-### Right hand 15DoF (rad)
-```text
-[0.0000, 0.3939, 0.3927,
- 0.0000,-0.0001, 0.0000,
- 0.0000,-0.0001, 0.0000,
- 0.0000,-0.0001, 0.0000,
- 0.0000,-0.0001, 0.0000]
-```
-
-## 6.4 Home pose — fingertip positions (monitor, hand base frame)
-
-### Left hand (hand-base frame)
-- THMB = `(-0.0471, -0.1000, 0.1524)`
-- INDX = `(-0.0403, -0.0144, 0.2465)`
-- MIDL = `(-0.0135, -0.0144, 0.2640)`
-- RING = `( 0.0133, -0.0337, 0.2382)`
-- BABY = `( 0.0401, -0.0144, 0.2310)`
-
-### Right hand (hand-base frame)
-- THMB = `( 0.0470, -0.1000, 0.1524)`
-- INDX = `( 0.0403, -0.0144, 0.2465)`
-- MIDL = `( 0.0135, -0.0144, 0.2640)`
-- RING = `(-0.0133, -0.0144, 0.2465)`
-- BABY = `(-0.0401, -0.0144, 0.2310)`
-
----
-
-## 7) Example Commands (v15, home-pose based)
-
-> All examples use `std_msgs/msg/Float64MultiArray`.  
-> Make sure the node is in the correct mode (**forward** or **inverse**) before publishing.
-
-## 7.1 Forward mode examples — Arm joints
-
-### (A) Arm home pose (v15 updated)
+### Home arm joint command (12)
 ```bash
 ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
-"{data: [1.4669, 0.0090, -2.4415, 1.4441, 1.4924, 0.0699,
-         -0.0135, 0.7709, 1.9998, 0.0000, -1.1869, -0.7854]}"
-```
-
-### (B) Symmetric small arm motion from home (joint-space)
-- Left arm slightly reaches forward/up, right arm compensates modestly
-```bash
-ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
-"{data: [1.4200, -0.0200, -2.3500, 1.3500, 1.5500, 0.1000,
-         0.0200,  0.8200,  1.9300, 0.0500, -1.1500, -0.7600]}"
-```
-
-### (C) Left arm only move, right arm stays at home
-```bash
-ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
-"{data: [1.3000, 0.0500, -2.2000, 1.2000, 1.4500, 0.2000,
-         -0.0135, 0.7709, 1.9998, 0.0000, -1.1869, -0.7854]}"
-```
-
----
-
-## 7.2 Forward mode examples — Hand joints (split callback)
-
-### (A) Hand home pose (30 values = left15 + right15)
-```bash
-ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
 "{data: [
-  0.0000,0.3936,0.3927,  0.0000,-0.0005,0.0000,  0.0000,-0.0004,0.0000,  0.0000,-0.0002,0.7854,  0.0000,-0.0005,0.0000,
-  0.0000,0.3939,0.3927,  0.0000,-0.0001,0.0000,  0.0000,-0.0001,0.0000,  0.0000,-0.0001,0.0000,  0.0000,-0.0001,0.0000
+  1.6646, -0.0087, -2.2179, 1.5727, 1.6135, -0.1204,
+ -0.0189,  0.7476,  1.9877, 0.0000,-1.1869, -0.7854
 ]}"
 ```
 
-### (B) Requested-style gesture example
-- **Right hand:** keep v15 home pose
-- **Left hand:** thumb folds inward (thumb2/3 flex), ring bends ~90° (`ring3 ≈ 1.5708`), others ≈ 0
+### Home hand joint command (30 = left15 + right15)
+Order per 15-DoF hand block (each hand):
+`[thumb1,2,3, index1,2,3, middle1,2,3, ring1,2,3, baby1,2,3]`
 
 ```bash
 ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
 "{data: [
-  0.0000,0.7000,0.7000,   0.0000,0.0000,0.0000,   0.0000,0.0000,0.0000,   0.0000,0.0000,1.5708,   0.0000,0.0000,0.0000,
-  0.0000,0.3939,0.3927,   0.0000,-0.0001,0.0000,  0.0000,-0.0001,0.0000,  0.0000,-0.0001,0.0000,  0.0000,-0.0001,0.0000
-]}"
-```
-
-### (C) Both hands fully open (approx)
-```bash
-ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
-"{data: [
-  0,0,0,  0,0,0,  0,0,0,  0,0,0,  0,0,0,
-  0,0,0,  0,0,0,  0,0,0,  0,0,0,  0,0,0
+  0.0000,0.3948,0.3927,   -0.0001,-0.0003,-0.0006,   -0.0005,-0.0002,-0.0007,   0.0000,-0.0400,0.7854,   -0.0001,-0.0003,-0.0007,
+  0.0000,0.3955,0.3840,    0.0000,-0.0001,0.0000,     0.0000,-0.0001,0.0000,     0.0000,-0.0001,0.0000,    0.0000,-0.0001,0.0000
 ]}"
 ```
 
 ---
 
-## 7.3 Inverse mode examples — Absolute arm Cartesian pose
+## 7) Control Mode Switching and Example Commands (v16)
 
-### (A) Arm home pose via monitor values (rad Euler)
-Using monitor home pose and converting Euler deg → rad:
-- Left Euler rad ≈ `(2.7913, 1.5197, -1.2312)`
-- Right Euler rad ≈ `(-1.8685, 1.5519, -2.8438)`
+## 7.1 Run node
+```bash
+ros2 run dualarm_forcecon dualarm_forcecon_node
+```
+
+## 7.2 Switch control mode (`/change_control_mode`)
+> The service is `std_srvs/srv/Trigger`, and your implementation cycles modes.  
+> **Always confirm the active mode from the monitor header**:
+> `Dual Arm & Hand Monitor ... | Mode: [idle/forward/inverse] | ...`
+
+```bash
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+```
+
+Call it repeatedly until the monitor shows the desired mode.
+
+### Typical sequence (example)
+```bash
+# idle -> forward
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+
+# forward -> inverse
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+
+# inverse -> idle
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+```
+
+---
+
+## 7.3 Forward mode examples — Arm joints (`/forward_arm_joint_targets`)
+
+> Message type: `std_msgs/msg/Float64MultiArray`  
+> Format: **12 values** = `[left arm 6, right arm 6]`
+
+### (A) Arm home pose (v16)
+```bash
+ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  1.6646, -0.0087, -2.2179, 1.5727, 1.6135, -0.1204,
+ -0.0189,  0.7476,  1.9877, 0.0000,-1.1869, -0.7854
+]}"
+```
+
+### (B) Symmetric small motion from home (safe test)
+```bash
+ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  1.7046, -0.0287, -2.1779, 1.5427, 1.5935, -0.0804,
+ -0.0589,  0.7676,  1.9477, 0.0300,-1.1669, -0.8254
+]}"
+```
+
+### (C) Left arm only move, right arm keep home
+```bash
+ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  1.7346,  0.0413, -2.0979, 1.4927, 1.5435, -0.0404,
+ -0.0189,  0.7476,  1.9877, 0.0000,-1.1869, -0.7854
+]}"
+```
+
+---
+
+## 7.4 Forward mode examples — Hand joints (`/forward_hand_joint_targets`)
+
+> Message type: `std_msgs/msg/Float64MultiArray`  
+> Supported payload sizes:
+> - **30** = `left15 + right15`
+> - **40** = `left20 + right20` (joint4 values included; internal canonicalization applies)
+
+### 15-DoF order (per hand, 30-format)
+`[thumb1,2,3, index1,2,3, middle1,2,3, ring1,2,3, baby1,2,3]`
+
+### 20-DoF order (per hand, 40-format)
+`[thumb1,2,3,4, index1,2,3,4, middle1,2,3,4, ring1,2,3,4, baby1,2,3,4]`
+
+### (A) Hand home pose (30 values, v16)
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0000,0.3948,0.3927,   -0.0001,-0.0003,-0.0006,   -0.0005,-0.0002,-0.0007,   0.0000,-0.0400,0.7854,   -0.0001,-0.0003,-0.0007,
+  0.0000,0.3955,0.3840,    0.0000,-0.0001,0.0000,     0.0000,-0.0001,0.0000,     0.0000,-0.0001,0.0000,    0.0000,-0.0001,0.0000
+]}"
+```
+
+### (B) 40-value full hand command (explicit joint4 values)
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0,0.3948,0.3927,0.3998,   -0.0001,-0.0003,-0.0006,-0.0058,   -0.0005,-0.0002,-0.0007,-0.0060,   0.0,-0.0400,0.7854,0.5526,   -0.0001,-0.0003,-0.0007,-0.0065,
+  0.0,0.3955,0.3840,0.3908,    0.0,-0.0001,0.0,0.0014,             0.0,-0.0001,0.0,0.0017,             0.0,-0.0001,0.0,0.0014,      0.0,-0.0001,0.0,0.0012
+]}"
+```
+
+### (C) Example gesture — Right hand keep home, Left hand thumb flex + ring 90deg (30 values)
+(Useful reference because you asked for a similar command earlier.)
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0,0.80,0.80,   0.0,0.0,0.0,   0.0,0.0,0.0,   0.0,0.0,1.5708,   0.0,0.0,0.0,
+  0.0,0.3955,0.3840,   0.0,-0.0001,0.0,   0.0,-0.0001,0.0,   0.0,-0.0001,0.0,   0.0,-0.0001,0.0
+]}"
+```
+
+### (D) Gentle closing test (both hands, 30 values)
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0,0.55,0.45,  0.0,0.25,0.20,  0.0,0.25,0.20,  0.0,0.30,0.25,  0.0,0.20,0.15,
+  0.0,0.55,0.45,  0.0,0.25,0.20,  0.0,0.25,0.20,  0.0,0.25,0.20,  0.0,0.20,0.15
+]}"
+```
+
+---
+
+## 7.5 Inverse mode examples — Arm absolute Cartesian pose (`/target_arm_cartesian_pose`)
+
+> Message type: `std_msgs/msg/Float64MultiArray`  
+> Format: **12** = `[L x y z r p y, R x y z r p y]`
+
+### (A) Absolute arm target near v16 home monitor pose (rad)
+Euler values below are taken from the v16 monitor home snapshot (degrees → radians).
+
+- Left Euler rad ≈ `(2.7217, 1.5066, -1.1395)`
+- Right Euler rad ≈ `(3.0454, 1.5362, -1.4752)`
 
 ```bash
 ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
 "{data: [
-  0.1513,  0.2701, -0.1461,   2.7913, 1.5197, -1.2312,
-  0.5414, -0.3094,  0.1513,  -1.8685, 1.5519, -2.8438
+  0.0992,  0.2653, -0.2285,   2.7217, 1.5066, -1.1395,
+  0.5464, -0.3184,  0.1380,   3.0454, 1.5362, -1.4752
 ]}"
 ```
 
-### (B) Small absolute Cartesian perturbation around home
-- Left arm +2 cm x, -1 cm y, +2 cm z
-- Right arm -1 cm x, +1 cm y, unchanged z
+### (B) Small Cartesian shift from home-like target (absolute)
 ```bash
 ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
 "{data: [
-  0.1713,  0.2601, -0.1261,   2.7913, 1.5197, -1.2312,
-  0.5314, -0.2994,  0.1513,  -1.8685, 1.5519, -2.8438
+  0.1192,  0.2553, -0.2085,   2.7217, 1.5066, -1.1395,
+  0.5364, -0.3084,  0.1380,   3.0454, 1.5362, -1.4752
 ]}"
 ```
 
-> If IK fails, reduce displacement and/or orientation change.
+### (C) Left arm only absolute move, right arm hold
+```bash
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.1400,  0.2500, -0.2000,   2.7000, 1.5000, -1.1000,
+  0.5464, -0.3184,  0.1380,   3.0454, 1.5362, -1.4752
+]}"
+```
 
 ---
 
-## 7.4 Inverse mode examples — Delta arm Cartesian pose (v15)
+## 7.6 Inverse mode examples — Delta arm Cartesian pose (`/delta_arm_cartesian_pose`)  *(v15 feature, used in v16)*
 
-### (A) Simple relative move (translation only)
-- Left: `(+3 cm, -3 cm, +2 cm)`
-- Right: no change
+> Message type: `std_msgs/msg/Float64MultiArray`  
+> Format: **12** = `[L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]`
+
+### (A) Zero delta (sanity)
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0,0,0,0,0,0,  0,0,0,0,0,0]}"
+```
+
+### (B) Small symmetric jog
+- Left: +x, -y, +z
+- Right: -x, +y, +z
+
 ```bash
 ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
 "{data: [
-  0.03, -0.03, 0.02,   0.0, 0.0, 0.0,
-  0.00,  0.00, 0.00,   0.0, 0.0, 0.0
+   0.020, -0.010, 0.015,   0.00, 0.00, 0.00,
+  -0.020,  0.010, 0.015,   0.00, 0.00, 0.00
 ]}"
 ```
 
-### (B) Relative move with small orientation delta (rad)
-- Left: +1 cm z and +10° yaw (`~0.1745 rad`)
-- Right: -1 cm z and -10° yaw
+### (C) Left-arm orientation jog only
 ```bash
 ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
 "{data: [
-  0.00, 0.00, 0.01,   0.0, 0.0,  0.1745,
-  0.00, 0.00,-0.01,   0.0, 0.0, -0.1745
+  0.000, 0.000, 0.000,   0.05, -0.03, 0.08,
+  0.000, 0.000, 0.000,   0.00,  0.00, 0.00
 ]}"
 ```
 
-### (C) Very small jogging command (safe tuning / teleop style)
-```bash
-ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [
-  0.005, 0.000, 0.000,   0.000, 0.000, 0.000,
- -0.005, 0.000, 0.000,   0.000, 0.000, 0.000
-]}"
-```
-
-**Recommended practice for delta mode**
-- Start with **5–10 mm** translation steps
-- Start with **≤ 5°** orientation steps (`0.087 rad`)
-- Avoid large simultaneous translation + rotation jumps in one command
+### (D) Practical example (from your description)
+If current left arm pose is `(0.5, 0.5, 0.5)` and you send `(0.3, -0.3, 0.2)`, the target becomes `(0.8, 0.2, 0.7)` (same concept applies to orientation deltas).
 
 ---
 
-## 7.5 Inverse mode example — Hand fingertip Cartesian target (relative-to-home style example)
+## 7.7 Inverse mode examples — Hand fingertip Cartesian targets (`/target_hand_fingertips`)
 
-The exact hand IK feasibility depends on reachable fingertip workspace. Start from home fingertip positions and apply **small** deltas.
+> Message type: `std_msgs/msg/Float64MultiArray`  
+> Format: **30** values  
+> Order per hand (kept from prior usage):  
+> `[THMB xyz, INDX xyz, MIDL xyz, RING xyz, BABY xyz]`  
+> Full payload = `left hand 15 + right hand 15`
 
-Example below:
-- Left index fingertip slightly down (`z - 0.01`)
-- Others remain near home
-- Right hand unchanged at home
-
+### (A) Hand home-like fingertip target (v16 monitor values)
 ```bash
 ros2 topic pub --once /target_hand_fingertips std_msgs/msg/Float64MultiArray \
 "{data: [
-  -0.0471,-0.1000,0.1524,   -0.0403,-0.0144,0.2365,   -0.0135,-0.0144,0.2640,    0.0133,-0.0337,0.2382,    0.0401,-0.0144,0.2310,
-   0.0470,-0.1000,0.1524,    0.0403,-0.0144,0.2465,    0.0135,-0.0144,0.2640,   -0.0133,-0.0144,0.2465,   -0.0401,-0.0144,0.2310
+  -0.0470,-0.0999,0.1524,   -0.0403,-0.0144,0.2465,   -0.0135,-0.0144,0.2640,    0.0133,-0.0309,0.2391,    0.0401,-0.0144,0.2310,
+   0.0471,-0.1002,0.1523,    0.0403,-0.0144,0.2465,    0.0135,-0.0144,0.2640,   -0.0133,-0.0144,0.2465,   -0.0401,-0.0144,0.2310
 ]}"
 ```
 
-If the requested fingertip target is outside the reachable hand workspace, hand IK may fail (or only partially update depending on implementation).
+### (B) Left index fingertip press-down (example), others keep near home
+```bash
+ros2 topic pub --once /target_hand_fingertips std_msgs/msg/Float64MultiArray \
+"{data: [
+  -0.0470,-0.0999,0.1524,   -0.0403,-0.0144,0.2365,   -0.0135,-0.0144,0.2640,    0.0133,-0.0309,0.2391,    0.0401,-0.0144,0.2310,
+   0.0471,-0.1002,0.1523,    0.0403,-0.0144,0.2465,    0.0135,-0.0144,0.2640,   -0.0133,-0.0144,0.2465,   -0.0401,-0.0144,0.2310
+]}"
+```
+
+### (C) Both thumbs forward/down test
+```bash
+ros2 topic pub --once /target_hand_fingertips std_msgs/msg/Float64MultiArray \
+"{data: [
+  -0.0400,-0.0850,0.1450,   -0.0403,-0.0144,0.2465,   -0.0135,-0.0144,0.2640,    0.0133,-0.0309,0.2391,    0.0401,-0.0144,0.2310,
+   0.0400,-0.0850,0.1450,    0.0403,-0.0144,0.2465,    0.0135,-0.0144,0.2640,   -0.0133,-0.0144,0.2465,   -0.0401,-0.0144,0.2310
+]}"
+```
+
+> If hand IK fails for a fingertip target, reduce displacement and move gradually (task space is limited for hand kinematics).
 
 ---
 
-## 8) Known Notes / Practical Tips
+## 8) Hand Contact Force Handling in v16 (`/isaac_contact_states`)
 
-## 8.1 Arm FK/IK frame consistency (v14 carried into v15)
-- v14 patched `arm_forward_kinematics.hpp` and `arm_inverse_kinematics.hpp` to reduce target/current z mismatch and frame confusion.
-- Keep `world_base_xyz` / `world_base_euler_xyz_deg` consistent with your Isaac scene setup.
-- Monitor readout in your latest logs indicates the arm display is aligned with the current FK output convention used in code.
+## 8.1 Topic format (source)
+- Topic: `/isaac_contact_states`
+- Type: `std_msgs/msg/Float32MultiArray`
+- Current Action Graph publishes **10 scalar values** (hand fingertip contact channels)
 
-## 8.2 Hand workspace is much smaller than arm workspace
-- Hand task-space IK is **far more limited** than arm IK.
-- Use small fingertip deltas around a known valid pose (usually home pose).
-- Prefer staged commands rather than large jumps.
+## 8.2 How v16 monitor uses it
+- Arm force:
+  - always shown as `(0,0,0)` for now
+- Hand force:
+  - `Fx = 0`
+  - `Fy = 0`
+  - `Fz = mapped contact scalar`
 
-## 8.3 Hand mimic joints (`joint4`)
-- Hand joint4 values are mimic-linked to joint3 in the kinematics/model path.
-- In 20DoF formats, `q4` may be canonicalized to `q3` internally.
+## 8.3 Why mapping logic exists
+You observed a real mismatch:
+- physically pressing **left ring** finger
+- monitor initially showed force on **left index**
 
-## 8.4 `/isaac_joint_states` includes extra non-arm joints
-- `yaw_joint`, `pitch_joint` appear in the state list.
-- Do **not** copy raw state order directly into `/forward_arm_joint_targets`.
+v16 fixes this by applying a mapping/remap in the hand contact callback path so the displayed finger label matches the actual contacted finger.
 
----
+> If you later reorder the Action Graph outputs, update the mapping in the callback accordingly.
 
-## 9) v14 → v15 Change Summary
+## 8.4 Debugging tips
+```bash
+# Confirm raw contact values are coming in
+ros2 topic echo /isaac_contact_states
 
-### Added
-- `DeltaArmPositionCallback()`
-  - Relative arm Cartesian control in inverse mode
-  - Enables jog/teleop-like incremental motion commands
-
-### Preserved from v14
-- Split forward callbacks:
-  - `TargetArmJointsCallback`
-  - `TargetHandJointsCallback`
-- Arm FK/IK frame consistency patches (target/current z mismatch mitigation)
-- Separate arm/hand inverse callbacks
-- Hand FK/IK setup and fingertip monitoring
-
-### README corrections in this v15 document
-- Updated **home pose** (new snapshot)
-- Corrected **topic names** to actual code-style names (`/forward_*`)
-- Added **delta arm examples** and usage notes
+# Publish a test packet manually (Float32)
+ros2 topic pub --once /isaac_contact_states std_msgs/msg/Float32MultiArray "{data: [0, 10, 0, 0, 0, 0, 0, 0, 0, 0]}"
+```
 
 ---
 
-## 10) Quick Command Checklist (copy-friendly)
+## 9) v15 → v16 Change Summary
 
-### Forward mode
-- Arm joints: `/forward_arm_joint_targets` (12)
-- Hand joints: `/forward_hand_joint_targets` (30 or 40)
+### Added / Changed in v16
+- Isaac Action Graph contact topic integration standardized to **Float32**
+- Hand contact callback semantics clarified (hand-only source topic)
+- Finger contact index mapping fixed (ring/index display mismatch resolved)
+- Hand print order updated to **BABY → RING → MIDL → INDX → THMB**
+- v16 home pose reference updated in README (arm + hand + monitor snapshot)
 
-### Inverse mode
-- Arm absolute pose: `/target_arm_cartesian_pose` (12)
-- Hand fingertips: `/target_hand_fingertips` (30)
-- **Arm delta pose (v15): `/delta_arm_cartesian_pose` (12)**
-
----
-
-## 11) Suggested next steps for v15+ (optional)
-
-- Add command rate limiting / smoothing for delta-arm mode
-- Add per-arm enable mask in delta callback (left-only/right-only without zeros)
-- Add explicit frame field (base/world) in message protocol to eliminate ambiguity
-- Add hand IK target validation + clamp (workspace-aware pre-check)
+### Preserved from v15
+- `DeltaArmPositionCallback()` (relative arm Cartesian control)
+- Split forward arm/hand joint topics
+- Existing arm FK/IK conventions and patched frame behavior
 
 ---
 
-If you want, I can also prepare a **v15 command cheat sheet** (one-page quick reference) with only the topic formats + common examples.
+## 10) Quick Checklist (v16)
+
+### Build / run
+```bash
+cd ~/dualarm_ws
+colcon build --packages-select dualarm_forcecon
+source install/setup.bash
+ros2 run dualarm_forcecon dualarm_forcecon_node
+```
+
+### Mode / topics
+- Control mode service: `/change_control_mode` (`Trigger`)
+- Forward arm joints: `/forward_arm_joint_targets` (`Float64MultiArray`, 12)
+- Forward hand joints: `/forward_hand_joint_targets` (`Float64MultiArray`, 30/40)
+- Inverse arm absolute: `/target_arm_cartesian_pose` (`Float64MultiArray`, 12)
+- Inverse arm delta: `/delta_arm_cartesian_pose` (`Float64MultiArray`, 12)
+- Inverse hand fingertips: `/target_hand_fingertips` (`Float64MultiArray`, 30)
+- Hand contact monitor: `/isaac_contact_states` (`Float32MultiArray`, 10)
+
+### Common sanity checks
+- Confirm monitor mode before sending command
+- Start from home pose before large moves
+- For IK failures:
+  - reduce position delta
+  - keep orientation near reachable range
+  - move in smaller steps (especially for hand fingertips)
+- If contact finger label looks wrong after Action Graph edits:
+  - check callback mapping vs Action Graph output order
+
+---
+
+## 11) Suggested Next Steps for v16+ (optional)
+
+- Add explicit parameter/documentation for `/isaac_contact_states` channel ordering (and mapping table)
+- Add a debug print option for raw contact array + mapped finger labels
+- Add contact topic QoS/type checks at startup (warn if wrong type connected)
+- Add optional arm force topic integration (if you later publish arm wrench/contact data separately)
+- Update monitor header version string to `v16` everywhere (if any print path still shows old version tag)
+
+---
+
+## 12) Notes
+
+- This README intentionally reflects your **current v16 baseline behavior** and the **latest home pose snapshot you provided**.
+- If you change:
+  - home pose
+  - Action Graph output order
+  - IK frame conventions
+  - topic names  
+  then update the corresponding sections in this README together to avoid confusion during future handoff (v17+).
+

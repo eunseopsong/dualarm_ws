@@ -756,95 +756,76 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
     res->message="Mode: "+current_control_mode_;
 }
 
-// --------------------
-// ContactForceCallback (arm)
-// --------------------
 // ============================================================================
-// ContactForceHandCallback
-// /isaac_contact_states (std_msgs/msg/Float32MultiArray)
-// - 현재 Isaac Sim Action Graph에서 "손가락 10개"의 contact force만 publish
-// - data size = 10
-// - index order:
-//   [0] L baby, [1] L index, [2] L middle, [3] L ring, [4] L thumb,
-//   [5] R baby, [6] R index, [7] R middle, [8] R ring, [9] R thumb
-//
-// 내부 저장 정책:
-// - f_l_hand_c_, f_r_hand_c_는 (5x3) 이므로, scalar force를 z축 성분(2번 열)에 저장
-// - x/y 성분은 0으로 둠
-// - arm force(f_l_c_, f_r_c_)는 이 토픽에서 오지 않으므로 0으로 유지
+// ContactForceHandCallback (v15 fix)
+// - /isaac_contact_states : Float32MultiArray (10 values)
+// - Current Isaac ActionGraph observed order (per hand):
+//   [BABY, RING, MIDL, INDX, THMB]
+// - Internal hand force row order (canonical):
+//   row0=THMB, row1=INDX, row2=MIDL, row3=RING, row4=BABY
+// - Only Fz is used for now. Fx,Fy = 0
+// - Arm forces are forced to zero for monitor output
 // ============================================================================
 void DualArmForceControl::ContactForceHandCallback(
     const std_msgs::msg::Float32MultiArray::SharedPtr msg)
 {
-    if (!msg) return;
-
-    // 현재 토픽은 hand only 이므로 arm force는 항상 0으로 둔다.
+    // Arm force monitor values are not used for now -> always zero
     f_l_c_.setZero();
     f_r_c_.setZero();
+    f_l_t_.setZero();
+    f_r_t_.setZero();
 
-    // hand current force matrix 초기화 (5 fingers x 3 axes)
+    // Hand target force (if not used) -> keep zero for monitor
+    f_l_hand_t_.setZero();
+    f_r_hand_t_.setZero();
+
+    // Current hand force reset every callback
     f_l_hand_c_.setZero();
     f_r_hand_c_.setZero();
 
-    // 기대 길이: 10
+    if (!msg) return;
     if (msg->data.size() < 10) {
-        if (node_) {
-            RCLCPP_WARN_THROTTLE(
-                node_->get_logger(), *node_->get_clock(), 2000,
-                "[ContactForceHandCallback] /isaac_contact_states size=%zu (expected >=10). Ignore partial data.",
-                msg->data.size());
-        }
+        // 값이 부족하면 0 유지
         return;
     }
 
-    auto finite_or_zero = [](float v) -> double {
+    auto fz = [&](size_t i) -> double {
+        if (i >= msg->data.size()) return 0.0;
+        const float v = msg->data[i];
         return std::isfinite(v) ? static_cast<double>(v) : 0.0;
     };
 
-    // finger row index in our internal matrix convention:
-    // [0]=thumb, [1]=index, [2]=middle, [3]=ring, [4]=baby
-    constexpr int THUMB  = 0;
-    constexpr int INDEX  = 1;
-    constexpr int MIDDLE = 2;
-    constexpr int RING   = 3;
-    constexpr int BABY   = 4;
-    constexpr int ZCOL   = 2;  // store scalar contact force as z component
+    // ------------------------------------------------------------------------
+    // Topic index mapping (CURRENT observed ActionGraph order)
+    //   Left  hand: data[0..4] = [BABY, RING, MIDL, INDX, THMB]
+    //   Right hand: data[5..9] = [BABY, RING, MIDL, INDX, THMB]
+    //
+    // Internal matrix row order (canonical):
+    //   row0=THMB, row1=INDX, row2=MIDL, row3=RING, row4=BABY
+    // ------------------------------------------------------------------------
 
-    // -------------------------
-    // Left hand (0..4)
-    // input: baby, index, middle, ring, thumb
-    // -------------------------
-    f_l_hand_c_(BABY,   ZCOL) = finite_or_zero(msg->data[0]);
-    f_l_hand_c_(INDEX,  ZCOL) = finite_or_zero(msg->data[1]);
-    f_l_hand_c_(MIDDLE, ZCOL) = finite_or_zero(msg->data[2]);
-    f_l_hand_c_(RING,   ZCOL) = finite_or_zero(msg->data[3]);
-    f_l_hand_c_(THUMB,  ZCOL) = finite_or_zero(msg->data[4]);
+    // LEFT hand Fz
+    f_l_hand_c_(4, 2) = fz(0); // BABY -> row4
+    f_l_hand_c_(3, 2) = fz(1); // RING -> row3   (<= 네 현재 문제 해결 핵심)
+    f_l_hand_c_(2, 2) = fz(2); // MIDL -> row2
+    f_l_hand_c_(1, 2) = fz(3); // INDX -> row1
+    f_l_hand_c_(0, 2) = fz(4); // THMB -> row0
 
-    // -------------------------
-    // Right hand (5..9)
-    // input: baby, index, middle, ring, thumb
-    // -------------------------
-    f_r_hand_c_(BABY,   ZCOL) = finite_or_zero(msg->data[5]);
-    f_r_hand_c_(INDEX,  ZCOL) = finite_or_zero(msg->data[6]);
-    f_r_hand_c_(MIDDLE, ZCOL) = finite_or_zero(msg->data[7]);
-    f_r_hand_c_(RING,   ZCOL) = finite_or_zero(msg->data[8]);
-    f_r_hand_c_(THUMB,  ZCOL) = finite_or_zero(msg->data[9]);
+    // RIGHT hand Fz
+    f_r_hand_c_(4, 2) = fz(5); // BABY -> row4
+    f_r_hand_c_(3, 2) = fz(6); // RING -> row3
+    f_r_hand_c_(2, 2) = fz(7); // MIDL -> row2
+    f_r_hand_c_(1, 2) = fz(8); // INDX -> row1
+    f_r_hand_c_(0, 2) = fz(9); // THMB -> row0
 
-    // (선택) 디버그 로그가 필요하면 아래 주석 해제
-    // if (node_) {
-    //     RCLCPP_INFO_THROTTLE(
-    //         node_->get_logger(), *node_->get_clock(), 1000,
-    //         "[ContactForceHandCallback] L[ba,idx,mid,ring,th]=[%.3f %.3f %.3f %.3f %.3f] "
-    //         "R[ba,idx,mid,ring,th]=[%.3f %.3f %.3f %.3f %.3f]",
-    //         f_l_hand_c_(BABY,ZCOL), f_l_hand_c_(INDEX,ZCOL), f_l_hand_c_(MIDDLE,ZCOL),
-    //         f_l_hand_c_(RING,ZCOL), f_l_hand_c_(THUMB,ZCOL),
-    //         f_r_hand_c_(BABY,ZCOL), f_r_hand_c_(INDEX,ZCOL), f_r_hand_c_(MIDDLE,ZCOL),
-    //         f_r_hand_c_(RING,ZCOL), f_r_hand_c_(THUMB,ZCOL));
-    // }
+    // Fx, Fy are intentionally zero (already zeroed by setZero)
 }
 
 // ============================================================================
-// PrintDualArmStates (기존 v10 그대로)
+// PrintDualArmStates (v15 hand-contact mapping fix)
+// - Finger print order: BABY -> RING -> MIDL -> INDX -> THMB
+// - Hand force row mapping (canonical): THMB=0, INDX=1, MIDL=2, RING=3, BABY=4
+// - Arm forces are printed as zeros (for now)
 // ============================================================================
 void DualArmForceControl::PrintDualArmStates() {
     if (!is_initialized_) return;
@@ -859,6 +840,8 @@ void DualArmForceControl::PrintDualArmStates() {
     constexpr const char* C_CUR_F   = "\033[1;31m";
     constexpr const char* C_TAR_F   = "\033[1;34m";
     constexpr const char* C_MODE    = "\033[1;92m";
+
+    const Eigen::Vector3d ZERO_ARM_F(0.0, 0.0, 0.0);
 
     auto fmtArmLine = [&](const char* tag,
                           const geometry_msgs::msg::Pose& pose,
@@ -912,7 +895,7 @@ void DualArmForceControl::PrintDualArmStates() {
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v11 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v15 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
            C_MODE, current_control_mode_.c_str(), C_RESET,
            C_CUR_POS, C_RESET,
@@ -922,33 +905,46 @@ void DualArmForceControl::PrintDualArmStates() {
            C_RESET);
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 
+    // ------------------------------------------------------------------------
+    // ARM (force always zeros for now)
+    // ------------------------------------------------------------------------
     printf("%s[L ARM]%s\n", C_TITLE, C_RESET);
-    fmtArmLine("CUR", current_pose_l_, f_l_c_, C_CUR_POS, C_CUR_F);
-    fmtArmLine("TAR", target_pose_l_,  f_l_t_, C_TAR_POS, C_TAR_F);
+    fmtArmLine("CUR", current_pose_l_, ZERO_ARM_F, C_CUR_POS, C_CUR_F);
+    fmtArmLine("TAR", target_pose_l_,  ZERO_ARM_F, C_TAR_POS, C_TAR_F);
 
     printf("%s------------------------------------------------------------------------------------------------------------%s\n", C_DIM, C_RESET);
 
     printf("%s[R ARM]%s\n", C_TITLE, C_RESET);
-    fmtArmLine("CUR", current_pose_r_, f_r_c_, C_CUR_POS, C_CUR_F);
-    fmtArmLine("TAR", target_pose_r_,  f_r_t_, C_TAR_POS, C_TAR_F);
+    fmtArmLine("CUR", current_pose_r_, ZERO_ARM_F, C_CUR_POS, C_CUR_F);
+    fmtArmLine("TAR", target_pose_r_,  ZERO_ARM_F, C_TAR_POS, C_TAR_F);
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 
+    // ------------------------------------------------------------------------
+    // LEFT HAND (display order: BABY -> RING -> MIDL -> INDX -> THMB)
+    // Canonical row map: THMB=0, INDX=1, MIDL=2, RING=3, BABY=4
+    // ------------------------------------------------------------------------
     printf("%s[L HAND] (positions are expressed in LEFT_HAND_BASE frame)%s\n\n", C_TITLE, C_RESET);
-    printFingerBlock("THMB", f_l_thumb_,   t_f_l_thumb_,   f_l_hand_c_.row(0), f_l_hand_t_.row(0));
-    printFingerBlock("INDX", f_l_index_,   t_f_l_index_,   f_l_hand_c_.row(1), f_l_hand_t_.row(1));
-    printFingerBlock("MIDL", f_l_middle_,  t_f_l_middle_,  f_l_hand_c_.row(2), f_l_hand_t_.row(2));
-    printFingerBlock("RING", f_l_ring_,    t_f_l_ring_,    f_l_hand_c_.row(3), f_l_hand_t_.row(3));
-    printFingerBlock("BABY", f_l_baby_,    t_f_l_baby_,    f_l_hand_c_.row(4), f_l_hand_t_.row(4));
+
+    printFingerBlock("BABY", f_l_baby_,   t_f_l_baby_,   f_l_hand_c_.row(4), f_l_hand_t_.row(4));
+    printFingerBlock("RING", f_l_ring_,   t_f_l_ring_,   f_l_hand_c_.row(3), f_l_hand_t_.row(3));
+    printFingerBlock("MIDL", f_l_middle_, t_f_l_middle_, f_l_hand_c_.row(2), f_l_hand_t_.row(2));
+    printFingerBlock("INDX", f_l_index_,  t_f_l_index_,  f_l_hand_c_.row(1), f_l_hand_t_.row(1));
+    printFingerBlock("THMB", f_l_thumb_,  t_f_l_thumb_,  f_l_hand_c_.row(0), f_l_hand_t_.row(0));
 
     printf("%s------------------------------------------------------------------------------------------------------------%s\n", C_DIM, C_RESET);
 
+    // ------------------------------------------------------------------------
+    // RIGHT HAND (display order: BABY -> RING -> MIDL -> INDX -> THMB)
+    // Canonical row map: THMB=0, INDX=1, MIDL=2, RING=3, BABY=4
+    // ------------------------------------------------------------------------
     printf("%s[R HAND] (positions are expressed in RIGHT_HAND_BASE frame)%s\n\n", C_TITLE, C_RESET);
-    printFingerBlock("THMB", f_r_thumb_,   t_f_r_thumb_,   f_r_hand_c_.row(0), f_r_hand_t_.row(0));
-    printFingerBlock("INDX", f_r_index_,   t_f_r_index_,   f_r_hand_c_.row(1), f_r_hand_t_.row(1));
-    printFingerBlock("MIDL", f_r_middle_,  t_f_r_middle_,  f_r_hand_c_.row(2), f_r_hand_t_.row(2));
-    printFingerBlock("RING", f_r_ring_,    t_f_r_ring_,    f_r_hand_c_.row(3), f_r_hand_t_.row(3));
-    printFingerBlock("BABY", f_r_baby_,    t_f_r_baby_,    f_r_hand_c_.row(4), f_r_hand_t_.row(4));
+
+    printFingerBlock("BABY", f_r_baby_,   t_f_r_baby_,   f_r_hand_c_.row(4), f_r_hand_t_.row(4));
+    printFingerBlock("RING", f_r_ring_,   t_f_r_ring_,   f_r_hand_c_.row(3), f_r_hand_t_.row(3));
+    printFingerBlock("MIDL", f_r_middle_, t_f_r_middle_, f_r_hand_c_.row(2), f_r_hand_t_.row(2));
+    printFingerBlock("INDX", f_r_index_,  t_f_r_index_,  f_r_hand_c_.row(1), f_r_hand_t_.row(1));
+    printFingerBlock("THMB", f_r_thumb_,  t_f_r_thumb_,  f_r_hand_c_.row(0), f_r_hand_t_.row(0));
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 }
