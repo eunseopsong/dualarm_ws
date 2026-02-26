@@ -216,6 +216,85 @@ public:
         return out;
     }
 
+    // =========================================================================
+    // computeTipRotationsBase   (NEW)
+    // 입력 허용:
+    //  - 15DoF / 20DoF (computeFingertips와 동일)
+    // 출력:
+    //  - 5개 tip rotation matrices (R_base_tip)
+    //    order = thumb, index, middle, ring, baby
+    //
+    // 의미:
+    //  - tip(frame)의 벡터를 hand base frame으로 변환할 때 사용
+    //    v_base = R_base_tip * v_tip
+    // =========================================================================
+
+    std::vector<Eigen::Matrix3d> computeTipRotationsBase(const std::vector<double>& hand) {
+        Eigen::VectorXd v((int)hand.size());
+        for (int i = 0; i < (int)hand.size(); ++i) v[i] = hand[i];
+        return computeTipRotationsBase(v);
+    }
+
+    template <size_t N>
+    std::vector<Eigen::Matrix3d> computeTipRotationsBase(const std::array<double, N>& handN) {
+        Eigen::VectorXd v((int)N);
+        for (int i = 0; i < (int)N; ++i) v[i] = handN[i];
+        return computeTipRotationsBase(v);
+    }
+
+    std::vector<Eigen::Matrix3d> computeTipRotationsBase(const Eigen::VectorXd& hand_vec) {
+        std::vector<Eigen::Matrix3d> out;
+        out.reserve(5);
+
+        if (!ok_) {
+            out.assign(5, Eigen::Matrix3d::Identity());
+            return out;
+        }
+
+        // 입력을 15DoF independent로 정규화
+        Eigen::VectorXd hand15 = NormalizeToHand15_(hand_vec);
+
+        // q 전체는 neutral로 만들고, hand joints만 심는다.
+        Eigen::VectorXd q = pinocchio::neutral(model_);
+
+        // 1) independent joints (joint1~3 for each finger, total 15)
+        for (int i = 0; i < 15; ++i) {
+            const int qidx = hand15_qidx_[i];
+            if (qidx >= 0 && qidx < q.size()) {
+                q[qidx] = hand15[i];
+            }
+        }
+
+        // 2) mimic joints: joint4 = joint3
+        for (int f = 0; f < 5; ++f) {
+            const int qidx4 = hand_qidx_joint4_[f];
+            const int src15 = f * 3 + 2; // joint3 in independent vector
+            if (qidx4 >= 0 && qidx4 < q.size()) {
+                q[qidx4] = hand15[src15];
+            }
+        }
+
+        pinocchio::forwardKinematics(model_, data_, q);
+        pinocchio::updateFramePlacements(model_, data_);
+
+        const pinocchio::SE3 oMb = GetWorldToBase_();
+
+        for (size_t i = 0; i < 5; ++i) {
+            if (tip_fids_[i] >= model_.frames.size()) {
+                out.emplace_back(Eigen::Matrix3d::Identity());
+                continue;
+            }
+
+            const pinocchio::SE3& oMt = data_.oMf[tip_fids_[i]];
+            const pinocchio::SE3 bMt  = oMb.actInv(oMt);
+
+            Eigen::Matrix3d R = bMt.rotation();
+            out.emplace_back(R);
+        }
+
+        return out;
+    }
+
 private:
     static pinocchio::FrameIndex InvalidFrame_() {
         return std::numeric_limits<pinocchio::FrameIndex>::max();
