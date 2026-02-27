@@ -38,7 +38,8 @@ find_package(pinocchio REQUIRED)
 add_executable(dualarm_forcecon_node
   src/node_dualarm_main.cpp
   src/DualArmForceControl.cpp
-  src/states_callback_dualarm.cpp
+  src/states_current_callback_dualarm.cpp
+  src/states_target_callback_dualarm.cpp
 )
 
 target_include_directories(dualarm_forcecon_node PUBLIC

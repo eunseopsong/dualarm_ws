@@ -45,6 +45,8 @@ public:
     // v15: Delta arm Cartesian target callback (inverse mode)
     // msg: 12 = [L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]
     void DeltaArmPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    void DeltaHandPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+
 
     // Forward joint target callbacks (split)
     void TargetArmJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
@@ -81,6 +83,7 @@ private:
 
     // v15: Delta Cartesian target (inverse mode)
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr delta_arm_pos_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr delta_hand_pos_sub_;
 
     // Forward joint targets (split)
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_joint_sub_;
