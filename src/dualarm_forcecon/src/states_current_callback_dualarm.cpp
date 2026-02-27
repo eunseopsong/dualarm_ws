@@ -398,7 +398,7 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
 }
 
 // ============================================================================
-// HandContactForceCallback (v17/v18 patched + refactor)
+// HandContactForceCallback (v18 patched after HandFK axis remap)
 // ----------------------------------------------------------------------------
 // 역할:
 // - /isaac_contact_states (Float32MultiArray, 10 scalars) 를 읽어
@@ -416,7 +416,8 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
 //   Isaac sensor scalar = force along fingertip sensor local +X axis
 //
 // Frame conversion:
-//   sensor(+X scalar) -> tip frame -> hand base frame -> empirical base correction
+//   sensor(+X scalar) -> tip frame -> hand base frame (already axis-remapped in HandFK)
+//   -> empirical base correction (updated for v18 HandFK axis patch)
 // ============================================================================
 void DualArmForceControl::HandContactForceCallback(
     const std_msgs::msg::Float32MultiArray::SharedPtr msg)
@@ -474,6 +475,7 @@ void DualArmForceControl::HandContactForceCallback(
     };
 
     // Current hand joints -> fingertip rotation in hand-base frame
+    // NOTE: v18에서 hand_fk_->computeTipRotationsBase()는 이미 "user/display HAND_BASE axis" 기준으로 반환됨
     const std::vector<double> hl15 = compress20to15(q_l_h_c_);
     const std::vector<double> hr15 = compress20to15(q_r_h_c_);
 
@@ -493,15 +495,25 @@ void DualArmForceControl::HandContactForceCallback(
     const Eigen::Matrix3d R_tip_sensor = Eigen::Matrix3d::Identity();
 
     // ------------------------------------------------------------------------
-    // [Calibration #2] empirical hand-base correction
-    // Maps raw base vector -> desired display convention
+    // [Calibration #2] empirical hand-base correction (UPDATED for v18 HandFK axis patch)
     //
-    // [x', y', z']^T = [ -z, x, -y ]^T
+    // 이전 v17/v18-pre-FK-axis-patch 에서는:
+    //   [x', y', z'] = [ -z, x, -y ]
+    //
+    // 하지만 v18에서 HandForwardKinematics::computeTipRotationsBase()가
+    // base frame 축을 user/display 기준으로 remap 하도록 수정되었으므로,
+    // 여기서는 과거 보정을 그대로 쓰면 축이 다시 꼬인다.
+    //
+    // 현재 권장 보정 (재보정):
+    //   [x', y', z'] = [ -x, +y, -z ]
+    // 즉, diag(-1, +1, -1)
+    //
+    // (참고) y축 부호는 접촉 방향 실험에서 필요하면 +1/-1로 한 줄 튜닝 가능
     // ------------------------------------------------------------------------
     Eigen::Matrix3d R_base_corr;
-    R_base_corr <<  0.0,  0.0, -1.0,
-                    1.0,  0.0,  0.0,
-                    0.0, -1.0,  0.0;
+    R_base_corr << -1.0,  0.0,  0.0,
+                    0.0,  1.0,  0.0,
+                    0.0,  0.0, -1.0;
 
     // ------------------------------------------------------------------------
     // Message-index -> internal row mapping
@@ -529,11 +541,11 @@ void DualArmForceControl::HandContactForceCallback(
             // sensor -> tip
             const Eigen::Vector3d f_tip = R_tip_sensor * f_sensor;
 
-            // tip -> hand base
+            // tip -> hand base (already in v18 user/display HAND_BASE axis convention)
             const Eigen::Matrix3d R_base_tip = safeR(R_base_tip_all, row);
             const Eigen::Vector3d f_base_raw = R_base_tip * f_tip;
 
-            // empirical base-frame correction (display / convention alignment)
+            // empirical base-frame correction (updated after HandFK axis patch)
             Eigen::Vector3d f_base = R_base_corr * f_base_raw;
 
             // tiny numerical cleanup
@@ -629,7 +641,7 @@ void DualArmForceControl::PrintDualArmStates() {
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v17 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v18 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
            C_MODE, current_control_mode_.c_str(), C_RESET,
            C_CUR_POS, C_RESET,
