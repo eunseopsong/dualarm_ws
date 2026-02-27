@@ -151,6 +151,11 @@ public:
     // 출력:
     //  - 5개 tip positions in base(left_joint_6/right_joint_6)
     //    order = thumb, index, middle, ring, baby
+    //
+    // [PATCH]
+    // - Pinocchio로 계산한 bMt.translation()의 축 순서가 현재 모니터 기준으로 (y,z,x)처럼 보이는 문제를
+    //   여기서 일괄 보정한다.
+    // - internal -> user(display) 보정: [x,y,z] = [z_old, x_old, y_old]
     // =========================================================================
 
     std::vector<Eigen::Vector3d> computeFingertips(const std::vector<double>& hand) {
@@ -210,7 +215,10 @@ public:
             }
             const pinocchio::SE3& oMt = data_.oMf[tip_fids_[i]];
             const pinocchio::SE3 bMt  = oMb.actInv(oMt);
-            out.emplace_back(bMt.translation());
+
+            // [PATCH] axis remap (internal -> user/display HAND_BASE frame)
+            const Eigen::Vector3d p_internal = bMt.translation();
+            out.emplace_back(RemapBaseVectorInternalToUser_(p_internal));
         }
 
         return out;
@@ -227,6 +235,10 @@ public:
     // 의미:
     //  - tip(frame)의 벡터를 hand base frame으로 변환할 때 사용
     //    v_base = R_base_tip * v_tip
+    //
+    // [PATCH]
+    // - computeFingertips와 동일한 "user/display HAND_BASE frame" 기준이 되도록
+    //   base rotation도 internal -> user 변환을 적용한다.
     // =========================================================================
 
     std::vector<Eigen::Matrix3d> computeTipRotationsBase(const std::vector<double>& hand) {
@@ -288,8 +300,9 @@ public:
             const pinocchio::SE3& oMt = data_.oMf[tip_fids_[i]];
             const pinocchio::SE3 bMt  = oMb.actInv(oMt);
 
-            Eigen::Matrix3d R = bMt.rotation();
-            out.emplace_back(R);
+            // internal base rotation -> user/display base rotation
+            const Eigen::Matrix3d R_internal = bMt.rotation();
+            out.emplace_back(RemapBaseRotationInternalToUser_(R_internal));
         }
 
         return out;
@@ -436,6 +449,38 @@ private:
     pinocchio::SE3 GetWorldToBase_() const {
         if (base_is_joint_) return data_.oMi[base_joint_id_];
         else                return data_.oMf[base_frame_id_];
+    }
+
+    // -------------------------------------------------------------------------
+    // [PATCH] Axis remap helpers
+    //
+    // Current observed FK output behaves like (y, z, x) in monitor.
+    // We convert internal base-frame vectors to user/display base-frame vectors by:
+    //   [x, y, z] = [z_old, x_old, y_old]
+    //
+    // In matrix form:
+    //   v_user = T * v_internal
+    //   T = [0 0 1
+    //        1 0 0
+    //        0 1 0]
+    // -------------------------------------------------------------------------
+    static Eigen::Matrix3d BaseAxisRemap_InternalToUser_() {
+        Eigen::Matrix3d T;
+        T << 0.0, 0.0, 1.0,
+             1.0, 0.0, 0.0,
+             0.0, 1.0, 0.0;
+        return T;
+    }
+
+    static Eigen::Vector3d RemapBaseVectorInternalToUser_(const Eigen::Vector3d& v_internal) {
+        // [x,y,z] = [z_old, x_old, y_old]
+        return Eigen::Vector3d(v_internal.z(), v_internal.x(), v_internal.y());
+    }
+
+    static Eigen::Matrix3d RemapBaseRotationInternalToUser_(const Eigen::Matrix3d& R_base_tip_internal) {
+        // v_user = T * v_internal  =>  R_user_tip = T * R_internal_tip
+        const Eigen::Matrix3d T = BaseAxisRemap_InternalToUser_();
+        return T * R_base_tip_internal;
     }
 
 private:
