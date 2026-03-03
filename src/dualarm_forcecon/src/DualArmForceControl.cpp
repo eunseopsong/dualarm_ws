@@ -116,6 +116,14 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     hand_force_cmd_f_des_base_.setZero();
     hand_force_cmd_stamp_ns_ = 0;
 
+    // forcecon hold snapshot init
+    q_l_arm_forcecon_hold_.setZero(6);
+    q_r_arm_forcecon_hold_.setZero(6);
+    q_l_hand_forcecon_hold_.setZero(20);
+    q_r_hand_forcecon_hold_.setZero(20);
+    forcecon_hold_snapshot_valid_ = false;
+    forcecon_prev_cycle_ = false;
+
     // -------------------------
     // Kinematics
     // -------------------------
@@ -185,9 +193,6 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
 DualArmForceControl::~DualArmForceControl() {}
 
-
-
-
 void DualArmForceControl::ControlLoop() {
     if (!is_initialized_ || joint_names_.empty()) return;
 
@@ -205,6 +210,77 @@ void DualArmForceControl::ControlLoop() {
     }
 
     // ----------------------------------------------------------------------
+    // v19.1 patch: detect forcecon entry/exit INSIDE ControlLoop and latch hold snapshot
+    //   -> no dependency on ControlModeCallback patch timing
+    // ----------------------------------------------------------------------
+    const bool in_forcecon = (current_control_mode_ == "forcecon");
+    const bool entering_forcecon = ( in_forcecon && !forcecon_prev_cycle_);
+    const bool leaving_forcecon  = (!in_forcecon &&  forcecon_prev_cycle_);
+
+    if (entering_forcecon) {
+        // capture current arm/hand as fixed hold reference for forcecon
+        if (q_l_arm_forcecon_hold_.size() != 6)   q_l_arm_forcecon_hold_.setZero(6);
+        if (q_r_arm_forcecon_hold_.size() != 6)   q_r_arm_forcecon_hold_.setZero(6);
+        if (q_l_hand_forcecon_hold_.size() != 20) q_l_hand_forcecon_hold_.setZero(20);
+        if (q_r_hand_forcecon_hold_.size() != 20) q_r_hand_forcecon_hold_.setZero(20);
+
+        q_l_arm_forcecon_hold_  = q_l_c_;
+        q_r_arm_forcecon_hold_  = q_r_c_;
+        q_l_hand_forcecon_hold_ = q_l_h_c_;
+        q_r_hand_forcecon_hold_ = q_r_h_c_;
+
+        forcecon_hold_snapshot_valid_ = true;
+
+        // immediately apply hold to targets (first forcecon tick부터 고정)
+        q_l_t_   = q_l_arm_forcecon_hold_;
+        q_r_t_   = q_r_arm_forcecon_hold_;
+        q_l_h_t_ = q_l_hand_forcecon_hold_;
+        q_r_h_t_ = q_r_hand_forcecon_hold_;
+
+        if (node_) {
+            RCLCPP_INFO(node_->get_logger(),
+                        "[ControlLoop] Enter forcecon -> hold snapshot latched (arm/wrist fixed at entry state)");
+        }
+    }
+
+    if (leaving_forcecon) {
+        forcecon_hold_snapshot_valid_ = false;
+
+        if (node_) {
+            RCLCPP_INFO(node_->get_logger(),
+                        "[ControlLoop] Leave forcecon -> hold snapshot invalidated");
+        }
+    }
+
+    // update edge detector state
+    forcecon_prev_cycle_ = in_forcecon;
+
+    // ----------------------------------------------------------------------
+    // v19.1 patch: while in forcecon, always start from hold snapshot (NOT q_*_c_)
+    //   - arm stays completely fixed at forcecon-entry snapshot
+    //   - hand starts from hold snapshot; selected finger only is overwritten below
+    // ----------------------------------------------------------------------
+    if (in_forcecon) {
+        if (forcecon_hold_snapshot_valid_ &&
+            q_l_arm_forcecon_hold_.size() == 6 &&
+            q_r_arm_forcecon_hold_.size() == 6 &&
+            q_l_hand_forcecon_hold_.size() == 20 &&
+            q_r_hand_forcecon_hold_.size() == 20)
+        {
+            q_l_t_   = q_l_arm_forcecon_hold_;
+            q_r_t_   = q_r_arm_forcecon_hold_;
+            q_l_h_t_ = q_l_hand_forcecon_hold_;
+            q_r_h_t_ = q_r_hand_forcecon_hold_;
+        } else {
+            // safe fallback (should rarely happen)
+            q_l_t_   = q_l_c_;
+            q_r_t_   = q_r_c_;
+            q_l_h_t_ = q_l_h_c_;
+            q_r_h_t_ = q_r_h_c_;
+        }
+    }
+
+    // ----------------------------------------------------------------------
     // v19 patch: forcecon executes HERE at timer rate (100Hz-ish), not in callback
     // ----------------------------------------------------------------------
     if (current_control_mode_ == "forcecon" && hand_force_cmd_valid_) {
@@ -216,15 +292,10 @@ void DualArmForceControl::ControlLoop() {
             auto adm_ptr = adm_arr[static_cast<size_t>(finger_id)];
 
             if (adm_ptr && adm_ptr->isOk()) {
-                // forcecon policy: only selected finger moves, others hold current
-                for (int i = 0; i < 6; ++i) {
-                    q_l_t_(i) = q_l_c_(i);
-                    q_r_t_(i) = q_r_c_(i);
-                }
-                for (int i = 0; i < 20; ++i) {
-                    q_l_h_t_(i) = q_l_h_c_(i);
-                    q_r_h_t_(i) = q_r_h_c_(i);
-                }
+                // NOTE:
+                // - arm/hand target base hold는 위(in_forcecon block)에서 이미 snapshot으로 적용됨
+                // - 여기서는 selected finger만 q_h_t_를 갱신한다.
+                // - current state q_h_c_는 측정값(실제 로봇 상태)로 유지 -> admittance/IK 입력으로 사용
 
                 const Eigen::Matrix<double,5,3>& f_hand_cur = is_left ? f_l_hand_c_ : f_r_hand_c_;
                 Eigen::VectorXd& q_h_c = is_left ? q_l_h_c_ : q_r_h_c_;
@@ -311,7 +382,7 @@ void DualArmForceControl::ControlLoop() {
                         if ((dbg_decim++ % 50) == 0) {
                             RCLCPP_INFO(
                                 node_->get_logger(),
-                                "[ForceConLoop] side=%s finger=%d dt=%.4f ik_ok=%d contact=%d | p_cmd=(%.4f %.4f %.4f) | f_des=(%.3f %.3f %.3f) f_meas=(%.3f %.3f %.3f)",
+                                "[ForceConLoop] side=%s finger=%d dt=%.4f ik_ok=%d contact=%d | p_cmd=(%.4f %.4f %.4f) | f_des=(%.3f %.3f %.3f) f_meas=(%.3f %.3f %.3f) | arm_hold=%d",
                                 is_left ? "L" : "R",
                                 finger_id,
                                 dt_s,
@@ -319,7 +390,8 @@ void DualArmForceControl::ControlLoop() {
                                 static_cast<int>(out.contact_on),
                                 out.p_cmd_base.x(), out.p_cmd_base.y(), out.p_cmd_base.z(),
                                 in.f_des_base.x(), in.f_des_base.y(), in.f_des_base.z(),
-                                in.f_meas_base.x(), in.f_meas_base.y(), in.f_meas_base.z());
+                                in.f_meas_base.x(), in.f_meas_base.y(), in.f_meas_base.z(),
+                                static_cast<int>(forcecon_hold_snapshot_valid_));
                         }
                     }
                 } else {

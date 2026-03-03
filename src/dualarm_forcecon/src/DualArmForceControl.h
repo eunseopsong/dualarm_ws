@@ -130,6 +130,20 @@ private:
     Eigen::Vector3d hand_force_cmd_f_des_base_{Eigen::Vector3d::Zero()};
     int64_t hand_force_cmd_stamp_ns_{0};
 
+    // ------------------------------------------------------------------------
+    // v19.1 patch: forcecon hold snapshot (freeze arm/wrist at forcecon entry)
+    //   - captured once at first ControlLoop tick after entering forcecon
+    //   - arm targets are held to these values while forcecon is active
+    //   - hand targets start from these values; selected finger only is updated
+    // ------------------------------------------------------------------------
+    Eigen::VectorXd q_l_arm_forcecon_hold_;   // size 6
+    Eigen::VectorXd q_r_arm_forcecon_hold_;   // size 6
+    Eigen::VectorXd q_l_hand_forcecon_hold_;  // size 20
+    Eigen::VectorXd q_r_hand_forcecon_hold_;  // size 20
+
+    bool forcecon_hold_snapshot_valid_{false};
+    bool forcecon_prev_cycle_{false}; // ControlLoop-local mode edge detection helper
+
     // Kinematics
     std::shared_ptr<ArmForwardKinematics> arm_fk_;
     std::shared_ptr<ArmInverseKinematics> arm_ik_l_, arm_ik_r_;
