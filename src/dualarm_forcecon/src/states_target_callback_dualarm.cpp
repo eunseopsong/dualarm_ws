@@ -724,7 +724,12 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
 
     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
 
-    // ---- parse ----
+    // ----------------------------------------------------------------------
+    // 0) Parse
+    // /target_hand_force : [hand_id, finger_id, px, py, pz, fx, fy, fz]
+    //   hand_id   : 0=left, 1=right
+    //   finger_id : 0..4 (thumb,index,middle,ring,baby)
+    // ----------------------------------------------------------------------
     const double hand_id_d   = msg->data[0];
     const double finger_id_d = msg->data[1];
 
@@ -757,7 +762,54 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
     const bool is_left = (hand_id == 0);
 
     // ----------------------------------------------------------------------
-    // 1) Monitor target force update (TAR_F visible immediately)
+    // 1) forcecon 세션 첫 명령이면 "hold target"을 현재 상태로 1회 고정
+    //
+    // 목적:
+    // - forcecon 중 손목/팔이 중력으로 조금 처진 현재값(q_c_)를
+    //   매 콜백마다 target(q_t_)로 따라가게 하지 않기 위함
+    // - 첫 명령 시점 기준으로 팔/다른 손가락은 hold
+    //
+    // 전제:
+    // - hand_force_cmd_valid_ 가 forcecon 세션 시작 시 false 이어야 함
+    //   (ControlModeCallback에서 리셋 권장)
+    // ----------------------------------------------------------------------
+    const bool first_force_cmd_in_session = (!hand_force_cmd_valid_);
+
+    if (first_force_cmd_in_session) {
+        // Arm target latch (중요: 이후 콜백에서는 다시 덮어쓰지 않음)
+        const int n_la = std::min<int>(q_l_t_.size(), q_l_c_.size());
+        const int n_ra = std::min<int>(q_r_t_.size(), q_r_c_.size());
+        for (int i = 0; i < n_la; ++i) q_l_t_(i) = q_l_c_(i);
+        for (int i = 0; i < n_ra; ++i) q_r_t_(i) = q_r_c_(i);
+
+        // Hand target latch (비대상 손가락/반대손 hold)
+        const int n_lh = std::min<int>(q_l_h_t_.size(), q_l_h_c_.size());
+        const int n_rh = std::min<int>(q_r_h_t_.size(), q_r_h_c_.size());
+        for (int i = 0; i < n_lh; ++i) q_l_h_t_(i) = q_l_h_c_(i);
+        for (int i = 0; i < n_rh; ++i) q_r_h_t_(i) = q_r_h_c_(i);
+
+        // 모니터 target pose/fingertip도 현재값으로 시작 (표시 안정화)
+        target_pose_l_ = current_pose_l_;
+        target_pose_r_ = current_pose_r_;
+
+        t_f_l_thumb_  = f_l_thumb_;
+        t_f_l_index_  = f_l_index_;
+        t_f_l_middle_ = f_l_middle_;
+        t_f_l_ring_   = f_l_ring_;
+        t_f_l_baby_   = f_l_baby_;
+
+        t_f_r_thumb_  = f_r_thumb_;
+        t_f_r_index_  = f_r_index_;
+        t_f_r_middle_ = f_r_middle_;
+        t_f_r_ring_   = f_r_ring_;
+        t_f_r_baby_   = f_r_baby_;
+
+        RCLCPP_INFO(logger,
+            "[TargetHandForceCb] forcecon hold target latched (first cmd in session). arm/hand non-target joints fixed.");
+    }
+
+    // ----------------------------------------------------------------------
+    // 2) Monitor target force update (TAR_F visible immediately)
     //    policy: one active force command at a time -> clear both sides then set selected row
     // ----------------------------------------------------------------------
     f_l_hand_t_.setZero();
@@ -767,8 +819,8 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
     else         f_r_hand_t_.row(finger_id) = f_des_base.transpose();
 
     // ----------------------------------------------------------------------
-    // 2) Monitor target fingertip position update (requested p_des shown immediately)
-    //    ControlLoop(forcecon) will overwrite this with controller p_cmd each tick
+    // 3) Monitor target fingertip position update (requested p_des shown immediately)
+    //    실제 p_cmd(제어기 출력)는 ControlLoop(forcecon)에서 계속 갱신 가능
     // ----------------------------------------------------------------------
     auto setFingerTargetPoint = [&](bool left, int fid, const Eigen::Vector3d& p) {
         geometry_msgs::msg::Point pt;
@@ -797,34 +849,63 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
     setFingerTargetPoint(is_left, finger_id, p_des_base);
 
     // ----------------------------------------------------------------------
-    // 3) Latch forcecon command (callback stores only; ControlLoop executes at 100Hz)
+    // 4) Latch forcecon command (callback stores only; ControlLoop executes at 100Hz)
     // ----------------------------------------------------------------------
-    hand_force_cmd_valid_ = true;
-    hand_force_cmd_hand_id_ = hand_id;
-    hand_force_cmd_finger_id_ = finger_id;
+    hand_force_cmd_valid_      = true;
+    hand_force_cmd_hand_id_    = hand_id;
+    hand_force_cmd_finger_id_  = finger_id;
     hand_force_cmd_p_des_base_ = p_des_base;
     hand_force_cmd_f_des_base_ = f_des_base;
-    hand_force_cmd_stamp_ns_ = node_ ? node_->get_clock()->now().nanoseconds() : 0;
+    hand_force_cmd_stamp_ns_   = node_ ? node_->get_clock()->now().nanoseconds() : 0;
 
-    // Optional: if switching active finger, reset the corresponding controller state once
-    // (avoid carrying over anchor/adm_offset from another finger context)
+    // ----------------------------------------------------------------------
+    // 5) Controller state reset when active finger changes (or first command)
+    //    - 다른 손가락/손으로 바뀔 때 앵커/오프셋 carry-over 방지
+    // ----------------------------------------------------------------------
     static int prev_key = -1;
     const int key = (is_left ? 0 : 5) + finger_id;
-    if (key != prev_key) {
+
+    if (first_force_cmd_in_session || key != prev_key) {
         auto& adm_arr = is_left ? hand_adm_l_ : hand_adm_r_;
         if (adm_arr[static_cast<size_t>(finger_id)]) {
-            adm_arr[static_cast<size_t>(finger_id)]->resetState();
+            // measured pose 기준으로 초기화하면 초기 점프 완화에 유리
+            // (hand FK가 ControlLoop에서 바로 갱신되므로 resetState()만 써도 되지만,
+            //  여기서는 current fingertip monitor 값을 이용해 조금 더 보수적으로 초기화)
+            Eigen::Vector3d p_init = p_des_base;
+            if (is_left) {
+                switch (finger_id) {
+                    case 0: p_init = Eigen::Vector3d(f_l_thumb_.x,  f_l_thumb_.y,  f_l_thumb_.z);  break;
+                    case 1: p_init = Eigen::Vector3d(f_l_index_.x,  f_l_index_.y,  f_l_index_.z);  break;
+                    case 2: p_init = Eigen::Vector3d(f_l_middle_.x, f_l_middle_.y, f_l_middle_.z); break;
+                    case 3: p_init = Eigen::Vector3d(f_l_ring_.x,   f_l_ring_.y,   f_l_ring_.z);   break;
+                    case 4: p_init = Eigen::Vector3d(f_l_baby_.x,   f_l_baby_.y,   f_l_baby_.z);   break;
+                }
+            } else {
+                switch (finger_id) {
+                    case 0: p_init = Eigen::Vector3d(f_r_thumb_.x,  f_r_thumb_.y,  f_r_thumb_.z);  break;
+                    case 1: p_init = Eigen::Vector3d(f_r_index_.x,  f_r_index_.y,  f_r_index_.z);  break;
+                    case 2: p_init = Eigen::Vector3d(f_r_middle_.x, f_r_middle_.y, f_r_middle_.z); break;
+                    case 3: p_init = Eigen::Vector3d(f_r_ring_.x,   f_r_ring_.y,   f_r_ring_.z);   break;
+                    case 4: p_init = Eigen::Vector3d(f_r_baby_.x,   f_r_baby_.y,   f_r_baby_.z);   break;
+                }
+            }
+
+            adm_arr[static_cast<size_t>(finger_id)]->resetState(p_init);
         }
         prev_key = key;
     }
 
-    // decimated debug
+    // ----------------------------------------------------------------------
+    // 6) Decimated debug
+    // ----------------------------------------------------------------------
     static int dbg_decim = 0;
     if ((dbg_decim++ % 20) == 0) {
         RCLCPP_INFO(logger,
-            "[TargetHandForceCb][LATCH] side=%s finger=%d | p_des=(%.4f %.4f %.4f) | f_des=(%.3f %.3f %.3f) | execution=ControlLoop",
+            "[TargetHandForceCb][LATCH] side=%s finger=%d | first=%d | "
+            "p_des=(%.4f %.4f %.4f) | f_des=(%.3f %.3f %.3f) | execution=ControlLoop | arm_target=HOLD_LATCHED",
             is_left ? "L" : "R",
             finger_id,
+            static_cast<int>(first_force_cmd_in_session),
             p_des_base.x(), p_des_base.y(), p_des_base.z(),
             f_des_base.x(), f_des_base.y(), f_des_base.z());
     }
