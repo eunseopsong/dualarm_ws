@@ -185,6 +185,9 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
 DualArmForceControl::~DualArmForceControl() {}
 
+
+
+
 void DualArmForceControl::ControlLoop() {
     if (!is_initialized_ || joint_names_.empty()) return;
 
