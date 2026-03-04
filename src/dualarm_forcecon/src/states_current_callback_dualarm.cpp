@@ -456,7 +456,7 @@ void DualArmForceControl::HandContactForceCallback(
         f_l_hand_c_.setZero();
         f_r_hand_c_.setZero();
 
-        // debug buffers (if you added them in header)
+        // debug buffers
         raw_l_hand_contact_.setZero();
         raw_r_hand_contact_.setZero();
         f_l_hand_sensor_c_.setZero();
@@ -526,10 +526,8 @@ void DualArmForceControl::HandContactForceCallback(
     // ------------------------------------------------------------------------
     // [STEP 2-A] sensor frame -> tip frame (fixed mounting calibration)
     //
-    // IMPORTANT:
-    // - 현재 scalar-only(+X only) 모델에서는 R_tip_sensor를 바꿔도
-    //   "fx는 유지하고 fz만 반전"을 일반적으로 보장하기 어려움.
-    // - 그래서 여기선 기본 Identity 유지.
+    // 현재 scalar-only 모델에서는 우선 Identity 유지
+    // (필요 시 추후 여기에서 센서 장착축 캘리브레이션)
     // ------------------------------------------------------------------------
     const Eigen::Matrix3d R_tip_sensor = Eigen::Matrix3d::Identity();
 
@@ -540,21 +538,26 @@ void DualArmForceControl::HandContactForceCallback(
     // ------------------------------------------------------------------------
 
     // ------------------------------------------------------------------------
-    // [STEP 2-C] wrist-frame sign calibration (display/empirical)
+    // [STEP 2-C] wrist/base output-axis calibration (FIXED ROTATION)
     //
-    // 요청사항:
-    // - 현재 -fx 로 보이는 값은 유지
-    // - 현재 -fz 로 보이는 값은 +fz 로 보이게
+    // 관측 증상:
+    // - 사진 자세에서 기존 WRS의 큰 -Fx 성분이 실제로는 +Fz로 해석되어야 함
     //
-    // 따라서 wrist frame에서 z 부호만 반전:
-    //   [fx, fy, fz]_cal = [fx, fy, -fz]_raw
+    // 따라서 wrist 출력축을 +Y축 기준 +90deg 회전시키는 보정 적용:
+    //   [x', y', z'] = [ z, y, -x ]
     //
-    // NOTE:
-    // - 이것은 "sensor->tip 회전"이 아니라 wrist/base 출력 규약 보정이다.
-    // - scalar-only 모델에서 원하는 부호 조건을 만족시키기 위한 실용 패치.
+    // 행렬 (Ry(+90deg)):
+    //   [ 0  0  1 ]
+    //   [ 0  1  0 ]
+    //   [-1  0  0 ]
+    //
+    // 효과:
+    // - 기존 큰 -fx  -> 큰 +fz 로 이동
     // ------------------------------------------------------------------------
-    Eigen::Matrix3d R_wrist_sign_calib = Eigen::Matrix3d::Identity();
-    R_wrist_sign_calib(2,2) = -1.0;  // flip z only
+    Eigen::Matrix3d R_wrist_output_calib;
+    R_wrist_output_calib <<  0.0, 0.0, 1.0,
+                             0.0, 1.0, 0.0,
+                            -1.0, 0.0, 0.0;
 
     // ------------------------------------------------------------------------
     // Message-index -> internal row mapping
@@ -603,8 +606,8 @@ void DualArmForceControl::HandContactForceCallback(
             const Eigen::Matrix3d R_base_tip = safeR(R_base_tip_all, row);
             const Eigen::Vector3d f_wrist_raw = R_base_tip * f_tip;
 
-            // [5] wrist sign calibration (keep fx,fy / flip fz)
-            Eigen::Vector3d f_wrist = R_wrist_sign_calib * f_wrist_raw;
+            // [5] wrist/base output-axis calibration (fixed rotation)
+            Eigen::Vector3d f_wrist = R_wrist_output_calib * f_wrist_raw;
 
             // tiny numerical cleanup
             for (int i = 0; i < 3; ++i) {
@@ -617,7 +620,7 @@ void DualArmForceControl::HandContactForceCallback(
 
             // optional debug print (contact present)
             // if (do_dbg && std::fabs(s) > 1e-6) {
-            //     std::printf("[HandContactForceCb][%s] rotated wrist mapping (z-sign calibrated)\n", hand_tag);
+            //     std::printf("[HandContactForceCb][%s] rotated wrist mapping (Ry +90deg calib)\n", hand_tag);
             //     std::printf("  [%s] RAW=%7.3f | SEN=(%7.3f %7.3f %7.3f) | WRS=(%7.3f %7.3f %7.3f)\n",
             //                 finger_name[row],
             //                 s,

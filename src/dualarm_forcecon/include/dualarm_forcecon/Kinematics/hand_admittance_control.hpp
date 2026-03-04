@@ -139,16 +139,16 @@ public:
         bool verbose;
 
         Config()
-        : mass{{0.03, 0.03, 0.03}},
-          damping{{8.0, 8.0, 8.0}},
-          stiffness{{120.0, 120.0, 120.0}},
-          force_ctrl_enable{{true, true, true}},
+        : mass{{0.05, 0.05, 0.5}},
+          damping{{8.0, 8.0, 12.0}},
+          stiffness{{0.0, 0.0, 0.0}},
+          force_ctrl_enable{{false, false, true}},
           use_hybrid_force_position_mode(true),
-          hybrid_force_axis(0), // x-axis force control by default
+          hybrid_force_axis(2), // x-axis force control by default
           hold_tangent_anchor_on_contact(true),
           tangent_anchor_use_measured_pose(true),
           release_tangent_anchor_on_contact_off(false),
-          force_error_axis_sign{{1.0, 1.0, 1.0}},
+          force_error_axis_sign{{-1.0, 1.0, 1.0}},
           force_deadband_N{{0.0, 0.0, 0.0}},
           use_force_lpf(true),
           force_lpf_tau_s(0.04),
@@ -162,8 +162,8 @@ public:
           R_base_corr_rowmajor{{1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0}},
           fallback_to_f_meas_base_if_sensor_transform_fails(true),
 
-          max_offset_m{{0.005, 0.001, 0.001}},
-          max_step_m{{0.0003, 0.00005, 0.00005}},
+          max_offset_m{{0.05, 0.01, 0.03}},
+          max_step_m{{0.03, 0.03, 0.03}},
           max_adm_velocity_mps{{0.05, 0.02, 0.02}},
           dt_min_s(1e-4),
           dt_max_s(5e-2),
