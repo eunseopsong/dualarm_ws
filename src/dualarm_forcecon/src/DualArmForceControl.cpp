@@ -75,7 +75,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "/forward_hand_joint_targets", qos,
         std::bind(&DualArmForceControl::TargetHandJointsCallback, this, std::placeholders::_1));
 
-    // Force-control target callback (forcecon mode) - now latches command only
+    // Force-control target callback (forcecon mode) - callback stores only (latch)
     target_hand_force_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/target_hand_force", qos,
         std::bind(&DualArmForceControl::TargetHandForceCallback, this, std::placeholders::_1));
@@ -116,7 +116,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     hand_force_cmd_f_des_base_.setZero();
     hand_force_cmd_stamp_ns_ = 0;
 
-    // forcecon hold snapshot init
+    // forcecon hold snapshot init (arm/wrist drift 방지 핵심)
     q_l_arm_forcecon_hold_.setZero(6);
     q_r_arm_forcecon_hold_.setZero(6);
     q_l_hand_forcecon_hold_.setZero(20);
@@ -150,32 +150,59 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     hand_ik_l_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(urdf_path_, "left_hand_base_link", tips);
     hand_ik_r_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(urdf_path_, "right_hand_base_link", tips);
 
-    // Per-finger hand admittance controllers (x-axis force + tangent hold default)
+    // ----------------------------------------------------------------------
+    // Per-finger hand admittance controllers (minimal header-compatible config)
+    // Structure: Xd, Fd, Fext -> Admittance -> Xcmd -> IK
+    // ----------------------------------------------------------------------
     for (int f = 0; f < 5; ++f) {
         dualarm_forcecon::HandAdmittanceControl::Config cfg;
+
         cfg.verbose = false;
         cfg.ik_verbose = false;
+        cfg.debug_enable_rclcpp = false;
+        cfg.debug_decimation = 20;
 
-        // 사용자 요구사항 기본정책: x축 힘제어 + 나머지 축 접촉 후 고정
+        // ---- force control policy (현재 손목 기준 z축 힘제어) ----
         cfg.use_hybrid_force_position_mode = true;
-        cfg.hybrid_force_axis = 0; // x-axis in HAND_BASE frame
-        cfg.force_ctrl_enable = {{true, false, false}}; // hybrid 모드가 강제하긴 하지만 명시
-        cfg.hold_tangent_anchor_on_contact = true;
-        cfg.tangent_anchor_use_measured_pose = true;
-        cfg.release_tangent_anchor_on_contact_off = false;
-        cfg.contact_gate_use_enabled_axes_only = true;
+        cfg.hybrid_force_axis = 2;                      // HAND_BASE z-axis force control
+        cfg.force_ctrl_enable = {{false, false, true}}; // hybrid=true일 때 참고용/명시용
 
-        // 접촉 후 미끄러짐 완화 (조금 보수적으로)
-        cfg.use_slip_detection = true;
-        cfg.use_slip_guard = true;
-        cfg.tangent_slip_threshold_m = 0.0010; // 1mm
-        cfg.slip_guard_force_scale = 0.20;
-        cfg.slip_guard_reanchor_tangent = true;
-        cfg.slip_guard_velocity_damping = 0.15;
+        // ---- force error convention/sign ----
+        // f_err = Fd - Fext
+        cfg.force_error_des_minus_meas = true;
+        cfg.force_error_axis_sign = {{1.0, 1.0, 1.0}}; // 필요 시 z 부호만 -1로 현장 튜닝
 
-        // 현재 v18 측정값은 HandContactForceCallback에서 이미 HAND_BASE 기준으로 변환됨
-        // (raw 3축 센서 토픽 연결 전까지는 base 입력 경로 사용)
-        cfg.enable_sensor_raw_force_transform = false;
+        // ---- measured force LPF ----
+        cfg.use_force_lpf = true;
+        cfg.force_lpf_tau_s = 0.04;
+
+        // ---- dt guard / contact diagnostic threshold ----
+        cfg.dt_min_s = 1e-4;
+        cfg.dt_max_s = 5e-2;
+        cfg.contact_detect_threshold_N = 0.5; // 진단용 (게이트 아님)
+
+        // ---- basic admittance MDK (초기 보수값) ----
+        // no clamp/no gate 구조이므로 너무 aggressive하면 튈 수 있음
+        cfg.mass      = {{0.05, 0.05, 0.03}};
+        cfg.damping   = {{8.0,  8.0, 10.0}};
+        cfg.stiffness = {{0.0,  0.0,  0.0}};
+
+        // ---- IK ----
+        cfg.ik_max_iters   = 80;
+        cfg.ik_tol_pos_m   = 5e-4;
+        cfg.ik_lambda      = 1e-2;
+        cfg.ik_lambda_min  = 1e-5;
+        cfg.ik_lambda_max  = 1.0;
+        cfg.ik_alpha       = 0.8;
+        cfg.ik_alpha_min   = 0.05;
+        cfg.ik_max_step    = 0.15;
+        cfg.ik_mu_posture  = 1e-4;
+
+        // ---- IK seed/fallback ----
+        cfg.prefer_last_success_q_seed = true;
+        cfg.keep_last_success_on_ik_fail = true;
+        cfg.damp_velocity_on_ik_fail = true;
+        cfg.ik_fail_velocity_damping = 0.2;
 
         hand_adm_l_[f] = std::make_shared<dualarm_forcecon::HandAdmittanceControl>(hand_fk_l_, hand_ik_l_, f, cfg);
         hand_adm_r_[f] = std::make_shared<dualarm_forcecon::HandAdmittanceControl>(hand_fk_r_, hand_ik_r_, f, cfg);
@@ -210,8 +237,7 @@ void DualArmForceControl::ControlLoop() {
     }
 
     // ----------------------------------------------------------------------
-    // v19.1 patch: detect forcecon entry/exit INSIDE ControlLoop and latch hold snapshot
-    //   -> no dependency on ControlModeCallback patch timing
+    // Forcecon entry/exit detect (inside loop) + hold snapshot latch
     // ----------------------------------------------------------------------
     const bool in_forcecon = (current_control_mode_ == "forcecon");
     const bool entering_forcecon = ( in_forcecon && !forcecon_prev_cycle_);
@@ -231,7 +257,7 @@ void DualArmForceControl::ControlLoop() {
 
         forcecon_hold_snapshot_valid_ = true;
 
-        // immediately apply hold to targets (first forcecon tick부터 고정)
+        // first forcecon tick부터 바로 적용
         q_l_t_   = q_l_arm_forcecon_hold_;
         q_r_t_   = q_r_arm_forcecon_hold_;
         q_l_h_t_ = q_l_hand_forcecon_hold_;
@@ -252,13 +278,12 @@ void DualArmForceControl::ControlLoop() {
         }
     }
 
-    // update edge detector state
     forcecon_prev_cycle_ = in_forcecon;
 
     // ----------------------------------------------------------------------
-    // v19.1 patch: while in forcecon, always start from hold snapshot (NOT q_*_c_)
-    //   - arm stays completely fixed at forcecon-entry snapshot
-    //   - hand starts from hold snapshot; selected finger only is overwritten below
+    // While in forcecon, ALWAYS start from hold snapshot (NOT current q_c)
+    //  - arm: completely fixed
+    //  - hand: fixed except selected finger updated below
     // ----------------------------------------------------------------------
     if (in_forcecon) {
         if (forcecon_hold_snapshot_valid_ &&
@@ -272,7 +297,7 @@ void DualArmForceControl::ControlLoop() {
             q_l_h_t_ = q_l_hand_forcecon_hold_;
             q_r_h_t_ = q_r_hand_forcecon_hold_;
         } else {
-            // safe fallback (should rarely happen)
+            // safe fallback
             q_l_t_   = q_l_c_;
             q_r_t_   = q_r_c_;
             q_l_h_t_ = q_l_h_c_;
@@ -281,7 +306,7 @@ void DualArmForceControl::ControlLoop() {
     }
 
     // ----------------------------------------------------------------------
-    // v19 patch: forcecon executes HERE at timer rate (100Hz-ish), not in callback
+    // Forcecon execution at timer rate (100Hz-ish)
     // ----------------------------------------------------------------------
     if (current_control_mode_ == "forcecon" && hand_force_cmd_valid_) {
         const bool is_left = (hand_force_cmd_hand_id_ == 0);
@@ -293,15 +318,15 @@ void DualArmForceControl::ControlLoop() {
 
             if (adm_ptr && adm_ptr->isOk()) {
                 // NOTE:
-                // - arm/hand target base hold는 위(in_forcecon block)에서 이미 snapshot으로 적용됨
-                // - 여기서는 selected finger만 q_h_t_를 갱신한다.
-                // - current state q_h_c_는 측정값(실제 로봇 상태)로 유지 -> admittance/IK 입력으로 사용
+                // - q_*_t_ base hold is already applied above from forcecon snapshot
+                // - here we only overwrite the selected finger target
+                // - q_h_c_ remains measured current state (used by admittance / IK input)
 
                 const Eigen::Matrix<double,5,3>& f_hand_cur = is_left ? f_l_hand_c_ : f_r_hand_c_;
                 Eigen::VectorXd& q_h_c = is_left ? q_l_h_c_ : q_r_h_c_;
                 Eigen::VectorXd& q_h_t = is_left ? q_l_h_t_ : q_r_h_t_;
 
-                // q current (20DoF canonical)
+                // current hand joints (20DoF canonical)
                 std::vector<double> q_cur20(20, 0.0);
                 for (int i = 0; i < 20 && i < q_h_c.size(); ++i) q_cur20[i] = q_h_c(i);
 
@@ -328,12 +353,8 @@ void DualArmForceControl::ControlLoop() {
                 in.p_des_base = hand_force_cmd_p_des_base_;
                 in.f_des_base = hand_force_cmd_f_des_base_;
 
-                // 현재 v18 측정 경로: HandContactForceCallback에서 이미 HAND_BASE로 변환된 값 사용
+                // HandContactForceCallback에서 이미 HAND_BASE 기준으로 변환된 값 사용
                 in.f_meas_base = f_hand_cur.row(finger_id).transpose();
-
-                // raw sensor 3축 경로는 추후 연결 가능 (hand_admittance_control.hpp에서 지원)
-                in.use_f_meas_sensor_raw = false;
-                in.f_meas_sensor_raw.setZero();
 
                 in.q_hand_current20 = q_cur20;
                 in.dt_s = dt_s;
@@ -341,7 +362,7 @@ void DualArmForceControl::ControlLoop() {
                 auto out = adm_ptr->step(in);
 
                 if (out.controller_ok) {
-                    // selected finger target joints only (q4 mimic)
+                    // selected finger joints only (q4 mimic = q3)
                     const int b = finger_id * 4;
                     if (b + 3 < q_h_t.size()) {
                         q_h_t(b + 0) = out.q_cmd_123[0];
@@ -350,7 +371,7 @@ void DualArmForceControl::ControlLoop() {
                         q_h_t(b + 3) = out.q_cmd_4_mimic;
                     }
 
-                    // monitor target fingertip position: controller's actual p_cmd (not just requested p_des)
+                    // monitor target fingertip position: controller actual p_cmd
                     geometry_msgs::msg::Point pt;
                     pt.x = out.p_cmd_base.x();
                     pt.y = out.p_cmd_base.y();
@@ -376,13 +397,15 @@ void DualArmForceControl::ControlLoop() {
                         }
                     }
 
-                    // optional debug (decimated)
+                    // debug (decimated)
                     if (node_) {
                         static int dbg_decim = 0;
                         if ((dbg_decim++ % 50) == 0) {
                             RCLCPP_INFO(
                                 node_->get_logger(),
-                                "[ForceConLoop] side=%s finger=%d dt=%.4f ik_ok=%d contact=%d | p_cmd=(%.4f %.4f %.4f) | f_des=(%.3f %.3f %.3f) f_meas=(%.3f %.3f %.3f) | arm_hold=%d",
+                                "[ForceConLoop] side=%s finger=%d dt=%.4f ik_ok=%d contact=%d | "
+                                "p_cmd=(%.4f %.4f %.4f) | "
+                                "f_des=(%.3f %.3f %.3f) f_meas=(%.3f %.3f %.3f) | arm_hold=%d",
                                 is_left ? "L" : "R",
                                 finger_id,
                                 dt_s,
