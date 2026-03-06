@@ -45,12 +45,6 @@ void applyYamlToHandCfg(const YAML::Node& n, dualarm_forcecon::HandAdmittanceCon
     readArrayDouble<3>(n, "force_error_axis_sign", cfg.force_error_axis_sign);
     readArrayDouble<3>(n, "force_deadband_N", cfg.force_deadband_N);
 
-    readArrayDouble<3>(n, "force_target_ramp_rate_Nps", cfg.force_target_ramp_rate_Nps);
-    readArrayDouble<3>(n, "force_target_release_rate_Nps", cfg.force_target_release_rate_Nps);
-
-    readArrayDouble<9>(n, "R_tip_sensor_rowmajor", cfg.R_tip_sensor_rowmajor);
-    readArrayDouble<9>(n, "R_base_corr_rowmajor", cfg.R_base_corr_rowmajor);
-
     readArrayDouble<3>(n, "max_offset_m", cfg.max_offset_m);
     readArrayDouble<3>(n, "max_step_m", cfg.max_step_m);
     readArrayDouble<3>(n, "max_adm_velocity_mps", cfg.max_adm_velocity_mps);
@@ -61,38 +55,24 @@ void applyYamlToHandCfg(const YAML::Node& n, dualarm_forcecon::HandAdmittanceCon
 
     readScalar<bool>(n, "hold_tangent_anchor_on_contact", cfg.hold_tangent_anchor_on_contact);
     readScalar<bool>(n, "tangent_anchor_use_measured_pose", cfg.tangent_anchor_use_measured_pose);
-    readScalar<bool>(n, "release_tangent_anchor_on_contact_off", cfg.release_tangent_anchor_on_contact_off);
 
     readScalar<bool>(n, "use_force_lpf", cfg.use_force_lpf);
     readScalar<double>(n, "force_lpf_tau_s", cfg.force_lpf_tau_s);
-
-    readScalar<bool>(n, "use_force_target_ramp", cfg.use_force_target_ramp);
-    readScalar<bool>(n, "force_ramp_only_when_contact", cfg.force_ramp_only_when_contact);
-
-    readScalar<bool>(n, "enable_sensor_raw_force_transform", cfg.enable_sensor_raw_force_transform);
-    readScalar<bool>(n, "fallback_to_f_meas_base_if_sensor_transform_fails", cfg.fallback_to_f_meas_base_if_sensor_transform_fails);
 
     readScalar<double>(n, "dt_min_s", cfg.dt_min_s);
     readScalar<double>(n, "dt_max_s", cfg.dt_max_s);
 
     readScalar<bool>(n, "force_error_des_minus_meas", cfg.force_error_des_minus_meas);
 
-    readScalar<bool>(n, "use_contact_gate", cfg.use_contact_gate);
     readScalar<double>(n, "contact_force_threshold_N", cfg.contact_force_threshold_N);
-
     readScalar<bool>(n, "use_contact_hysteresis", cfg.use_contact_hysteresis);
     readScalar<double>(n, "contact_on_threshold_N", cfg.contact_on_threshold_N);
     readScalar<double>(n, "contact_off_threshold_N", cfg.contact_off_threshold_N);
-
     readScalar<bool>(n, "contact_gate_use_enabled_axes_only", cfg.contact_gate_use_enabled_axes_only);
-
-    readScalar<bool>(n, "decay_when_no_contact", cfg.decay_when_no_contact);
-    readScalar<double>(n, "no_contact_decay_ratio", cfg.no_contact_decay_ratio);
 
     readScalar<bool>(n, "antiwindup_on_offset_clamp", cfg.antiwindup_on_offset_clamp);
     readScalar<bool>(n, "zero_velocity_on_offset_clamp", cfg.zero_velocity_on_offset_clamp);
     readScalar<double>(n, "offset_clamp_velocity_damping", cfg.offset_clamp_velocity_damping);
-
     readScalar<bool>(n, "sync_adm_state_to_final_cmd", cfg.sync_adm_state_to_final_cmd);
 
     readScalar<bool>(n, "use_slip_detection", cfg.use_slip_detection);
@@ -103,7 +83,7 @@ void applyYamlToHandCfg(const YAML::Node& n, dualarm_forcecon::HandAdmittanceCon
     readScalar<bool>(n, "slip_guard_reanchor_tangent", cfg.slip_guard_reanchor_tangent);
     readScalar<double>(n, "slip_guard_velocity_damping", cfg.slip_guard_velocity_damping);
 
-    // IK options (flat keys)
+    // IK options
     readScalar<int>(n, "ik_max_iters", cfg.ik_max_iters);
     readScalar<double>(n, "ik_tol_pos_m", cfg.ik_tol_pos_m);
     readScalar<double>(n, "ik_lambda", cfg.ik_lambda);
@@ -113,19 +93,12 @@ void applyYamlToHandCfg(const YAML::Node& n, dualarm_forcecon::HandAdmittanceCon
     readScalar<double>(n, "ik_alpha_min", cfg.ik_alpha_min);
     readScalar<double>(n, "ik_max_step", cfg.ik_max_step);
     readScalar<double>(n, "ik_mu_posture", cfg.ik_mu_posture);
-    readScalar<bool>(n, "ik_verbose", cfg.ik_verbose);
 
     // fallback
     readScalar<bool>(n, "prefer_last_success_q_seed", cfg.prefer_last_success_q_seed);
     readScalar<bool>(n, "keep_last_success_on_ik_fail", cfg.keep_last_success_on_ik_fail);
     readScalar<bool>(n, "damp_velocity_on_ik_fail", cfg.damp_velocity_on_ik_fail);
     readScalar<double>(n, "ik_fail_velocity_damping", cfg.ik_fail_velocity_damping);
-
-    // debug
-    readScalar<bool>(n, "debug_enable_rclcpp", cfg.debug_enable_rclcpp);
-    readScalar<int>(n, "debug_decimation", cfg.debug_decimation);
-    readScalar<bool>(n, "debug_print_all_steps", cfg.debug_print_all_steps);
-    readScalar<bool>(n, "verbose", cfg.verbose);
 }
 
 } // namespace
@@ -214,7 +187,6 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     joint_command_pub_ = node_->create_publisher<sensor_msgs::msg::JointState>(
         "/isaac_joint_command", 10);
 
-    // NEW: force monitor publishers
     hand_force_current_monitor_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
         "/hand_force_current_monitor", 10);
 
@@ -292,7 +264,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         RCLCPP_INFO(node_->get_logger(), "[forcecon_cfg] loaded: %s", cfg_yaml_path.c_str());
     } catch (const std::exception& e) {
         RCLCPP_WARN(node_->get_logger(),
-                    "[forcecon_cfg] failed to load %s (%s). Use default cfg in header.",
+                    "[forcecon_cfg] failed to load %s (%s). Use empty cfg.",
                     cfg_yaml_path.c_str(), e.what());
         root = YAML::Node();
     }
@@ -304,9 +276,11 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     const std::array<std::string,5> finger_key = {{"thumb","index","middle","ring","baby"}};
 
     for (int f = 0; f < 5; ++f) {
-        dualarm_forcecon::HandAdmittanceControl::Config cfg;
+        dualarm_forcecon::HandAdmittanceControl::Config cfg{};
 
-        if (def_node) applyYamlToHandCfg(def_node, cfg);
+        if (def_node) {
+            applyYamlToHandCfg(def_node, cfg);
+        }
 
         if (per_node && per_node[finger_key[static_cast<std::size_t>(f)]]) {
             applyYamlToHandCfg(per_node[finger_key[static_cast<std::size_t>(f)]], cfg);
@@ -415,8 +389,6 @@ void DualArmForceControl::ControlLoop() {
                 in.p_des_base = hand_force_cmd_p_des_base_;
                 in.f_des_base = hand_force_cmd_f_des_base_;
                 in.f_meas_base = f_hand_cur.row(finger_id).transpose();
-                in.use_f_meas_sensor_raw = false;
-                in.f_meas_sensor_raw.setZero();
                 in.q_hand_current20 = q_cur20;
                 in.dt_s = dt_s;
 
@@ -465,8 +437,6 @@ void DualArmForceControl::ControlLoop() {
         }
     }
 
-    // NEW: publish current/target hand-force monitor topics
     PublishHandForceMonitor();
-
     joint_command_pub_->publish(cmd);
 }

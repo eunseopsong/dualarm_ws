@@ -26,13 +26,10 @@ hand_admittance:
     force_lpf_tau_s: 0.04
 
     # --- target force ramp ---
-    use_force_target_ramp: false
-    force_ramp_only_when_contact: false
     force_target_ramp_rate_Nps: [20.0, 20.0, 20.0]
     force_target_release_rate_Nps: [40.0, 40.0, 40.0]
 
     # --- contact gate / hysteresis ---
-    use_contact_gate: false
     contact_force_threshold_N: 0.5
     use_contact_hysteresis: true
     contact_on_threshold_N: 0.7
@@ -42,7 +39,6 @@ hand_admittance:
     # --- tangent anchor ---
     hold_tangent_anchor_on_contact: true
     tangent_anchor_use_measured_pose: true
-    release_tangent_anchor_on_contact_off: false
 
     # --- slip guard ---
     use_slip_detection: true
@@ -81,7 +77,6 @@ hand_admittance:
     ik_alpha_min: 0.05
     ik_max_step: 0.15
     ik_mu_posture: 0.0001
-    ik_verbose: false
 
     # --- IK fallback ---
     prefer_last_success_q_seed: true
@@ -89,17 +84,13 @@ hand_admittance:
     damp_velocity_on_ik_fail: true
     ik_fail_velocity_damping: 0.2
 
-    # --- raw sensor transform (현재는 OFF) ---
-    enable_sensor_raw_force_transform: false
+    # --- raw sensor transform ---
     R_tip_sensor_rowmajor: [1,0,0, 0,1,0, 0,0,1]
     R_base_corr_rowmajor:  [1,0,0, 0,1,0, 0,0,1]
     fallback_to_f_meas_base_if_sensor_transform_fails: true
 
     # --- debug ---
-    debug_enable_rclcpp: false
     debug_decimation: 50
-    debug_print_all_steps: false
-    verbose: false
 
   per_finger:
     thumb: {}

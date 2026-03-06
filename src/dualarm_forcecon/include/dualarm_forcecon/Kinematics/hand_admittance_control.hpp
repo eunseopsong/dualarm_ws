@@ -42,26 +42,16 @@ public:
         // Hybrid force/position mode
         bool use_hybrid_force_position_mode;
         int  hybrid_force_axis;   // 0=x,1=y,2=z (HAND BASE)
+
+        // Tangent anchor
         bool hold_tangent_anchor_on_contact;
         bool tangent_anchor_use_measured_pose;
-        bool release_tangent_anchor_on_contact_off;
 
         // Force signal preprocessing
         std::array<double,3> force_error_axis_sign;
         std::array<double,3> force_deadband_N;
         bool use_force_lpf;
         double force_lpf_tau_s;
-
-        bool use_force_target_ramp;
-        bool force_ramp_only_when_contact;
-        std::array<double,3> force_target_ramp_rate_Nps;
-        std::array<double,3> force_target_release_rate_Nps;
-
-        // Optional raw-sensor-force -> HAND_BASE transform (future)
-        bool enable_sensor_raw_force_transform;
-        std::array<double,9> R_tip_sensor_rowmajor; // row-major 3x3
-        std::array<double,9> R_base_corr_rowmajor;  // row-major 3x3
-        bool fallback_to_f_meas_base_if_sensor_transform_fails;
 
         // Safety / limits
         std::array<double,3> max_offset_m;
@@ -74,24 +64,12 @@ public:
         // f_err definition
         bool force_error_des_minus_meas;
 
-        // Contact gate
-        bool use_contact_gate;
+        // Contact detection / hysteresis
         double contact_force_threshold_N;
-
         bool use_contact_hysteresis;
         double contact_on_threshold_N;
         double contact_off_threshold_N;
-
         bool contact_gate_use_enabled_axes_only;
-
-        bool decay_when_no_contact;
-        double no_contact_decay_ratio;
-
-        bool antiwindup_on_offset_clamp;
-        bool zero_velocity_on_offset_clamp;
-        double offset_clamp_velocity_damping;
-
-        bool sync_adm_state_to_final_cmd;
 
         // Slip detection / guard
         bool use_slip_detection;
@@ -100,6 +78,12 @@ public:
         double slip_guard_force_scale;
         bool slip_guard_reanchor_tangent;
         double slip_guard_velocity_damping;
+
+        // Anti-windup / state sync
+        bool antiwindup_on_offset_clamp;
+        bool zero_velocity_on_offset_clamp;
+        double offset_clamp_velocity_damping;
+        bool sync_adm_state_to_final_cmd;
 
         // IK solver options
         int    ik_max_iters;
@@ -111,98 +95,21 @@ public:
         double ik_alpha_min;
         double ik_max_step;
         double ik_mu_posture;
-        bool   ik_verbose;
 
+        // IK fallback
         bool prefer_last_success_q_seed;
-
         bool keep_last_success_on_ik_fail;
         bool damp_velocity_on_ik_fail;
         double ik_fail_velocity_damping;
 
-        // Debug
-        bool debug_enable_rclcpp;
-        int  debug_decimation;
-        bool debug_print_all_steps;
-        bool verbose;
-
-        Config()
-        : mass{{0.05, 0.05, 0.03}},
-          damping{{8.0, 8.0, 10.0}},
-          stiffness{{0.0, 0.0, 0.0}},
-          force_ctrl_enable{{false, false, true}},
-          use_hybrid_force_position_mode(true),
-          hybrid_force_axis(2),
-          hold_tangent_anchor_on_contact(true),
-          tangent_anchor_use_measured_pose(true),
-          release_tangent_anchor_on_contact_off(false),
-          force_error_axis_sign{{1.0, 1.0, 1.0}},
-          force_deadband_N{{0.0, 0.0, 0.0}},
-          use_force_lpf(true),
-          force_lpf_tau_s(0.04),
-          use_force_target_ramp(true),
-          force_ramp_only_when_contact(true),
-          force_target_ramp_rate_Nps{{20.0, 20.0, 20.0}},
-          force_target_release_rate_Nps{{40.0, 40.0, 40.0}},
-          enable_sensor_raw_force_transform(false),
-          R_tip_sensor_rowmajor{{1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0}},
-          R_base_corr_rowmajor{{1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0}},
-          fallback_to_f_meas_base_if_sensor_transform_fails(true),
-          max_offset_m{{0.005, 0.005, 0.010}},
-          max_step_m{{0.0003, 0.0003, 0.0003}},
-          max_adm_velocity_mps{{0.01, 0.01, 0.01}},
-          dt_min_s(1e-4),
-          dt_max_s(5e-2),
-          force_error_des_minus_meas(true),
-          use_contact_gate(true),
-          contact_force_threshold_N(0.5),
-          use_contact_hysteresis(true),
-          contact_on_threshold_N(0.7),
-          contact_off_threshold_N(0.3),
-          contact_gate_use_enabled_axes_only(true),
-          decay_when_no_contact(true),
-          no_contact_decay_ratio(0.90),
-          antiwindup_on_offset_clamp(true),
-          zero_velocity_on_offset_clamp(true),
-          offset_clamp_velocity_damping(0.2),
-          sync_adm_state_to_final_cmd(true),
-          use_slip_detection(true),
-          tangent_slip_threshold_m(0.0015),
-          use_slip_guard(true),
-          slip_guard_force_scale(0.25),
-          slip_guard_reanchor_tangent(true),
-          slip_guard_velocity_damping(0.2),
-          ik_max_iters(80),
-          ik_tol_pos_m(5e-4),
-          ik_lambda(1e-2),
-          ik_lambda_min(1e-5),
-          ik_lambda_max(1.0),
-          ik_alpha(0.8),
-          ik_alpha_min(0.05),
-          ik_max_step(0.15),
-          ik_mu_posture(1e-4),
-          ik_verbose(false),
-          prefer_last_success_q_seed(true),
-          keep_last_success_on_ik_fail(true),
-          damp_velocity_on_ik_fail(true),
-          ik_fail_velocity_damping(0.2),
-          debug_enable_rclcpp(false),
-          debug_decimation(50),
-          debug_print_all_steps(false),
-          verbose(false)
-        {}
+        // Kept as POD-style config loaded from YAML
+        Config() = default;
     };
 
     struct StepInput {
         Eigen::Vector3d p_des_base{Eigen::Vector3d::Zero()};   // desired fingertip pos in hand base frame
         Eigen::Vector3d f_des_base{Eigen::Vector3d::Zero()};   // desired force in hand base frame
-
-        // Base-frame measured force (current v18 path: HandContactForceCallback output)
-        Eigen::Vector3d f_meas_base{Eigen::Vector3d::Zero()};
-
-        // Optional raw sensor-frame measured force (future)
-        bool use_f_meas_sensor_raw{false};
-        Eigen::Vector3d f_meas_sensor_raw{Eigen::Vector3d::Zero()};
-
+        Eigen::Vector3d f_meas_base{Eigen::Vector3d::Zero()};  // measured force in hand base frame
         std::vector<double> q_hand_current20;                  // current hand joints (20DoF preferred)
         double dt_s{0.001};
     };
@@ -221,15 +128,10 @@ public:
         Eigen::Vector3d p_ref_base{Eigen::Vector3d::Zero()};
         Eigen::Vector3d p_cmd_base{Eigen::Vector3d::Zero()};
 
-        bool used_sensor_raw_transform{false};
-        Eigen::Vector3d f_meas_sensor_raw{Eigen::Vector3d::Zero()};
-        Eigen::Vector3d f_meas_base_from_sensor{Eigen::Vector3d::Zero()};
-
         Eigen::Vector3d f_meas_base_raw{Eigen::Vector3d::Zero()};
         Eigen::Vector3d f_meas_base_filt{Eigen::Vector3d::Zero()};
         Eigen::Vector3d f_meas_base{Eigen::Vector3d::Zero()};
         Eigen::Vector3d f_des_base{Eigen::Vector3d::Zero()};
-        Eigen::Vector3d f_des_ramped{Eigen::Vector3d::Zero()};
         Eigen::Vector3d f_des_used{Eigen::Vector3d::Zero()};
         Eigen::Vector3d f_err{Eigen::Vector3d::Zero()};
         Eigen::Vector3d f_drive{Eigen::Vector3d::Zero()};
@@ -262,7 +164,7 @@ public:
                           std::shared_ptr<HandInverseKinematics> hand_ik,
                           int finger_id)
     {
-        initialize(hand_fk, hand_ik, finger_id, Config());
+        initialize(hand_fk, hand_ik, finger_id, Config{});
     }
 
     HandAdmittanceControl(std::shared_ptr<HandForwardKinematics> hand_fk,
@@ -277,7 +179,7 @@ public:
                     std::shared_ptr<HandInverseKinematics> hand_ik,
                     int finger_id)
     {
-        return initialize(hand_fk, hand_ik, finger_id, Config());
+        return initialize(hand_fk, hand_ik, finger_id, Config{});
     }
 
     bool initialize(std::shared_ptr<HandForwardKinematics> hand_fk,
@@ -306,22 +208,13 @@ public:
         tangent_anchor_valid_ = false;
         tangent_anchor_p_.setZero();
 
-        f_des_ramped_.setZero();
-        f_des_ramp_initialized_ = false;
-
         last_q_cmd_123_ = {{0.0, 0.0, 0.0}};
         last_q_cmd20_.clear();
-
-        debug_counter_ = 0;
 
         const bool ok_fk = (hand_fk_ != nullptr && hand_fk_->ok());
         const bool ok_ik = (hand_ik_ != nullptr && hand_ik_->ok());
         ok_ = ok_fk && ok_ik;
 
-        if (cfg_.verbose) {
-            std::printf("[HandAdm] initialize: ok=%d finger=%s(%d)\n",
-                        ok_ ? 1 : 0, fingerName(finger_id_).c_str(), finger_id_);
-        }
         return ok_;
     }
 
@@ -352,9 +245,6 @@ public:
 
         tangent_anchor_valid_ = false;
         tangent_anchor_p_.setZero();
-
-        f_des_ramped_.setZero();
-        f_des_ramp_initialized_ = false;
     }
 
     void resetState(const Eigen::Vector3d& p_ref_base)
@@ -372,9 +262,6 @@ public:
 
         tangent_anchor_valid_ = false;
         tangent_anchor_p_.setZero();
-
-        f_des_ramped_.setZero();
-        f_des_ramp_initialized_ = false;
     }
 
     static std::string fingerName(int fid)
@@ -409,38 +296,8 @@ public:
         out.p_meas_base = p_meas;
         out.p_des_base  = in.p_des_base;
 
-        // STEP 2) measured force input select
+        // STEP 2) measured force input
         Eigen::Vector3d f_meas_input_base = in.f_meas_base;
-        out.f_meas_sensor_raw = in.f_meas_sensor_raw;
-        out.f_meas_base_from_sensor.setZero();
-        out.used_sensor_raw_transform = false;
-
-        if (cfg_.enable_sensor_raw_force_transform && in.use_f_meas_sensor_raw) {
-            bool tf_ok = false;
-
-            const std::vector<Eigen::Matrix3d> R_base_tip_all = hand_fk_->computeTipRotationsBase(in.q_hand_current20);
-            const Eigen::Matrix3d R_base_tip = safeRot_(R_base_tip_all, finger_id_);
-
-            const Eigen::Matrix3d R_tip_sensor = mat3FromRowMajor_(cfg_.R_tip_sensor_rowmajor);
-            const Eigen::Matrix3d R_base_corr  = mat3FromRowMajor_(cfg_.R_base_corr_rowmajor);
-
-            const Eigen::Vector3d f_tip      = R_tip_sensor * in.f_meas_sensor_raw;
-            const Eigen::Vector3d f_base_raw = R_base_tip * f_tip;
-            const Eigen::Vector3d f_base     = R_base_corr * f_base_raw;
-
-            if (isFiniteVec3_(f_base)) {
-                f_meas_input_base = f_base;
-                out.f_meas_base_from_sensor = f_base;
-                out.used_sensor_raw_transform = true;
-                tf_ok = true;
-            }
-
-            if (!tf_ok && !cfg_.fallback_to_f_meas_base_if_sensor_transform_fails) {
-                out.controller_ok = false;
-                return out;
-            }
-        }
-
         out.f_meas_base_raw = f_meas_input_base;
         out.f_des_base      = in.f_des_base;
 
@@ -481,11 +338,12 @@ public:
         // STEP 3) Contact detection
         auto contact_metric_norm = [&](const Eigen::Vector3d& f)->double {
             if (!cfg_.contact_gate_use_enabled_axes_only) return f.norm();
-            double s2 = 0.0; bool any=false;
+            double s2 = 0.0;
+            bool any = false;
             for (int ax=0; ax<3; ++ax) {
                 if (axis_force_enable_eff[static_cast<std::size_t>(ax)]) {
-                    s2 += f(ax)*f(ax);
-                    any=true;
+                    s2 += f(ax) * f(ax);
+                    any = true;
                 }
             }
             return any ? std::sqrt(s2) : f.norm();
@@ -519,9 +377,7 @@ public:
                 tangent_anchor_valid_ = true;
                 tangent_anchor_p_ = cfg_.tangent_anchor_use_measured_pose ? p_meas : in.p_des_base;
             }
-            if (out.contact_falling_edge && cfg_.release_tangent_anchor_on_contact_off) {
-                tangent_anchor_valid_ = false;
-            }
+
             if (out.contact_on && tangent_anchor_valid_) {
                 for (int ax=0; ax<3; ++ax) {
                     if (!axis_force_enable_eff[static_cast<std::size_t>(ax)]) {
@@ -534,44 +390,6 @@ public:
         out.p_ref_base = p_ref;
         out.tangent_anchor_valid = tangent_anchor_valid_;
         out.tangent_anchor_base  = tangent_anchor_p_;
-
-        // STEP 3.6) Force target ramp
-        Eigen::Vector3d f_des_ramped = in.f_des_base;
-        if (!f_des_ramp_initialized_) {
-            f_des_ramped_ = Eigen::Vector3d::Zero();
-            f_des_ramp_initialized_ = true;
-        }
-
-        if (cfg_.use_force_target_ramp) {
-            for (int ax=0; ax<3; ++ax) {
-                const bool axis_force_on = axis_force_enable_eff[static_cast<std::size_t>(ax)];
-                if (!axis_force_on) { f_des_ramped_(ax)=0.0; continue; }
-
-                const double target_contact = in.f_des_base(ax);
-                const double target_release = 0.0;
-                const bool allow_ramp_to_target =
-                    (!cfg_.force_ramp_only_when_contact) || out.contact_on;
-                const double target = allow_ramp_to_target ? target_contact : target_release;
-
-                const double rate_up   = std::max(1e-9, cfg_.force_target_ramp_rate_Nps[ax]);
-                const double rate_down = std::max(1e-9, cfg_.force_target_release_rate_Nps[ax]);
-
-                const double diff = target - f_des_ramped_(ax);
-                const double rate = (std::fabs(target) >= std::fabs(f_des_ramped_(ax))) ? rate_up : rate_down;
-                const double step = rate * dt;
-
-                if (std::fabs(diff) <= step) f_des_ramped_(ax) = target;
-                else f_des_ramped_(ax) += ((diff > 0.0) ? step : -step);
-            }
-            f_des_ramped = f_des_ramped_;
-        } else {
-            for (int ax=0; ax<3; ++ax) {
-                if (!axis_force_enable_eff[static_cast<std::size_t>(ax)]) f_des_ramped(ax)=0.0;
-            }
-            f_des_ramped_ = f_des_ramped;
-            f_des_ramp_initialized_ = true;
-        }
-        out.f_des_ramped = f_des_ramped;
 
         // STEP 3.7) Slip detection / guard
         Eigen::Vector3d tangent_drift = Eigen::Vector3d::Zero();
@@ -588,7 +406,7 @@ public:
             slip_detected = (tangent_drift_norm > std::max(0.0, cfg_.tangent_slip_threshold_m));
         }
 
-        Eigen::Vector3d f_des_used = f_des_ramped;
+        Eigen::Vector3d f_des_used = in.f_des_base;
         if (cfg_.use_slip_guard && slip_detected) {
             const double s = clampScalar_(cfg_.slip_guard_force_scale, 0.0, 1.0);
             for (int ax=0; ax<3; ++ax) {
@@ -625,8 +443,8 @@ public:
             }
 
             const double db = std::max(0.0, cfg_.force_deadband_N[ax]);
-            if (std::fabs(f_drive(ax)) <= db) f_drive(ax)=0.0;
-            else f_drive(ax) = (f_drive(ax) > 0.0) ? (f_drive(ax)-db) : (f_drive(ax)+db);
+            if (std::fabs(f_drive(ax)) <= db) f_drive(ax) = 0.0;
+            else f_drive(ax) = (f_drive(ax) > 0.0) ? (f_drive(ax) - db) : (f_drive(ax) + db);
 
             const double sgn = (cfg_.force_error_axis_sign[ax] >= 0.0) ? 1.0 : -1.0;
             f_drive(ax) *= sgn;
@@ -648,57 +466,46 @@ public:
             const bool axis_force_on = axis_force_enable_eff[static_cast<std::size_t>(ax)];
 
             if (!axis_force_on) {
-                adm_x_(ax)=0.0; adm_v_(ax)=0.0; p_cmd(ax)=p_ref(ax);
+                adm_x_(ax) = 0.0;
+                adm_v_(ax) = 0.0;
+                p_cmd(ax) = p_ref(ax);
                 continue;
             }
 
-            const bool apply_adm = (!cfg_.use_contact_gate) || out.contact_on;
+            const double M = std::max(1e-6, cfg_.mass[ax]);
+            const double D = std::max(0.0,  cfg_.damping[ax]);
+            const double K = std::max(0.0,  cfg_.stiffness[ax]);
 
-            if (apply_adm) {
-                const double M = std::max(1e-6, cfg_.mass[ax]);
-                const double D = std::max(0.0,  cfg_.damping[ax]);
-                const double K = std::max(0.0,  cfg_.stiffness[ax]);
+            const double x   = adm_x_(ax);
+            const double xd  = adm_v_(ax);
+            const double xdd = (f_drive(ax) - D*xd - K*x) / M;
 
-                const double x   = adm_x_(ax);
-                const double xd  = adm_v_(ax);
-                const double xdd = (f_drive(ax) - D*xd - K*x) / M;
+            double xd_new = xd + xdd * dt;
 
-                double xd_new = xd + xdd * dt;
+            const double vmax = std::fabs(cfg_.max_adm_velocity_mps[ax]);
+            if (vmax > 0.0) xd_new = clampScalar_(xd_new, -vmax, vmax);
 
-                const double vmax = std::fabs(cfg_.max_adm_velocity_mps[ax]);
-                if (vmax > 0.0) xd_new = clampScalar_(xd_new, -vmax, vmax);
+            double x_new = x + xd_new * dt;
 
-                double x_new = x + xd_new * dt;
+            const double x_lim = std::fabs(cfg_.max_offset_m[ax]);
+            bool offset_clamped = false;
+            if (x_lim > 0.0) {
+                const double x_clamped = clampScalar_(x_new, -x_lim, x_lim);
+                offset_clamped = (std::fabs(x_clamped - x_new) > 1e-15);
+                x_new = x_clamped;
+            }
 
-                const double x_lim = std::fabs(cfg_.max_offset_m[ax]);
-                bool offset_clamped = false;
-                if (x_lim > 0.0) {
-                    const double x_clamped = clampScalar_(x_new, -x_lim, x_lim);
-                    offset_clamped = (std::fabs(x_clamped - x_new) > 1e-15);
-                    x_new = x_clamped;
-                }
-
-                if (cfg_.antiwindup_on_offset_clamp && offset_clamped) {
-                    if (cfg_.zero_velocity_on_offset_clamp) xd_new = 0.0;
-                    else {
-                        const double r = clampScalar_(cfg_.offset_clamp_velocity_damping, 0.0, 1.0);
-                        xd_new *= r;
-                    }
-                }
-
-                adm_v_(ax) = xd_new;
-                adm_x_(ax) = x_new;
-                out.offset_clamped[static_cast<std::size_t>(ax)] = offset_clamped;
-            } else {
-                if (cfg_.decay_when_no_contact) {
-                    const double r = clampScalar_(cfg_.no_contact_decay_ratio, 0.0, 1.0);
-                    adm_x_(ax) *= r;
-                    adm_v_(ax) *= r;
-                } else {
-                    adm_x_(ax) = 0.0;
-                    adm_v_(ax) = 0.0;
+            if (cfg_.antiwindup_on_offset_clamp && offset_clamped) {
+                if (cfg_.zero_velocity_on_offset_clamp) xd_new = 0.0;
+                else {
+                    const double r = clampScalar_(cfg_.offset_clamp_velocity_damping, 0.0, 1.0);
+                    xd_new *= r;
                 }
             }
+
+            adm_v_(ax) = xd_new;
+            adm_x_(ax) = x_new;
+            out.offset_clamped[static_cast<std::size_t>(ax)] = offset_clamped;
 
             p_cmd(ax) = p_ref(ax) + adm_x_(ax);
         }
@@ -718,7 +525,8 @@ public:
         if (cfg_.sync_adm_state_to_final_cmd) {
             for (int ax=0; ax<3; ++ax) {
                 if (!axis_force_enable_eff[static_cast<std::size_t>(ax)]) {
-                    adm_x_(ax)=0.0; adm_v_(ax)=0.0;
+                    adm_x_(ax)=0.0;
+                    adm_v_(ax)=0.0;
                     continue;
                 }
                 adm_x_(ax) = p_cmd(ax) - p_ref(ax);
@@ -726,8 +534,8 @@ public:
             }
         }
 
-        out.p_cmd_base = p_cmd;
-        out.adm_offset = adm_x_;
+        out.p_cmd_base  = p_cmd;
+        out.adm_offset  = adm_x_;
         out.adm_velocity = adm_v_;
 
         // STEP 7) IK
@@ -745,7 +553,7 @@ public:
         ik_opt.alpha_min   = cfg_.ik_alpha_min;
         ik_opt.max_step    = cfg_.ik_max_step;
         ik_opt.mu_posture  = cfg_.ik_mu_posture;
-        ik_opt.verbose     = cfg_.ik_verbose;
+        ik_opt.verbose     = false;
 
         ik_opt.mask = {{false,false,false,false,false}};
         ik_opt.weights = {{0.0,0.0,0.0,0.0,0.0}};
@@ -774,7 +582,6 @@ public:
             last_q_cmd20_ = q_sol20;
 
             p_cmd_prev_ = p_cmd;
-            debugStep_(out);
             return out;
         }
 
@@ -805,7 +612,6 @@ public:
             }
         }
 
-        debugStep_(out);
         return out;
     }
 
@@ -820,67 +626,9 @@ private:
         return tips[static_cast<std::size_t>(idx)];
     }
 
-    static Eigen::Matrix3d safeRot_(const std::vector<Eigen::Matrix3d>& Rs, int idx)
-    {
-        if (idx < 0 || idx >= static_cast<int>(Rs.size())) return Eigen::Matrix3d::Identity();
-        return Rs[static_cast<std::size_t>(idx)];
-    }
-
     static bool isFiniteVec3_(const Eigen::Vector3d& v)
     {
         return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
-    }
-
-    static Eigen::Matrix3d mat3FromRowMajor_(const std::array<double,9>& a)
-    {
-        Eigen::Matrix3d M;
-        M << a[0], a[1], a[2],
-             a[3], a[4], a[5],
-             a[6], a[7], a[8];
-        return M;
-    }
-
-    void debugStep_(const StepOutput& out)
-    {
-        if (!cfg_.debug_enable_rclcpp) return;
-
-        const int decim = std::max(1, cfg_.debug_decimation);
-        const bool print_now = ((debug_counter_++ % decim) == 0);
-        if (!print_now) return;
-
-        rclcpp::Logger logger = has_debug_logger_ ? debug_logger_
-                                                  : rclcpp::get_logger("HandAdmittanceControl");
-
-        RCLCPP_INFO(
-            logger,
-            "[HandAdm][%s] dt=%.4f contact=%d rise=%d fall=%d slip=%d | "
-            "hax=%d | p_ref=(%.4f %.4f %.4f) p_cmd=(%.4f %.4f %.4f) | "
-            "f_meas=(%.3f %.3f %.3f) f_des=(%.3f %.3f %.3f) f_used=(%.3f %.3f %.3f) | "
-            "f_err=(%.3f %.3f %.3f) | ik_ok=%d",
-            fingerName(finger_id_).c_str(),
-            out.used_dt_s,
-            static_cast<int>(out.contact_on),
-            static_cast<int>(out.contact_rising_edge),
-            static_cast<int>(out.contact_falling_edge),
-            static_cast<int>(out.slip_detected),
-            out.hybrid_force_axis,
-            out.p_ref_base.x(), out.p_ref_base.y(), out.p_ref_base.z(),
-            out.p_cmd_base.x(), out.p_cmd_base.y(), out.p_cmd_base.z(),
-            out.f_meas_base.x(), out.f_meas_base.y(), out.f_meas_base.z(),
-            out.f_des_base.x(), out.f_des_base.y(), out.f_des_base.z(),
-            out.f_des_used.x(), out.f_des_used.y(), out.f_des_used.z(),
-            out.f_err.x(), out.f_err.y(), out.f_err.z(),
-            static_cast<int>(out.ik_ok));
-
-        if (!cfg_.debug_print_all_steps) return;
-
-        RCLCPP_INFO(
-            logger,
-            "  [adm] x=(%.5f %.5f %.5f) v=(%.5f %.5f %.5f) | step_lim=[%d%d%d] clamp=[%d%d%d]",
-            out.adm_offset.x(), out.adm_offset.y(), out.adm_offset.z(),
-            out.adm_velocity.x(), out.adm_velocity.y(), out.adm_velocity.z(),
-            static_cast<int>(out.step_limited[0]), static_cast<int>(out.step_limited[1]), static_cast<int>(out.step_limited[2]),
-            static_cast<int>(out.offset_clamped[0]), static_cast<int>(out.offset_clamped[1]), static_cast<int>(out.offset_clamped[2]));
     }
 
 private:
@@ -906,16 +654,12 @@ private:
     bool tangent_anchor_valid_{false};
     Eigen::Vector3d tangent_anchor_p_{Eigen::Vector3d::Zero()};
 
-    Eigen::Vector3d f_des_ramped_{Eigen::Vector3d::Zero()};
-    bool f_des_ramp_initialized_{false};
-
     bool last_success_valid_{false};
     std::array<double,3> last_q_cmd_123_ {{0.0, 0.0, 0.0}};
     std::vector<double> last_q_cmd20_;
 
     rclcpp::Logger debug_logger_{rclcpp::get_logger("HandAdmittanceControl")};
     bool has_debug_logger_{false};
-    int debug_counter_{0};
 };
 
 } // namespace dualarm_forcecon
