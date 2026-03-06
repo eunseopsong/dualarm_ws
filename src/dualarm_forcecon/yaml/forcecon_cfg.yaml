@@ -12,8 +12,8 @@ hand_admittance:
     force_ctrl_enable: [false, false, true]
 
     # --- admittance MDK ---
-    mass:      [0.20, 0.20, 0.30]
-    damping:   [30.0, 30.0, 60.0]
+    mass:      [3.00, 3.00, 3.00]
+    damping:   [500.0, 500.0, 500.0]
     stiffness: [0.0,  0.0,  0.0]
 
     # --- force error sign/definition ---
@@ -26,7 +26,7 @@ hand_admittance:
     force_lpf_tau_s: 0.04
 
     # --- target force ramp ---
-    use_force_target_ramp: true
+    use_force_target_ramp: false
     force_ramp_only_when_contact: false
     force_target_ramp_rate_Nps: [20.0, 20.0, 20.0]
     force_target_release_rate_Nps: [40.0, 40.0, 40.0]
