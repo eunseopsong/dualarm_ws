@@ -183,8 +183,8 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
         // ---- basic admittance MDK (초기 보수값) ----
         // no clamp/no gate 구조이므로 너무 aggressive하면 튈 수 있음
-        cfg.mass      = {{0.05, 0.05, 0.03}};
-        cfg.damping   = {{8.0,  8.0, 10.0}};
+        cfg.mass      = {{3.0, 3.0, 3.0}};
+        cfg.damping   = {{1000.0,  1000.0, 1000.0}};
         cfg.stiffness = {{0.0,  0.0,  0.0}};
 
         // ---- IK ----

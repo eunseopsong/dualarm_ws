@@ -88,8 +88,8 @@ public:
         bool verbose;
 
         Config()
-        : mass{{1.0, 1.0, 1.0}},
-          damping{{120.0, 120.0, 120.0}},
+        : mass{{3.0, 3.0, 3.0}},
+          damping{{1000.0, 1000.0, 1000.0}},
           stiffness{{0.0, 0.0, 0.0}},
 
           // default: z-axis force control (hand-base Z), others position hold
