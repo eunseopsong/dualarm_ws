@@ -160,7 +160,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     ik_euler_conv_    = node_->declare_parameter<std::string>("ik_euler_conv", "rpy");
     ik_angle_unit_    = node_->declare_parameter<std::string>("ik_angle_unit", "rad");
 
-    // cfg yaml path (요구사항 고정 경로 기본값)
+    // cfg yaml path
     const std::string cfg_yaml_path = node_->declare_parameter<std::string>(
         "forcecon_cfg_yaml",
         "/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml"
@@ -213,6 +213,13 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     joint_command_pub_ = node_->create_publisher<sensor_msgs::msg::JointState>(
         "/isaac_joint_command", 10);
+
+    // NEW: force monitor publishers
+    hand_force_current_monitor_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
+        "/hand_force_current_monitor", 10);
+
+    hand_force_target_monitor_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
+        "/hand_force_target_monitor", 10);
 
     mode_service_ = node_->create_service<std_srvs::srv::Trigger>(
         "/change_control_mode",
@@ -287,7 +294,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         RCLCPP_WARN(node_->get_logger(),
                     "[forcecon_cfg] failed to load %s (%s). Use default cfg in header.",
                     cfg_yaml_path.c_str(), e.what());
-        root = YAML::Node(); // empty
+        root = YAML::Node();
     }
 
     const YAML::Node hand_node = root["hand_admittance"];
@@ -297,12 +304,10 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     const std::array<std::string,5> finger_key = {{"thumb","index","middle","ring","baby"}};
 
     for (int f = 0; f < 5; ++f) {
-        dualarm_forcecon::HandAdmittanceControl::Config cfg; // defaults from header
+        dualarm_forcecon::HandAdmittanceControl::Config cfg;
 
-        // apply global defaults (yaml)
         if (def_node) applyYamlToHandCfg(def_node, cfg);
 
-        // apply per-finger override (yaml)
         if (per_node && per_node[finger_key[static_cast<std::size_t>(f)]]) {
             applyYamlToHandCfg(per_node[finger_key[static_cast<std::size_t>(f)]], cfg);
         }
@@ -459,6 +464,9 @@ void DualArmForceControl::ControlLoop() {
             else            cmd.position.push_back(q_r_h_t_(idx));
         }
     }
+
+    // NEW: publish current/target hand-force monitor topics
+    PublishHandForceMonitor();
 
     joint_command_pub_->publish(cmd);
 }

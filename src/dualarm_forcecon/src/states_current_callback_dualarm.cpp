@@ -653,6 +653,45 @@ void DualArmForceControl::HandContactForceCallback(
     // - desired target force는 TargetHandForceCallback 에서만 갱신
 }
 
+void DualArmForceControl::PublishHandForceMonitor()
+{
+    if (!node_) return;
+
+    std_msgs::msg::Float32MultiArray cur_msg;
+    std_msgs::msg::Float32MultiArray tar_msg;
+
+    // layout:
+    // left  hand: thumb(x,y,z), index(x,y,z), middle(x,y,z), ring(x,y,z), baby(x,y,z) -> 15
+    // right hand: thumb(x,y,z), index(x,y,z), middle(x,y,z), ring(x,y,z), baby(x,y,z) -> 15
+    // total = 30
+    cur_msg.data.resize(30, 0.0f);
+    tar_msg.data.resize(30, 0.0f);
+
+    auto pack5x3 = [](const Eigen::Matrix<double,5,3>& M,
+                      std::vector<float>& out,
+                      int offset)
+    {
+        for (int f = 0; f < 5; ++f) {
+            for (int a = 0; a < 3; ++a) {
+                out[offset + f * 3 + a] = static_cast<float>(M(f, a));
+            }
+        }
+    };
+
+    // left = 0..14
+    pack5x3(f_l_hand_c_, cur_msg.data, 0);
+    pack5x3(f_l_hand_t_, tar_msg.data, 0);
+
+    // right = 15..29
+    pack5x3(f_r_hand_c_, cur_msg.data, 15);
+    pack5x3(f_r_hand_t_, tar_msg.data, 15);
+
+    hand_force_current_monitor_pub_->publish(cur_msg);
+    hand_force_target_monitor_pub_->publish(tar_msg);
+}
+
+
+
 // ============================================================================
 // PrintDualArmStates (v18, compact view: CUR/TAR only)
 // - Finger print order: BABY -> RING -> MIDL -> INDX -> THMB

@@ -3,7 +3,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
-#include "std_msgs/msg/float32_multi_array.hpp"   // /isaac_contact_states
+#include "std_msgs/msg/float32_multi_array.hpp"   // /isaac_contact_states + monitor topics
 #include "std_msgs/msg/float64_multi_array.hpp"   // target topics
 #include "std_srvs/srv/trigger.hpp"
 
@@ -61,6 +61,9 @@ public:
     void ControlLoop();
     void PrintDualArmStates();
 
+    // NEW: publish current/target hand-force monitor topics for rqt_plot
+    void PublishHandForceMonitor();
+
 private:
     std::shared_ptr<rclcpp::Node> node_;
 
@@ -86,6 +89,11 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr contact_force_sub_;
 
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
+
+    // NEW: monitor publishers
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr hand_force_current_monitor_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr hand_force_target_monitor_pub_;
+
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr mode_service_;
 
     rclcpp::TimerBase::SharedPtr print_timer_;
@@ -132,9 +140,6 @@ private:
 
     // ------------------------------------------------------------------------
     // v19.1 patch: forcecon hold snapshot (freeze arm/wrist at forcecon entry)
-    //   - captured once at first ControlLoop tick after entering forcecon
-    //   - arm targets are held to these values while forcecon is active
-    //   - hand targets start from these values; selected finger only is updated
     // ------------------------------------------------------------------------
     Eigen::VectorXd q_l_arm_forcecon_hold_;   // size 6
     Eigen::VectorXd q_r_arm_forcecon_hold_;   // size 6
@@ -142,7 +147,7 @@ private:
     Eigen::VectorXd q_r_hand_forcecon_hold_;  // size 20
 
     bool forcecon_hold_snapshot_valid_{false};
-    bool forcecon_prev_cycle_{false}; // ControlLoop-local mode edge detection helper
+    bool forcecon_prev_cycle_{false};
 
     // Kinematics
     std::shared_ptr<ArmForwardKinematics> arm_fk_;
@@ -172,10 +177,10 @@ private:
     Eigen::Matrix<double,5,1> raw_l_hand_contact_;
     Eigen::Matrix<double,5,1> raw_r_hand_contact_;
 
-    Eigen::Matrix<double,5,3> f_l_hand_sensor_c_;   // sensor-frame force vector (debug)
+    Eigen::Matrix<double,5,3> f_l_hand_sensor_c_;
     Eigen::Matrix<double,5,3> f_r_hand_sensor_c_;
 
-    Eigen::Matrix<double,5,3> f_l_hand_wrist_c_;    // wrist(hand-base)-frame force vector (debug)
+    Eigen::Matrix<double,5,3> f_l_hand_wrist_c_;
     Eigen::Matrix<double,5,3> f_r_hand_wrist_c_;
 };
 
