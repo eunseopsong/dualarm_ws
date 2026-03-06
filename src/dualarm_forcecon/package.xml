@@ -23,6 +23,7 @@
   <depend>tf2_kdl</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>yaml-cpp</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

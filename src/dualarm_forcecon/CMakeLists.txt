@@ -32,6 +32,9 @@ find_package(tf2_kdl REQUIRED)
 
 find_package(pinocchio REQUIRED)
 
+# yaml-cpp (needed for YAML::LoadFile / YAML::Node::as<...>)
+find_package(yaml-cpp REQUIRED)
+
 # =========================
 # Target
 # =========================
@@ -61,7 +64,7 @@ ament_target_dependencies(dualarm_forcecon_node
   pinocchio
 )
 
-# Eigen
+# Eigen / KDL
 target_link_libraries(dualarm_forcecon_node
   Eigen3::Eigen
   orocos-kdl
@@ -75,6 +78,23 @@ elseif(DEFINED pinocchio_LIBRARIES)
   if(DEFINED pinocchio_INCLUDE_DIRS)
     target_include_directories(dualarm_forcecon_node PUBLIC ${pinocchio_INCLUDE_DIRS})
   endif()
+endif()
+
+# =========================
+# yaml-cpp LINK (핵심 패치)
+# =========================
+# Ubuntu/ROS 환경마다 타겟 이름이 다를 수 있어서 3단계로 안전하게 처리
+if(TARGET yaml-cpp::yaml-cpp)
+  target_link_libraries(dualarm_forcecon_node yaml-cpp::yaml-cpp)
+elseif(TARGET yaml-cpp)
+  target_link_libraries(dualarm_forcecon_node yaml-cpp)
+elseif(DEFINED YAML_CPP_LIBRARIES)
+  target_link_libraries(dualarm_forcecon_node ${YAML_CPP_LIBRARIES})
+  if(DEFINED YAML_CPP_INCLUDE_DIRS)
+    target_include_directories(dualarm_forcecon_node PUBLIC ${YAML_CPP_INCLUDE_DIRS})
+  endif()
+else()
+  message(FATAL_ERROR "yaml-cpp found but no usable CMake target/library variable was provided.")
 endif()
 
 # =========================

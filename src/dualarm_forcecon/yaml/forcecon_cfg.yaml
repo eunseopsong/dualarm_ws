@@ -1,0 +1,109 @@
+hand_admittance:
+  # --------------------------------------------------------------------------
+  # defaults: 모든 손가락에 공통 적용
+  # per_finger: 특정 손가락만 override (thumb/index/middle/ring/baby)
+  # --------------------------------------------------------------------------
+  defaults:
+    # --- hybrid force axis ---
+    use_hybrid_force_position_mode: true
+    hybrid_force_axis: 2              # 0=x,1=y,2=z (HAND_BASE)
+
+    # (hybrid 모드에선 사실상 axis 1개만 켜짐, 그래도 문서화용)
+    force_ctrl_enable: [false, false, true]
+
+    # --- admittance MDK ---
+    mass:      [0.20, 0.20, 0.30]
+    damping:   [30.0, 30.0, 60.0]
+    stiffness: [0.0,  0.0,  0.0]
+
+    # --- force error sign/definition ---
+    force_error_des_minus_meas: true
+    force_error_axis_sign: [1.0, 1.0, -1.0]   # ★ z press 방향 필요하면 -1로 뒤집기
+    force_deadband_N: [0.0, 0.0, 0.0]
+
+    # --- measured force LPF ---
+    use_force_lpf: true
+    force_lpf_tau_s: 0.04
+
+    # --- target force ramp ---
+    use_force_target_ramp: true
+    force_ramp_only_when_contact: false
+    force_target_ramp_rate_Nps: [20.0, 20.0, 20.0]
+    force_target_release_rate_Nps: [40.0, 40.0, 40.0]
+
+    # --- contact gate / hysteresis ---
+    use_contact_gate: false
+    contact_force_threshold_N: 0.5
+    use_contact_hysteresis: true
+    contact_on_threshold_N: 0.7
+    contact_off_threshold_N: 0.3
+    contact_gate_use_enabled_axes_only: true
+
+    # --- tangent anchor ---
+    hold_tangent_anchor_on_contact: true
+    tangent_anchor_use_measured_pose: true
+    release_tangent_anchor_on_contact_off: false
+
+    # --- slip guard ---
+    use_slip_detection: true
+    tangent_slip_threshold_m: 0.0015
+    use_slip_guard: true
+    slip_guard_force_scale: 0.25
+    slip_guard_reanchor_tangent: true
+    slip_guard_velocity_damping: 0.2
+
+    # --- safety clamps (힘 제어 튐/IK fail 방지 핵심) ---
+    max_offset_m: [0.005, 0.005, 0.010]
+    max_step_m:   [0.0003, 0.0003, 0.0003]
+    max_adm_velocity_mps: [0.01, 0.01, 0.01]
+
+    # --- dt guard ---
+    dt_min_s: 0.0001
+    dt_max_s: 0.05
+
+    # --- no contact decay ---
+    decay_when_no_contact: true
+    no_contact_decay_ratio: 0.90
+
+    # --- anti-windup ---
+    antiwindup_on_offset_clamp: true
+    zero_velocity_on_offset_clamp: true
+    offset_clamp_velocity_damping: 0.2
+    sync_adm_state_to_final_cmd: true
+
+    # --- IK ---
+    ik_max_iters: 80
+    ik_tol_pos_m: 0.0005
+    ik_lambda: 0.01
+    ik_lambda_min: 0.00001
+    ik_lambda_max: 1.0
+    ik_alpha: 0.8
+    ik_alpha_min: 0.05
+    ik_max_step: 0.15
+    ik_mu_posture: 0.0001
+    ik_verbose: false
+
+    # --- IK fallback ---
+    prefer_last_success_q_seed: true
+    keep_last_success_on_ik_fail: true
+    damp_velocity_on_ik_fail: true
+    ik_fail_velocity_damping: 0.2
+
+    # --- raw sensor transform (현재는 OFF) ---
+    enable_sensor_raw_force_transform: false
+    R_tip_sensor_rowmajor: [1,0,0, 0,1,0, 0,0,1]
+    R_base_corr_rowmajor:  [1,0,0, 0,1,0, 0,0,1]
+    fallback_to_f_meas_base_if_sensor_transform_fails: true
+
+    # --- debug ---
+    debug_enable_rclcpp: false
+    debug_decimation: 50
+    debug_print_all_steps: false
+    verbose: false
+
+  per_finger:
+    thumb: {}
+    index: {}
+    middle: {}
+    ring: {}
+    baby: {}
