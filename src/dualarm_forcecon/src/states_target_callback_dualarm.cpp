@@ -340,17 +340,21 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
 }
 
 // ============================================================================
-// v15: DeltaArmPositionCallback (inverse arm IK, delta command)
+// v22: DeltaArmPositionCallback (inverse arm IK, delta command w.r.t latched initial pose)
 // msg: 12 = [L dx dy dz d(rx) d(ry) d(rz), R dx dy dz d(rx) d(ry) d(rz)]
 //
 // 동작:
-//   absolute_target = current_pose(world monitor pose) + delta
+//   absolute_target = latched_initial_pose + delta
 //   -> TargetArmPositionCallback() 재사용 (frame/z-offset/IK 로직 일원화)
 //
+// 기준 pose:
+//   - 노드 실행 후 current_pose_l_/r_ 가 처음 유효해졌을 때의 pose를 latch
+//   - 이후 delta command는 항상 그 latched pose 기준으로 해석
+//
 // 주의:
-// - position delta는 "world 표시 좌표계 기준"으로 더해짐
-// - orientation delta는 "Euler component-wise add" 방식 (현재 설정 unit 기준)
-//   (SO(3) composition이 아니라 사용자가 요청한 단순 delta 방식)
+// - position delta는 latched initial pose 기준
+// - orientation delta도 latched initial Euler 기준 (현재 설정 unit 기준)
+// - orientation은 단순 Euler component-wise add 방식
 // ============================================================================
 void DualArmForceControl::DeltaArmPositionCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
@@ -379,96 +383,120 @@ void DualArmForceControl::DeltaArmPositionCallback(
     }
 
     // -----------------------------
-    // [B] 현재 pose(world monitor pose) 읽기
+    // [B] latched base pose 준비 여부 확인
     // -----------------------------
-    // current_pose_l_/r_ 는 PositionCallback/FK에서 업데이트되는 world pose라고 가정
-    std::array<double,3> l_xyz_cur{
-        current_pose_l_.position.x,
-        current_pose_l_.position.y,
-        current_pose_l_.position.z
+    if (!delta_arm_base_pose_initialized_) {
+        RCLCPP_WARN(logger, "[DeltaArmPositionCallback] base pose is not initialized yet.");
+        return;
+    }
+
+    // -----------------------------
+    // [C] latched base position 읽기
+    // -----------------------------
+    std::array<double,3> l_xyz_base{
+        delta_arm_base_pose_l_.position.x,
+        delta_arm_base_pose_l_.position.y,
+        delta_arm_base_pose_l_.position.z
     };
-    std::array<double,3> r_xyz_cur{
-        current_pose_r_.position.x,
-        current_pose_r_.position.y,
-        current_pose_r_.position.z
+    std::array<double,3> r_xyz_base{
+        delta_arm_base_pose_r_.position.x,
+        delta_arm_base_pose_r_.position.y,
+        delta_arm_base_pose_r_.position.z
     };
 
-    // 현재 orientation quaternion -> Euler(XYZ, deg) (Isaac UI 매칭용 helper 재사용)
+    // -----------------------------
+    // [D] latched base orientation 읽기
+    // quaternion -> Euler(XYZ, deg)
+    // -----------------------------
     double l_ex_deg = 0.0, l_ey_deg = 0.0, l_ez_deg = 0.0;
     double r_ex_deg = 0.0, r_ey_deg = 0.0, r_ez_deg = 0.0;
 
-    ArmForwardKinematics::quatToEulerXYZDeg_Isaac(current_pose_l_.orientation, l_ex_deg, l_ey_deg, l_ez_deg);
-    ArmForwardKinematics::quatToEulerXYZDeg_Isaac(current_pose_r_.orientation, r_ex_deg, r_ey_deg, r_ez_deg);
+    ArmForwardKinematics::quatToEulerXYZDeg_Isaac(
+        delta_arm_base_pose_l_.orientation, l_ex_deg, l_ey_deg, l_ez_deg);
+    ArmForwardKinematics::quatToEulerXYZDeg_Isaac(
+        delta_arm_base_pose_r_.orientation, r_ex_deg, r_ey_deg, r_ez_deg);
 
     auto deg_to_current_unit = [&](double deg_val)->double {
         // TargetArmPositionCallback에서 angle_unit_ 해석을 다시 하므로
-        // 여기서는 "현재 Euler 표현값"을 delta와 같은 단위로 맞춰서 합산만 수행
+        // 여기서는 "base Euler 표현값"을 delta와 같은 단위로 맞춰서 합산만 수행
         if (ik_angle_unit_ == "deg") return deg_val;
-        // rad / auto 는 rad 기준으로 합산 (auto에서도 rad로 넣어도 solveIK에서 허용)
+        // rad / auto 는 rad 기준으로 합산
         return deg_val * M_PI / 180.0;
     };
 
-    std::array<double,3> l_eul_cur{
+    std::array<double,3> l_eul_base{
         deg_to_current_unit(l_ex_deg),
         deg_to_current_unit(l_ey_deg),
         deg_to_current_unit(l_ez_deg)
     };
-    std::array<double,3> r_eul_cur{
+    std::array<double,3> r_eul_base{
         deg_to_current_unit(r_ex_deg),
         deg_to_current_unit(r_ey_deg),
         deg_to_current_unit(r_ez_deg)
     };
 
     // -----------------------------
-    // [C] 절대 target 생성 = current + delta
+    // [E] 절대 target 생성 = latched base + delta
     // -----------------------------
     std_msgs::msg::Float64MultiArray abs_msg;
     abs_msg.data.resize(12);
 
     // Left XYZ
-    abs_msg.data[0] = l_xyz_cur[0] + l_dxyz[0];
-    abs_msg.data[1] = l_xyz_cur[1] + l_dxyz[1];
-    abs_msg.data[2] = l_xyz_cur[2] + l_dxyz[2];
+    abs_msg.data[0] = l_xyz_base[0] + l_dxyz[0];
+    abs_msg.data[1] = l_xyz_base[1] + l_dxyz[1];
+    abs_msg.data[2] = l_xyz_base[2] + l_dxyz[2];
     // Left Euler
-    abs_msg.data[3] = l_eul_cur[0] + l_deul[0];
-    abs_msg.data[4] = l_eul_cur[1] + l_deul[1];
-    abs_msg.data[5] = l_eul_cur[2] + l_deul[2];
+    abs_msg.data[3] = l_eul_base[0] + l_deul[0];
+    abs_msg.data[4] = l_eul_base[1] + l_deul[1];
+    abs_msg.data[5] = l_eul_base[2] + l_deul[2];
 
     // Right XYZ
-    abs_msg.data[6]  = r_xyz_cur[0] + r_dxyz[0];
-    abs_msg.data[7]  = r_xyz_cur[1] + r_dxyz[1];
-    abs_msg.data[8]  = r_xyz_cur[2] + r_dxyz[2];
+    abs_msg.data[6]  = r_xyz_base[0] + r_dxyz[0];
+    abs_msg.data[7]  = r_xyz_base[1] + r_dxyz[1];
+    abs_msg.data[8]  = r_xyz_base[2] + r_dxyz[2];
     // Right Euler
-    abs_msg.data[9]  = r_eul_cur[0] + r_deul[0];
-    abs_msg.data[10] = r_eul_cur[1] + r_deul[1];
-    abs_msg.data[11] = r_eul_cur[2] + r_deul[2];
+    abs_msg.data[9]  = r_eul_base[0] + r_deul[0];
+    abs_msg.data[10] = r_eul_base[1] + r_deul[1];
+    abs_msg.data[11] = r_eul_base[2] + r_deul[2];
 
     // -----------------------------
-    // [D] 디버그 로그 (스팸 방지)
+    // [F] 디버그 로그 (스팸 방지)
     // -----------------------------
     static int dbg_decim = 0;
     const bool do_dbg = ((dbg_decim++ % 20) == 0);
 
     if (do_dbg) {
         RCLCPP_INFO(logger,
-            "[DeltaArmPosCb] angle_unit=%s euler_conv=%s | delta interpreted as current-display-frame increments",
+            "[DeltaArmPosCb] angle_unit=%s euler_conv=%s | delta interpreted w.r.t latched initial pose",
             ik_angle_unit_.c_str(), ik_euler_conv_.c_str());
 
         RCLCPP_INFO(logger,
-            "[L] cur xyz=(%.4f %.4f %.4f) + dxyz=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
-            l_xyz_cur[0], l_xyz_cur[1], l_xyz_cur[2],
+            "[L] base xyz=(%.4f %.4f %.4f) + dxyz=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
+            l_xyz_base[0], l_xyz_base[1], l_xyz_base[2],
             l_dxyz[0], l_dxyz[1], l_dxyz[2],
             abs_msg.data[0], abs_msg.data[1], abs_msg.data[2]);
 
         RCLCPP_INFO(logger,
-            "[R] cur xyz=(%.4f %.4f %.4f) + dxyz=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
-            r_xyz_cur[0], r_xyz_cur[1], r_xyz_cur[2],
+            "[L] base eul=(%.4f %.4f %.4f) + deul=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
+            l_eul_base[0], l_eul_base[1], l_eul_base[2],
+            l_deul[0], l_deul[1], l_deul[2],
+            abs_msg.data[3], abs_msg.data[4], abs_msg.data[5]);
+
+        RCLCPP_INFO(logger,
+            "[R] base xyz=(%.4f %.4f %.4f) + dxyz=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
+            r_xyz_base[0], r_xyz_base[1], r_xyz_base[2],
             r_dxyz[0], r_dxyz[1], r_dxyz[2],
             abs_msg.data[6], abs_msg.data[7], abs_msg.data[8]);
+
+        RCLCPP_INFO(logger,
+            "[R] base eul=(%.4f %.4f %.4f) + deul=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
+            r_eul_base[0], r_eul_base[1], r_eul_base[2],
+            r_deul[0], r_deul[1], r_deul[2],
+            abs_msg.data[9], abs_msg.data[10], abs_msg.data[11]);
     }
 
     // -----------------------------
-    // [E] 기존 절대 target callback 재사용 (v13/v14 z-offset/frame 처리 일관성 유지)
+    // [G] 기존 절대 target callback 재사용
     // -----------------------------
     auto abs_msg_ptr = std::make_shared<std_msgs::msg::Float64MultiArray>(abs_msg);
     TargetArmPositionCallback(abs_msg_ptr);

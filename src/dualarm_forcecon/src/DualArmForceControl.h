@@ -61,7 +61,7 @@ public:
     void ControlLoop();
     void PrintDualArmStates();
 
-    // NEW: publish current/target hand-force monitor topics for rqt_plot
+    // Publish current/target hand-force monitor topics for rqt_plot
     void PublishHandForceMonitor();
 
 private:
@@ -90,7 +90,7 @@ private:
 
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
 
-    // NEW: monitor publishers
+    // Monitor publishers
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr hand_force_current_monitor_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr hand_force_target_monitor_pub_;
 
@@ -148,6 +148,16 @@ private:
 
     bool forcecon_hold_snapshot_valid_{false};
     bool forcecon_prev_cycle_{false};
+
+    // ------------------------------------------------------------------------
+    // v22 patch: delta-arm command base pose latch
+    // - latched once from current_pose_l_/r_ after node start
+    // - DeltaArmPositionCallback uses:
+    //     target = latched_base_pose + delta
+    // ------------------------------------------------------------------------
+    bool delta_arm_base_pose_initialized_{false};
+    geometry_msgs::msg::Pose delta_arm_base_pose_l_;
+    geometry_msgs::msg::Pose delta_arm_base_pose_r_;
 
     // Kinematics
     std::shared_ptr<ArmForwardKinematics> arm_fk_;
