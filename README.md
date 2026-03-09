@@ -1,93 +1,58 @@
-# DualArmForceControl README (v20)
+# DualArmForceControl README (v22)
 
-This README summarizes the current **v20** baseline of `dualarm_forcecon`.
-
-v20 preserves the **v18 package structure / invariants** and the **v19 forcecon architecture**, and marks the first version where **hand admittance-based force control is confirmed to work in simulation**.
+This README summarizes the current **v22** baseline of `dualarm_forcecon` (dual arm + hand monitor / control node) based on the latest package structure, force-control flow, monitor outputs, v20/v21 simplifications, and the new **latched-base delta arm command behavior** added in v22.
 
 ---
 
-## 1) Version Summary (v20)
+## 1) Version Summary (v22)
 
-### 1.1 One-line summary
-- `dualarm_forcecon` is a ROS 2 Humble package for controlling a **dual-arm (6DoF x2) + dual-hand (20DoF canonical x2)** system in Isaac Sim, supporting:
-  - `idle`
-  - `forward`
-  - `inverse`
-  - `forcecon`
-- **v20 baseline status:** hand **admittance control succeeded** in `forcecon` mode.
+v22 builds on:
+- **v20**: hand admittance force control successfully working, target/current hand-force monitor topics added
+- **v21**: hand admittance configuration cleanup (unused false-path options removed, YAML simplified)
+- **v22**: arm delta Cartesian command changed to use a **latched initial base pose** rather than a continuously updated current pose
 
-### 1.2 What v20 means
-v20 is the version after the v19 forcecon stabilization work where:
-- admittance controller configuration was tuned enough to make force control actually respond,
-- target-force tracking became observable in runtime,
-- and dedicated **monitor topics for hand current/target force** were added so the behavior can be visualized in `rqt_plot`.
-
-### 1.3 Practical status of v20
-- **Builds successfully**
-- **Forcecon runs**
-- **Hand current force and target force can both be monitored as ROS topics**
-- **Admittance force control works in simulation**
-- Further work is still needed for:
-  - stability improvement,
-  - reduced steady-state error,
-  - more robust contact/no-contact transition handling,
-  - better force-axis calibration and control quality
-
----
-
-## 2) Version History / Evolution
-
-## 2.1 v18 baseline recap
-v18 established the major baseline before the successful v20 forcecon milestone.
-
-### v18 major points
-- Callback source file split finalized:
-  - `states_current_callback_dualarm.cpp`
-  - `states_target_callback_dualarm.cpp`
-- Mode cycle finalized:
-  - `idle -> forward -> inverse -> forcecon -> idle`
-- `TAR_F` zeroing bug fixed
-  - `HandContactForceCallback()` no longer clears target-force buffers
-- `DeltaHandPositionCallback()` added
-- Hand FK axis convention root fix applied in `hand_forward_kinematics.hpp`
-- Forcecon command path existed, but force tracking quality was still incomplete
-
-## 2.2 v19 recap
-v19 was the **forcecon stabilization stage**.
-
-### v19 key architectural changes
-- YAML-based hand admittance configuration loading added
-- Per-finger `HandAdmittanceControl` instances created from config
-- `TargetHandForceCallback()` changed to **latch-only command storage**
-- Real execution moved into `ControlLoop()` at 100 Hz
-- **Forcecon hold snapshot** added:
-  - arm targets fixed at forcecon entry
-  - hand targets fixed at forcecon entry
-  - only the commanded finger is updated during forcecon
-
-### v19 main problem
-- Admittance structure existed, but force tracking was not yet reliable
-- In particular, force control often failed because of the combination of:
-  - contact / non-contact dependent logic,
-  - force-direction assumptions from scalar contact input,
-  - tuning sensitivity
-
-## 2.3 v20 milestone
-v20 is the first version where the **hand admittance controller is confirmed to operate successfully**.
-
-### v20 major changes
-- Admittance parameter set refined so forcecon becomes responsive in simulation
-- Runtime behavior confirmed: target-force command can drive fingertip force behavior
-- New monitor topics added for continuous force visualization:
+### v22 major changes
+- **Delta arm command reference behavior changed**
+  - `DeltaArmPositionCallback()` no longer interprets delta relative to the current arm pose at every callback
+  - It now uses:
+    - **position target = latched_initial_position + delta_position**
+    - **orientation target = latched_initial_orientation + delta_orientation**
+- **Latched initial arm base pose added**
+  - `delta_arm_base_pose_l_`, `delta_arm_base_pose_r_`
+  - `delta_arm_base_pose_initialized_`
+  - These are captured once after node start when current arm pose becomes valid
+- **v21 config simplification preserved**
+  - Unused false-path config logic removed from hand admittance code and YAML loader
+  - Force control path is cleaner and easier to maintain
+- **v20 force-control success preserved**
+  - Hand admittance control remains operational
   - `/hand_force_current_monitor`
   - `/hand_force_target_monitor`
-- `rqt_plot`-based comparison of current force vs target force is now possible
+  can be used for plotting in `rqt_plot`
+
+### Important behavioral note for v22
+`/delta_arm_cartesian_pose` is no longer an incremental jog based on the latest pose at each callback.  
+It is now an **initial-pose-relative offset command**.
+
+That means:
+
+\[
+X_{target} = X_{init} + \Delta X
+\]
+
+not
+
+\[
+X_{target}(k) = X_{current}(k) + \Delta X(k)
+\]
+
+So if you keep publishing the same delta command repeatedly, the target remains the same.
 
 ---
 
-## 3) Package Structure (must preserve)
+## 2) Package Structure (v22, must preserve)
 
-> The package tree and file-role separation rules must remain unchanged.
+> Keep the package tree and file-role separation rules unchanged.
 
 ```text
 dualarm_forcecon/
@@ -103,416 +68,625 @@ dualarm_forcecon/
 │   ├── hand_inverse_kinematics.hpp
 │   └── kinematics_utils.hpp
 └── src/
-    ├── DualArmForceControl.cpp
+    ├── DualArmForceControl.cpp                 # ctor / dtor / ControlLoop only
     ├── DualArmForceControl.h
     ├── node_dualarm_main.cpp
-    ├── states_current_callback_dualarm.cpp
-    └── states_target_callback_dualarm.cpp
+    ├── states_current_callback_dualarm.cpp     # current-state callbacks + monitor print
+    └── states_target_callback_dualarm.cpp      # target/command callbacks
 ```
 
-### Strict file-role rules
-- `DualArmForceControl.cpp` must contain only:
+### Important rules (must keep)
+- **Do not change package tree**
+- **Do not move callbacks back into `DualArmForceControl.cpp`**
+- `DualArmForceControl.cpp` should keep only:
   - constructor
   - destructor
   - `ControlLoop()`
-- Current-state callbacks / monitor printing stay in:
-  - `states_current_callback_dualarm.cpp`
-- Target / command callbacks stay in:
-  - `states_target_callback_dualarm.cpp`
-- Preserve include/src separation
-- Do not collapse the callback split back into a single file
+- Preserve:
+  - 52-DOF publish mapping
+  - Isaac UI-matching Euler convention
+  - world-base z offset default behavior (`0.306 m`)
+  - `PrintDualArmStates` formatting style (colors/layout)
+  - include/src separation
 
 ---
 
-## 4) Invariants (do not break)
+## 3) Core Functional Overview
 
-The following invariants must be preserved across future patches.
+### 3.1 Control modes
+- `idle`
+- `forward`
+- `inverse`
+- `forcecon`
 
-### 4.1 Mechanical / mapping invariants
-- **52-DOF publish mapping** must remain correct
-  - arms: 12
-  - hands: 40 canonical
-- Hand joint layout remains canonical 20DoF representation:
-  - `[thumb1..4, index1..4, middle1..4, ring1..4, baby1..4]`
-- Mimic rule stays:
-  - `joint4 = joint3`
+### 3.2 What each mode does
+- **idle**
+  - safe hold / target sync to current state
+- **forward**
+  - direct joint-space command mode
+  - arm and hand joint targets are received separately
+- **inverse**
+  - Cartesian target mode
+  - arm absolute Cartesian targets
+  - arm delta Cartesian targets
+  - hand absolute fingertip Cartesian targets
+  - hand delta fingertip jog commands
+- **forcecon**
+  - hand fingertip force-control mode
+  - single-finger force-oriented command path via `HandAdmittanceControl`
+  - arm/wrist is frozen by forcecon hold snapshot
+  - selected finger is updated by force controller + hand IK
 
-### 4.2 Frame / display invariants
-- Isaac UI matching Euler convention must remain unchanged
-- World-base z offset default behavior remains:
-  - `world_base_xyz = [0.0, 0.0, 0.306]`
-- Hand fingertip display remains in each hand base frame:
+### 3.3 Monitor output
+- Arm:
+  - current / target pose
+  - current / target force (arm force monitor still unused, typically zero)
+- Hand:
+  - current / target fingertip positions in hand-base frame
+  - current / target hand forces
+- Extra plot topics:
+  - `/hand_force_current_monitor`
+  - `/hand_force_target_monitor`
+
+---
+
+## 4) ROS Interfaces (v22)
+
+### 4.1 Subscriptions
+
+#### Joint / state input
+- `/isaac_joint_states` — `sensor_msgs/msg/JointState`
+  - used by:
+    - `JointsCallback`
+    - `PositionCallback`
+
+#### Hand contact monitor input
+- `/isaac_contact_states` — `std_msgs/msg/Float32MultiArray`
+  - length = **10** (`5 left + 5 right`)
+  - scalar fingertip contact values from Isaac Sim
+
+#### Forward mode inputs
+- `/forward_arm_joint_targets` — `std_msgs/msg/Float64MultiArray`
+  - **12 values**
+  - `[left arm 6, right arm 6]`
+
+- `/forward_hand_joint_targets` — `std_msgs/msg/Float64MultiArray`
+  - **30 values** = `left15 + right15`
+  - **40 values** = `left20 + right20`
+
+#### Inverse mode inputs
+- `/target_arm_cartesian_pose` — `std_msgs/msg/Float64MultiArray`
+  - **12 values**
+  - `[L x y z r p y, R x y z r p y]`
+
+- `/delta_arm_cartesian_pose` — `std_msgs/msg/Float64MultiArray`
+  - **12 values**
+  - `[L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]`
+  - **v22 behavior**:
+    - delta is interpreted relative to the **latched initial pose**, not current pose
+
+- `/target_hand_fingertips` — `std_msgs/msg/Float64MultiArray`
+  - **30 values**
+  - per hand order = `THMB, INDX, MIDL, RING, BABY` (each xyz)
+
+- `/delta_hand_fingertips` — `std_msgs/msg/Float64MultiArray`
+  - **5 values**
+  - `[side, finger, dx, dy, dz]`
+  - `side: 0=left, 1=right`
+  - `finger: 0=thumb, 1=index, 2=middle, 3=ring, 4=baby`
+
+#### Forcecon mode input
+- `/target_hand_force` — `std_msgs/msg/Float64MultiArray`
+  - **8 values**
+  - `[side, finger, p_des_x, p_des_y, p_des_z, f_des_x, f_des_y, f_des_z]`
+
+### 4.2 Publishers
+
+- `/isaac_joint_command` — `sensor_msgs/msg/JointState`
+  - consolidated arm + hand command output
+
+- `/hand_force_current_monitor` — `std_msgs/msg/Float32MultiArray`
+  - hand current force monitor topic
+  - intended for plotting in `rqt_plot`
+
+- `/hand_force_target_monitor` — `std_msgs/msg/Float32MultiArray`
+  - hand target force monitor topic
+  - intended for plotting in `rqt_plot`
+
+### 4.3 Service
+
+- `/change_control_mode` — `std_srvs/srv/Trigger`
+  - cycles:
+    - `idle -> forward -> inverse -> forcecon -> idle`
+
+---
+
+## 5) Coordinate / Frame Conventions
+
+### 5.1 Arm pose display
+- Arm pose in monitor uses project Isaac UI-matching Euler convention
+- world-base transform default:
+  - translation = `[0.0, 0.0, 0.306]`
+  - rotation = `[0, 0, 0]` deg unless parameterized
+
+### 5.2 Arm inverse input
+- controlled by:
+  - `ik_targets_frame_`
+  - `ik_euler_conv_`
+  - `ik_angle_unit_`
+
+### 5.3 Hand pose display / command frame
+- Hand fingertip positions are displayed in:
   - `LEFT_HAND_BASE`
   - `RIGHT_HAND_BASE`
+- Hand FK axis convention root fix is already integrated
+- `HandPositionCallback()` uses corrected hand-base display convention
 
-### 4.3 Contact ordering invariants
-For `/isaac_contact_states`:
-- observed msg order per hand:
-  - `[BABY, RING, MIDL, INDX, THMB]`
-- internal canonical row order:
-  - `[THMB, INDX, MIDL, RING, BABY]`
-- mapping:
-  - `BABY -> 4`
-  - `RING -> 3`
-  - `MIDL -> 2`
-  - `INDX -> 1`
-  - `THMB -> 0`
-
-### 4.4 Monitor invariants
-- `PrintDualArmStates` format / colors should remain stable
-- Hand monitor print order remains:
+### 5.4 Hand fingertip order
+- **monitor print order**:
   - `BABY -> RING -> MIDL -> INDX -> THMB`
 
----
+- **command order for `/target_hand_fingertips` (per hand)**:
+  - `THMB, INDX, MIDL, RING, BABY`
 
-## 5) Control Modes
-
-### 5.1 Mode cycle
-`idle -> forward -> inverse -> forcecon -> idle`
-
-### 5.2 Mode behavior
-#### idle
-- one-shot sync of targets to current states
-- safe hold baseline
-
-#### forward
-- joint-space command mode
-- accepts arm and hand joint targets
-
-#### inverse
-- Cartesian command mode
-- accepts:
-  - arm absolute pose
-  - arm delta pose
-  - hand absolute fingertip targets
-  - hand delta fingertip jogging
-
-#### forcecon
-- fingertip force-oriented control mode
-- one active commanded finger at a time
-- uses:
-  - scalar contact input from Isaac Sim
-  - reconstructed fingertip/base-frame force estimate
-  - hand admittance controller
-  - hand IK
-- arm and non-commanded hand joints are held from forcecon entry snapshot
+### 5.5 Hand contact sensor ordering
+- observed sensor order per hand from Isaac:
+  - `[BABY, RING, MIDL, INDX, THMB]`
+- internal canonical storage:
+  - `THMB(0), INDX(1), MIDL(2), RING(3), BABY(4)`
 
 ---
 
-## 6) Core Kinematics / Control Components
+## 6) Current Baseline Behavior (v22)
 
-## 6.1 Arm FK / IK
-### `arm_forward_kinematics.hpp`
-- KDL-based FK
-- supports BASE / WORLD output modes
-- includes Isaac UI-matching Euler conversion helper
+### 6.1 Forcecon
+- hand force control works
+- target force monitor remains visible
+- current force and target force can be plotted externally via:
+  - `/hand_force_current_monitor`
+  - `/hand_force_target_monitor`
 
-### `arm_inverse_kinematics.hpp`
-- KDL-based IK
-- supports frame selection and Euler convention selection
-- strict frame handling preserved
+### 6.2 Delta arm command
+- initial arm pose is latched once after node start
+- delta arm target is computed from that latched pose
+- repeated publication of the same delta command does **not accumulate**
+- this is intentional in v22
 
-## 6.2 Hand FK / IK
-### `hand_forward_kinematics.hpp`
-- Pinocchio-based hand FK
-- supports 15DoF and canonical 20DoF input
-- applies hand-base axis remap for display / user frame consistency
-- provides:
-  - fingertip positions
-  - fingertip rotations in hand base frame
-
-### `hand_inverse_kinematics.hpp`
-- finger-wise position IK
-- internally solves in 15DoF independent space
-- expands back to canonical 20DoF with mimic rule
-
-## 6.3 Hand admittance controller
-### `hand_admittance_control.hpp`
-- hybrid force/position structure
-- supports:
-  - per-axis MDK dynamics
-  - force LPF
-  - contact gate / hysteresis
-  - target-force ramp
-  - tangent anchor hold
-  - slip detection / guard
-  - offset / velocity / step clamps
-  - IK fallback handling
-
-### v20 status
-- Parameter tuning reached a regime where **admittance force control works** in simulation
-- This is the most important functional milestone of v20
+### 6.3 Config state
+- unused false-path hand-admittance config logic has been removed
+- YAML is simplified
+- controller path is cleaner than v20/v21 transitional versions
 
 ---
 
-## 7) ROS Interfaces (v20)
+## 7) Build / Run / Mode Switching / Example Commands (v22)
 
-## 7.1 Subscriptions
-### State input
-- `/isaac_joint_states` — `sensor_msgs/msg/JointState`
+### 7.1 Build and run node
 
-### Contact input
-- `/isaac_contact_states` — `std_msgs/msg/Float32MultiArray`
-  - length: 10
-  - 5 left + 5 right
-  - scalar contact values only
-
-### Forward-mode input
-- `/forward_arm_joint_targets` — `std_msgs/msg/Float64MultiArray`
-- `/forward_hand_joint_targets` — `std_msgs/msg/Float64MultiArray`
-
-### Inverse-mode input
-- `/target_arm_cartesian_pose` — `std_msgs/msg/Float64MultiArray`
-- `/delta_arm_cartesian_pose` — `std_msgs/msg/Float64MultiArray`
-- `/target_hand_fingertips` — `std_msgs/msg/Float64MultiArray`
-- `/delta_hand_fingertips` — `std_msgs/msg/Float64MultiArray`
-
-### Forcecon-mode input
-- `/target_hand_force` — `std_msgs/msg/Float64MultiArray`
-  - format:
-    - `[hand_id, finger_id, p_des_x, p_des_y, p_des_z, f_des_x, f_des_y, f_des_z]`
-  - `hand_id`: `0=left`, `1=right`
-  - `finger_id`: `0=thumb, 1=index, 2=middle, 3=ring, 4=baby`
-
-## 7.2 Publishers
-### Main command output
-- `/isaac_joint_command` — `sensor_msgs/msg/JointState`
-
-### New v20 monitor outputs
-- `/hand_force_current_monitor` — `std_msgs/msg/Float32MultiArray`
-- `/hand_force_target_monitor` — `std_msgs/msg/Float32MultiArray`
-
-These topics were added so that **current force and target force can be plotted continuously** in `rqt_plot`.
-
-## 7.3 Service
-- `/change_control_mode` — `std_srvs/srv/Trigger`
-
----
-
-## 8) Hand Force Handling
-
-## 8.1 Isaac contact limitation
-Isaac Sim contact sensor currently provides only a **scalar** value per fingertip contact point.
-
-That means the package cannot directly receive a full 3D force vector from the simulator. Instead, the code reconstructs a force estimate under a **1-axis normal-force assumption**.
-
-## 8.2 Modeling assumption
-The implemented assumption is:
-- the fingertip force acts mainly along the finger's intended pressing direction,
-- and the scalar contact magnitude represents that normal component.
-
-Then the code transforms this scalar-derived force through:
-1. sensor-frame assumption,
-2. tip-frame conversion,
-3. hand-base / wrist-frame conversion,
-4. empirical output-axis calibration.
-
-## 8.3 Force matrices in runtime
-- current hand force:
-  - `f_l_hand_c_`
-  - `f_r_hand_c_`
-- target hand force:
-  - `f_l_hand_t_`
-  - `f_r_hand_t_`
-
-Rows use canonical order:
-- `THMB=0`
-- `INDX=1`
-- `MIDL=2`
-- `RING=3`
-- `BABY=4`
-
----
-
-## 9) Forcecon Architecture (v20)
-
-## 9.1 High-level flow
-1. User sends `/target_hand_force`
-2. `TargetHandForceCallback()` latches command only
-3. `ControlLoop()` executes forcecon at 100 Hz
-4. Entry snapshot holds:
-   - left/right arm targets
-   - left/right hand targets
-5. Only the selected finger gets updated by admittance + IK
-6. Final canonical hand joint command is published through `/isaac_joint_command`
-
-## 9.2 Hold snapshot policy
-When entering `forcecon`:
-- arm targets are frozen from current arm state
-- hand targets are frozen from current hand state
-- this prevents arm/wrist drift during fingertip force control
-
-This behavior must be preserved.
-
-## 9.3 Why v19 struggled and v20 succeeded
-v19 already had the architecture, but force tracking quality depended heavily on:
-- contact / non-contact policy,
-- scalar-force interpretation,
-- admittance tuning,
-- IK sensitivity.
-
-v20 is the version where the configuration reached a working regime and force control became effective in practice.
-
----
-
-## 10) Force Monitor Topics (new in v20)
-
-## 10.1 Purpose
-`/target_hand_force` is a command input topic, but for plotting we want continuous monitor topics.
-
-So v20 adds:
-- `/hand_force_current_monitor`
-- `/hand_force_target_monitor`
-
-These are published continuously from the control side, so they can be visualized as time series.
-
-## 10.2 Message layout
-Both topics use:
-- `std_msgs/msg/Float32MultiArray`
-- length = 30
-
-Flattened layout:
-```text
-left:
-  thumb(x,y,z), index(x,y,z), middle(x,y,z), ring(x,y,z), baby(x,y,z)
-right:
-  thumb(x,y,z), index(x,y,z), middle(x,y,z), ring(x,y,z), baby(x,y,z)
-```
-
-## 10.3 Index rule
-```text
-idx = hand_offset + finger_id*3 + axis_id
-hand_offset = 0  (left)
-hand_offset = 15 (right)
-
-finger_id: thumb=0, index=1, middle=2, ring=3, baby=4
-axis_id: x=0, y=1, z=2
-```
-
-### Examples
-- left ring z = `0 + 3*3 + 2 = 11`
-- left baby z = `0 + 4*3 + 2 = 14`
-- right index z = `15 + 1*3 + 2 = 20`
-
-## 10.4 Example rqt_plot usage
-To compare **left ring z current vs target**:
-- `/hand_force_current_monitor/data[11]`
-- `/hand_force_target_monitor/data[11]`
-
----
-
-## 11) Build / Run
-
-## 11.1 Build
 ```bash
 cd ~/dualarm_ws
 colcon build --packages-select dualarm_forcecon
 source install/setup.bash
-```
-
-## 11.2 Run
-```bash
 ros2 run dualarm_forcecon dualarm_forcecon_node
 ```
 
+### 7.2 Change control mode
+
+```bash
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+```
+
+#### Mode cycle
+```bash
+# idle -> forward
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+
+# forward -> inverse
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+
+# inverse -> forcecon
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+
+# forcecon -> idle
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+```
+
+> Always verify the current mode from the monitor header before sending commands.
+
+### 7.3 Forward mode examples — arm joint targets
+
+#### Topic
+`/forward_arm_joint_targets`
+
+#### Format
+`[left arm 6, right arm 6]`
+
+#### Example A — home-like arm command
+```bash
+ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  1.6419, -0.0058, -2.2344, 1.5607, 1.5936, -0.1104,
+ -0.0459,  0.7361,  1.9809, 0.0000,-1.1869, -0.7854
+]}"
+```
+
+#### Example B — small symmetric arm change
+```bash
+ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  1.6819, -0.0258, -2.1944, 1.5307, 1.5736, -0.0704,
+ -0.0859,  0.7561,  1.9409, 0.0300,-1.1669, -0.8254
+]}"
+```
+
+#### Example C — left arm move only
+```bash
+ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  1.7219,  0.0342, -2.1244, 1.4907, 1.5436, -0.0304,
+ -0.0459,  0.7361,  1.9809, 0.0000,-1.1869, -0.7854
+]}"
+```
+
+### 7.4 Forward mode examples — hand joint targets
+
+#### Topic
+`/forward_hand_joint_targets`
+
+#### 15-DoF order per hand
+`[thumb1,2,3, index1,2,3, middle1,2,3, ring1,2,3, baby1,2,3]`
+
+#### Example A — home-like hand command
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  0.0000,0.3948,0.3927,   0.0000,0.0000,0.0000,   0.0000,0.0000,0.0000,   0.0000,-0.0400,0.7854,   0.0000,0.0000,0.0000,
+  0.0000,0.3955,0.3840,   0.0000,0.0000,0.0000,   0.0000,0.0000,0.0000,   0.0000, 0.0000,0.0000,   0.0000,0.0000,0.0000
+]}"
+```
+
+#### Example B — gentle closing motion
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  0.0,0.55,0.45,   0.0,0.25,0.20,   0.0,0.25,0.20,   0.0,0.30,0.25,   0.0,0.20,0.15,
+  0.0,0.55,0.45,   0.0,0.25,0.20,   0.0,0.25,0.20,   0.0,0.25,0.20,   0.0,0.20,0.15
+]}"
+```
+
+#### Example C — left-only gesture
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
+  0.0,0.80,0.80,   0.0,0.00,0.00,   0.0,0.00,0.00,   0.0,0.00,1.00,   0.0,0.00,0.00,
+  0.0,0.3955,0.3840,   0.0,0.00,0.00,   0.0,0.00,0.00,   0.0,0.00,0.00,   0.0,0.00,0.00
+]}"
+```
+
+### 7.5 Inverse mode examples — absolute arm Cartesian targets
+
+#### Topic
+`/target_arm_cartesian_pose`
+
+#### Format
+`[L x y z r p y, R x y z r p y]`
+
+#### Example A — near current baseline
+```bash
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
+  0.1001,  0.2666, -0.1263,   2.7370, 1.5062, -1.1601,
+  0.5439, -0.3170,  0.1478,  -3.0216, 1.5565, -1.6910
+]}"
+```
+
+#### Example B — small Cartesian shift
+```bash
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
+  0.1201,  0.2566, -0.1163,   2.7370, 1.5062, -1.1601,
+  0.5339, -0.3070,  0.1478,  -3.0216, 1.5565, -1.6910
+]}"
+```
+
+#### Example C — left arm only
+```bash
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
+  0.1400,  0.2500, -0.1100,   2.70, 1.50, -1.10,
+  0.5439, -0.3170,  0.1478,  -3.0216, 1.5565, -1.6910
+]}"
+```
+
+### 7.6 Inverse mode examples — delta arm Cartesian targets (v22 behavior)
+
+#### Topic
+`/delta_arm_cartesian_pose`
+
+#### Format
+`[L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]`
+
+#### Important v22 behavior
+The delta is interpreted relative to the **latched initial arm pose**, not the latest current pose.
+
+#### Example A — zero delta
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [0,0,0,0,0,0,  0,0,0,0,0,0]}"
+```
+
+#### Example B — symmetric position offset from initial pose
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
+   0.020, -0.010, 0.015,   0.00, 0.00, 0.00,
+  -0.020,  0.010, 0.015,   0.00, 0.00, 0.00
+]}"
+```
+
+#### Example C — left orientation offset from initial pose
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
+  0.000, 0.000, 0.000,   0.05, -0.03, 0.08,
+  0.000, 0.000, 0.000,   0.00,  0.00, 0.00
+]}"
+```
+
+#### Example D — mixed offset command
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
+   0.030, 0.000, 0.020,   0.04, 0.00, -0.02,
+  -0.010, 0.015, 0.010,   0.00, 0.03,  0.00
+]}"
+```
+
+> Repeating the same command does not accumulate motion in v22.
+
+### 7.7 Inverse mode examples — absolute hand fingertip targets
+
+#### Topic
+`/target_hand_fingertips`
+
+#### Format
+30 values = `left15 + right15`  
+per hand order = `THMB, INDX, MIDL, RING, BABY` (each xyz)
+
+#### Example A — baseline-like fingertip target
+```bash
+ros2 topic pub --once /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
+   0.1524,-0.0471,-0.1000,   0.2465,-0.0403,-0.0144,   0.2640,-0.0135,-0.0144,   0.2340, 0.0133,-0.0444,   0.2310, 0.0401,-0.0144,
+   0.1522, 0.0472,-0.1003,   0.2465, 0.0403,-0.0144,   0.2640, 0.0135,-0.0144,   0.2465,-0.0133,-0.0144,   0.2310,-0.0401,-0.0144
+]}"
+```
+
+#### Example B — left ring target move
+```bash
+ros2 topic pub --once /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
+   0.1524,-0.0471,-0.1000,   0.2465,-0.0403,-0.0144,   0.2640,-0.0135,-0.0144,   0.2440, 0.0133,-0.0444,   0.2310, 0.0401,-0.0144,
+   0.1522, 0.0472,-0.1003,   0.2465, 0.0403,-0.0144,   0.2640, 0.0135,-0.0144,   0.2465,-0.0133,-0.0144,   0.2310,-0.0401,-0.0144
+]}"
+```
+
+#### Example C — left baby target move
+```bash
+ros2 topic pub --once /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
+   0.1524,-0.0471,-0.1000,   0.2465,-0.0403,-0.0144,   0.2640,-0.0135,-0.0144,   0.2340, 0.0133,-0.0444,   0.2310, 0.0401,-0.0244,
+   0.1522, 0.0472,-0.1003,   0.2465, 0.0403,-0.0144,   0.2640, 0.0135,-0.0144,   0.2465,-0.0133,-0.0144,   0.2310,-0.0401,-0.0144
+]}"
+```
+
+### 7.8 Inverse mode examples — delta hand fingertip jog
+
+#### Topic
+`/delta_hand_fingertips`
+
+#### Format
+`[side, finger, dx, dy, dz]`
+
+- `side: 0=left, 1=right`
+- `finger: 0=thumb, 1=index, 2=middle, 3=ring, 4=baby`
+
+#### Example A — left ring +x jog
+```bash
+ros2 topic pub --once /delta_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [0, 3, 0.005, 0.000, 0.000]}"
+```
+
+#### Example B — left ring -x jog
+```bash
+ros2 topic pub --once /delta_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [0, 3, -0.005, 0.000, 0.000]}"
+```
+
+#### Example C — left ring +z jog
+```bash
+ros2 topic pub --once /delta_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [0, 3, 0.000, 0.000, 0.005]}"
+```
+
+#### Example D — right index -y jog
+```bash
+ros2 topic pub --once /delta_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [1, 1, 0.000, -0.005, 0.000]}"
+```
+
+#### Example E — right thumb combined jog
+```bash
+ros2 topic pub --once /delta_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [1, 0, 0.003, 0.000, -0.003]}"
+```
+
+### 7.9 Forcecon mode examples — target hand force
+
+#### Topic
+`/target_hand_force`
+
+#### Format
+`[side, finger, p_des_x, p_des_y, p_des_z, f_des_x, f_des_y, f_des_z]`
+
+#### Step A — enter forcecon mode
+```bash
+# idle -> forward
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+
+# forward -> inverse
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+
+# inverse -> forcecon
+ros2 service call /change_control_mode std_srvs/srv/Trigger "{}"
+```
+
+#### Example B — left ring force target
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray "{data: [0, 3, 0.0133, -0.0331, 0.2384, 10.0, 0.0, 0.0]}"
+```
+
+#### Example C — streaming force target
+```bash
+ros2 topic pub -r 10 /target_hand_force std_msgs/msg/Float64MultiArray "{data: [0, 3, 0.0133, -0.0331, 0.2384, 8.0, 0.0, 0.0]}"
+```
+
+#### Example D — right index force target
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray "{data: [1, 1, 0.2465, 0.0403, -0.0144, 0.0, 5.0, 0.0]}"
+```
+
+### 7.10 Plotting current / target force in rqt_plot
+
+#### Current hand force monitor
+```bash
+ros2 topic echo /hand_force_current_monitor
+```
+
+#### Target hand force monitor
+```bash
+ros2 topic echo /hand_force_target_monitor
+```
+
+#### Open rqt_plot
+```bash
+rqt_plot
+```
+
+Typical plot targets:
+- `/hand_force_current_monitor/data[0]`
+- `/hand_force_current_monitor/data[1]`
+- `/hand_force_current_monitor/data[2]`
+- `/hand_force_target_monitor/data[0]`
+- `/hand_force_target_monitor/data[1]`
+- `/hand_force_target_monitor/data[2]`
+
+> Exact indices depend on how your monitor publisher packs the 5-finger x/y/z data.
+
 ---
 
-## 12) Configuration
+## 8) Hand Contact Force Handling
 
-## 12.1 YAML config
-- file:
-  - `yaml/forcecon_cfg.yaml`
-- loaded in constructor through yaml-cpp
+### Topic format
+- topic: `/isaac_contact_states`
+- type: `std_msgs/msg/Float32MultiArray`
+- payload length: `10`
 
-## 12.2 Current v20 interpretation
-The working v20 setup came from **admittance parameter tuning** rather than a major structural rewrite.
+### Current interpretation
+- Isaac provides scalar contact values
+- code assumes force acts along the fingertip nail/normal direction
+- callback reconstructs a directional force vector from scalar magnitude
 
-The key meaning of v20 is:
-- with the present configuration, forcecon is able to produce observable force-control behavior.
+### Processing flow
+1. scalar contact -> temporary local sensor force
+2. sensor -> tip frame
+3. tip -> hand-base frame
+4. empirical output-axis correction
+5. saved to:
+   - `f_l_hand_c_`
+   - `f_r_hand_c_`
 
-Future tuning will still be needed.
-
----
-
-## 13) Recommended Debug / Validation Procedure
-
-### 13.1 Before forcecon
-- verify monitor pose and fingertip positions
-- verify correct finger index / side command
-- verify `TAR_F` updates when `/target_hand_force` is sent
-
-### 13.2 During forcecon
-- use `PrintDualArmStates()` to check:
-  - selected finger target position
-  - selected finger current force
-  - selected finger target force
-- use `rqt_plot` to compare:
-  - `/hand_force_current_monitor/...`
-  - `/hand_force_target_monitor/...`
-
-### 13.3 If forcecon becomes unstable
-Check in this order:
-1. forcecon mode actually active
-2. correct finger / hand commanded
-3. contact scalar present in `/isaac_contact_states`
-4. YAML parameter values
-5. force direction / sign assumption
-6. IK saturation / step clamp limits
+### Important rule
+`HandContactForceCallback()` updates **current** force buffers only.  
+It must **not** clear hand target-force monitor buffers.
 
 ---
 
-## 14) Known Limitations in v20
+## 9) Current Known Status / Limitations (v22)
 
-Even though v20 successfully achieves admittance force control, the following limitations remain.
+### Stable / working
+- forcecon command path works
+- hand admittance control operates
+- current / target hand-force monitor topics available
+- simplified YAML config path is working
+- delta arm command now behaves deterministically relative to initial pose
 
-### 14.1 Scalar contact limitation
-- Isaac provides only scalar contact value per fingertip
-- full 3D contact wrench is not available
-- force-direction reconstruction is model-based / assumed
-
-### 14.2 Stability margin still limited
-- control may still be sensitive to:
-  - contact onset,
-  - parameter changes,
-  - commanded force magnitude,
-  - IK feasibility
-
-### 14.3 Steady-state force accuracy not yet optimized
-- the controller can work,
-- but force tracking is not yet fully optimized for low steady-state error or high robustness
+### Still under tuning
+- steady-state force tracking error may still remain
+- force-control gains may still need tuning per finger
+- hand IK may fail for large or poorly conditioned fingertip targets
+- force tracking depends heavily on:
+  - contact direction assumption
+  - scalar-to-axis interpretation
+  - hand-base conversion quality
 
 ---
 
-## 15) Future Work
+## 10) Quick Checklist (v22)
 
-### Main future work after v20
-**Improve control stability and reduce steady-state error.**
+### Build / run
+```bash
+cd ~/dualarm_ws
+colcon build --packages-select dualarm_forcecon
+source install/setup.bash
+ros2 run dualarm_forcecon dualarm_forcecon_node
+```
 
-This includes:
-- reducing steady-state force tracking error,
-- improving stability near contact transitions,
-- improving robustness against force spikes / slip,
-- refining admittance and damping behavior,
-- improving long-duration force regulation performance,
-- possibly refining contact-axis modeling if simulation limitations allow it
+### Confirm active mode
+Check monitor header:
+- `Mode: [idle]`
+- `Mode: [forward]`
+- `Mode: [inverse]`
+- `Mode: [forcecon]`
 
-### Additional future directions
-- more systematic forcecon tuning workflow
-- better non-contact / contact transition policy
-- better IK robustness under constrained fingertip motion
-- richer debug/monitor topics if needed
+### Main topics
+- `/forward_arm_joint_targets`
+- `/forward_hand_joint_targets`
+- `/target_arm_cartesian_pose`
+- `/delta_arm_cartesian_pose`
+- `/target_hand_fingertips`
+- `/delta_hand_fingertips`
+- `/target_hand_force`
+- `/isaac_contact_states`
+- `/isaac_joint_states`
+- `/isaac_joint_command`
+- `/hand_force_current_monitor`
+- `/hand_force_target_monitor`
+
+### Common sanity checks
+- If delta arm command does not move:
+  - verify mode is `inverse`
+  - verify base pose was latched after startup
+- If force target is not visible:
+  - verify mode is `forcecon`
+  - verify `/target_hand_force` callback is triggered
+- If IK fails:
+  - reduce displacement
+  - reduce force target
+  - use smaller incremental fingertip targets
+- If force tracking looks unstable:
+  - reduce force magnitude
+  - ensure contact is stable
+  - tune damping / mass / step clamps conservatively
 
 ---
 
-## 16) Final Summary
+## 11) Suggested Next Steps (v22+)
 
-### v20 meaning in one sentence
-v20 is the first stable milestone where **hand admittance-based force control is confirmed to work**, while preserving the v18/v19 package structure and forcecon architecture.
+- improve force-control stability
+  - reduce steady-state error
+  - refine damping / mass / clamp tuning
+- verify scalar-contact direction model more carefully
+- consider per-finger gain tuning
+- consider more explicit contact/no-contact approach policy
+- add compact monitor mapping documentation for `/hand_force_current_monitor` index layout
+- update README again if:
+  - topic payload layout changes
+  - delta-arm semantics change again
+  - forcecon controller interface changes
 
-### What must be remembered going forward
-- v20 is the new baseline
-- forcecon architecture should be preserved
-- hold snapshot behavior should be preserved
-- monitor topics for current/target hand force should be preserved
-- next work should focus on **stability improvement and steady-state error reduction**
+---
 
+## 12) Notes
+
+This README reflects the **v22 baseline** after:
+- v20 successful hand admittance force control
+- v21 hand-admittance config cleanup
+- v22 latched-base delta arm command behavior
+
+If you later change:
+- delta-arm reference policy
+- force monitor packing
+- hand contact mapping
+- forcecon gains/interface
+
+update this README together to keep future handoff clean.
