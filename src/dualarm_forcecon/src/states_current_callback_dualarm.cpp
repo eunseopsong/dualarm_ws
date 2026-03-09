@@ -76,7 +76,8 @@ void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::S
 }
 
 // --------------------
-// ArmPositionCallback (v16 minor patch: output stabilization / deadband)
+// ArmPositionCallback (v22 patch: output stabilization / deadband
+// + latch initial base pose for DeltaArmPositionCallback)
 // --------------------
 void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
     (void)msg;
@@ -179,6 +180,26 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
 
     apply_pose_deadband(current_pose_l_, cur_l_fk, s_cur_l_init);
     apply_pose_deadband(current_pose_r_, cur_r_fk, s_cur_r_init);
+
+    // ---------------- v22: latch initial base pose for delta-arm command ----------------
+    // 노드 실행 후 current pose가 처음 유효해졌을 때 1회만 저장
+    if (!delta_arm_base_pose_initialized_ && s_cur_l_init && s_cur_r_init) {
+        delta_arm_base_pose_l_ = current_pose_l_;
+        delta_arm_base_pose_r_ = current_pose_r_;
+        delta_arm_base_pose_initialized_ = true;
+
+        RCLCPP_INFO(
+            node_->get_logger(),
+            "[DeltaArmBase] latched initial base pose | "
+            "L=(%.4f %.4f %.4f) R=(%.4f %.4f %.4f)",
+            delta_arm_base_pose_l_.position.x,
+            delta_arm_base_pose_l_.position.y,
+            delta_arm_base_pose_l_.position.z,
+            delta_arm_base_pose_r_.position.x,
+            delta_arm_base_pose_r_.position.y,
+            delta_arm_base_pose_r_.position.z
+        );
+    }
 
     // ---------------- target pose (mode-dependent) ----------------
     if (current_control_mode_ == "idle") {
