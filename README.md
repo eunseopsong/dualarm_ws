@@ -1,19 +1,21 @@
 # DualArmForceControl README (v24)
 
-This README summarizes the current **v24** baseline of `dualarm_forcecon` (dual arm + hand monitor / control node) based on the latest package structure, the split arm/hand mode service interface, the v22 latched-base delta arm behavior, and the new **contact-aware hand control logic without a separate `forcecon` mode**.
+This README summarizes the current **v24** baseline of `dualarm_forcecon` (dual arm + hand monitor/control node), based on the latest package structure, the split arm/hand mode service interface, the v22 latched-base delta arm behavior, and the new **contact-aware hand control logic without a separate `forcecon` mode**.
 
 ---
 
 ## 1) Version Summary (v24)
 
-v24 builds on:
+v24 builds on the following milestones:
+
 - **v20**: hand admittance force control successfully working, target/current hand-force monitor topics added
 - **v21**: hand admittance configuration cleanup (unused false-path options removed, YAML simplified)
 - **v22**: arm delta Cartesian command changed to use a **latched initial base pose** rather than a continuously updated current pose
-- **v23**: arm / hand control modes separated and `/change_control_mode` changed to custom service `dualarm_forcecon_interfaces/srv/SetControlMode`
+- **v23**: arm/hand control modes separated and `/change_control_mode` changed to custom service `dualarm_forcecon_interfaces/srv/SetControlMode`
 - **v24**: **removed hand `forcecon` mode**, and changed hand force control into an **internal contact-aware branch inside `forward` / `inverse` hand modes**
 
 ### v24 major changes
+
 - **Hand `forcecon` mode removed**
   - previous hand mode set:
     - `idle / forward / inverse / forcecon`
@@ -22,9 +24,9 @@ v24 builds on:
 
 - **Hand force control is no longer a separate control mode**
   - force regulation is now handled **inside hand `forward` / `inverse`**
-  - logic is:
-    - **no contact** → pure motion control
-    - **contact detected** → motion target + admittance-based force-aware correction
+  - internal logic:
+    - **no contact** -> pure motion control
+    - **contact detected** -> motion target + admittance-based force-aware correction
 
 - **`/target_hand_force` changed in meaning**
   - it is now a **desired-force reference input**
@@ -34,35 +36,45 @@ v24 builds on:
     - `inverse`
 
 - **New hand command flow**
-  - **hand forward mode**
-    - no contact:
-      \[
-      q_{cmd} = q_{target}
-      \]
-    - contact:
-      \[
-      q_{target} \xrightarrow{FK} x_{target}, \quad
-      (x_{target}, F_{target}, F_{ext}) \xrightarrow{\text{Admittance}} q_{cmd}
-      \]
 
-  - **hand inverse mode**
-    - no contact:
-      \[
-      x_{target} \xrightarrow{IK} q_{cmd}
-      \]
-    - contact:
-      \[
-      (x_{target}, F_{target}, F_{ext}) \xrightarrow{\text{Admittance}} q_{cmd}
-      \]
+  **Hand forward mode**
+
+  - no contact:
+
+    ```text
+    q_cmd = q_target
+    ```
+
+  - contact:
+
+    ```text
+    q_target --FK--> x_target
+    (x_target, F_target, F_ext) --Admittance--> x_cmd --IK--> q_cmd
+    ```
+
+  **Hand inverse mode**
+
+  - no contact:
+
+    ```text
+    x_target --IK--> q_cmd
+    ```
+
+  - contact:
+
+    ```text
+    (x_target, F_target, F_ext) --Admittance--> x_cmd --IK--> q_cmd
+    ```
 
 - **Motion target and final command are separated internally**
-  - new internal concept:
+  - new internal concepts:
     - hand motion reference target
     - final hand joint command
   - this allows contact-aware correction to be added on top of the motion target
 
 ### Important behavioral note for v24
-There is **no separate hand `forcecon` mode anymore**.  
+
+There is **no separate hand `forcecon` mode anymore**.
 If hand force control is needed, use:
 
 - `hand=forward` or `hand=inverse`
@@ -71,9 +83,9 @@ If hand force control is needed, use:
 
 So in v24:
 
-\[
-\text{mode} \neq \text{force control state}
-\]
+```text
+mode != force control state
+```
 
 Instead:
 
@@ -113,832 +125,728 @@ dualarm_ws/
             ├── node_dualarm_main.cpp
             ├── states_current_callback_dualarm.cpp     # current-state callbacks + monitor print + service callback
             └── states_target_callback_dualarm.cpp      # target/command callbacks
-            
-            
-            
-Important rules (must keep)
+```
 
-Do not change package tree
+### Important rules (must keep)
 
-Do not move callbacks back into DualArmForceControl.cpp
+- Do **not** change package tree
+- Do **not** move callbacks back into `DualArmForceControl.cpp`
+- `DualArmForceControl.cpp` should keep only:
+  - constructor
+  - destructor
+  - `ControlLoop()`
 
-DualArmForceControl.cpp should keep only:
+### Preserve the following invariants
 
-constructor
+- 52-DOF publish mapping
+- Isaac UI-matching Euler convention
+- world-base z offset default behavior (`0.306 m`)
+- `PrintDualArmStates` formatting style (colors/layout)
+- include/src separation
 
-destructor
+---
 
-ControlLoop()
+## 3) Core Functional Overview
 
-Preserve:
+### 3.1 Control modes
 
-52-DOF publish mapping
+**Arm modes**
 
-Isaac UI-matching Euler convention
+- `idle`
+- `forward`
+- `inverse`
 
-world-base z offset default behavior (0.306 m)
+**Hand modes**
 
-PrintDualArmStates formatting style (colors/layout)
+- `idle`
+- `forward`
+- `inverse`
 
-include/src separation
+### 3.2 What each mode does
 
-3) Core Functional Overview
-3.1 Control modes
-Arm modes
+#### Arm idle
 
-idle
+- safe hold / target sync to current state
 
-forward
+#### Arm forward
 
-inverse
+- direct arm joint-space command mode
+- input:
+  - `/forward_arm_joint_targets`
 
-Hand modes
+#### Arm inverse
 
-idle
+- arm Cartesian target mode
+- inputs:
+  - `/target_arm_cartesian_pose`
+  - `/delta_arm_cartesian_pose`
 
-forward
+#### Hand idle
 
-inverse
+- safe hold / target sync to current hand state
 
-3.2 What each mode does
-Arm idle
+#### Hand forward
 
-safe hold / target sync to current state
+- hand joint target mode
+- input:
+  - `/forward_hand_joint_targets`
+- behavior:
+  - no contact -> direct motion target tracking
+  - contact + valid `/target_hand_force` -> selected finger uses admittance correction internally
 
-Arm forward
+#### Hand inverse
 
-direct arm joint-space command mode
+- hand fingertip Cartesian target mode
+- inputs:
+  - `/target_hand_fingertips`
+  - `/delta_hand_fingertips`
+- behavior:
+  - no contact -> fingertip IK motion control
+  - contact + valid `/target_hand_force` -> selected finger uses admittance correction internally
 
-input:
+### 3.3 Monitor output
 
-/forward_arm_joint_targets
+**Arm**
 
-Arm inverse
+- current / target pose
+- current / target force
+  - arm force monitor is still unused in practice and is typically zero
 
-arm Cartesian target mode
+**Hand**
 
-input:
+- current / target fingertip positions in hand-base frame
+- current / target hand forces
 
-/target_arm_cartesian_pose
+**Extra plot topics**
 
-/delta_arm_cartesian_pose
+- `/hand_force_current_monitor`
+- `/hand_force_target_monitor`
 
-Hand idle
+---
 
-safe hold / target sync to current state
+## 4) v24 Hand Contact-Aware Control Logic
 
-Hand forward
+### 4.1 Hand forward mode
 
-hand joint target mode
+**Inputs**
 
-input:
+- `q_current`
+- `q_target`
+- optional `F_target`
+- measured `F_ext`
 
-/forward_hand_joint_targets
+**No contact**
 
-behavior:
+```text
+q_cmd = q_target
+```
 
-no contact → direct motion target tracking
+**Contact detected**
 
-contact + valid /target_hand_force → selected finger uses admittance correction internally
+1. Convert motion target to fingertip target:
 
-Hand inverse
+   ```text
+   x_target = FK(q_target)
+   ```
 
-hand fingertip Cartesian target mode
+2. Compute force-aware position correction using admittance:
 
-input:
+   ```text
+   (x_target, F_target, F_ext) -> x_cmd
+   ```
 
-/target_hand_fingertips
+3. Convert back to joint command:
 
-/delta_hand_fingertips
+   ```text
+   x_cmd --IK--> q_cmd
+   ```
 
-behavior:
+### 4.2 Hand inverse mode
 
-no contact → fingertip IK motion control
+**Inputs**
 
-contact + valid /target_hand_force → selected finger uses admittance correction internally
+- `x_current`
+- `x_target`
+- optional `F_target`
+- measured `F_ext`
 
-3.3 Monitor output
-
-Arm:
-
-current / target pose
-
-current / target force (arm force monitor still unused, typically zero)
-
-Hand:
-
-current / target fingertip positions in hand-base frame
-
-current / target hand forces
-
-Extra plot topics:
-
-/hand_force_current_monitor
-
-/hand_force_target_monitor
-
-4) v24 Hand Contact-Aware Control Logic
-4.1 Hand forward mode
-
-Input:
-
-q_current
-
-q_target
-
-optional F_target
-
-measured F_ext
-
-No contact
-𝑞
-𝑐
-𝑚
-𝑑
-=
-𝑞
-𝑡
-𝑎
-𝑟
-𝑔
-𝑒
-𝑡
-q
-cmd
-	​
-
-=q
-target
-	​
-
-Contact detected
-
-convert motion target to fingertip target:
-
-𝑥
-𝑡
-𝑎
-𝑟
-𝑔
-𝑒
-𝑡
-=
-𝐹
-𝐾
-(
-𝑞
-𝑡
-𝑎
-𝑟
-𝑔
-𝑒
-𝑡
-)
-x
-target
-	​
-
-=FK(q
-target
-	​
-
-)
-
-compute force-aware position correction using admittance:
-
-(
-𝑥
-𝑡
-𝑎
-𝑟
-𝑔
-𝑒
-𝑡
-,
-𝐹
-𝑡
-𝑎
-𝑟
-𝑔
-𝑒
-𝑡
-,
-𝐹
-𝑒
-𝑥
-𝑡
-)
-→
-𝑥
-𝑐
-𝑚
-𝑑
-(x
-target
-	​
-
-,F
-target
-	​
-
-,F
-ext
-	​
-
-)→x
-cmd
-	​
-
-
-convert to joint command:
-
-𝑥
-𝑐
-𝑚
-𝑑
-→
-𝐼
-𝐾
-𝑞
-𝑐
-𝑚
-𝑑
-x
-cmd
-	​
-
-IK
-	​
-
-q
-cmd
-	​
-
-4.2 Hand inverse mode
-
-Input:
-
-x_current
-
-x_target
-
-optional F_target
-
-measured F_ext
-
-No contact
-𝑥
-𝑡
-𝑎
-𝑟
-𝑔
-𝑒
-𝑡
-→
-𝐼
-𝐾
-𝑞
-𝑐
-𝑚
-𝑑
-x
-target
-	​
-
-IK
-	​
-
-q
-cmd
-	​
-
-Contact detected
-(
-𝑥
-𝑡
-𝑎
-𝑟
-𝑔
-𝑒
-𝑡
-,
-𝐹
-𝑡
-𝑎
-𝑟
-𝑔
-𝑒
-𝑡
-,
-𝐹
-𝑒
-𝑥
-𝑡
-)
-→
-Admittance
-𝑥
-𝑐
-𝑚
-𝑑
-→
-𝐼
-𝐾
-𝑞
-𝑐
-𝑚
-𝑑
-(x
-target
-	​
-
-,F
-target
-	​
-
-,F
-ext
-	​
-
-)
-Admittance
-	​
-
-x
-cmd
-	​
-
-IK
-	​
-
-q
-cmd
-	​
-
-4.3 Important interpretation
-
-In v24, hand force control is not a standalone mode.
-It is an internal branch activated by contact state.
+**No contact**
+
+```text
+x_target --IK--> q_cmd
+```
+
+**Contact detected**
+
+```text
+(x_target, F_target, F_ext) --Admittance--> x_cmd --IK--> q_cmd
+```
+
+### 4.3 Important interpretation
+
+In v24, hand force control is **not** a standalone mode.
+It is an **internal branch activated by contact state**.
 
 That means:
 
-forward / inverse = motion command type
+- `forward / inverse` = motion command type
+- `contact / no-contact` = internal execution branch
 
-contact/no-contact = internal execution branch
+---
 
-5) ROS Interfaces (v24)
-5.1 Subscriptions
-Joint / state input
+## 5) ROS Interfaces (v24)
 
-/isaac_joint_states — sensor_msgs/msg/JointState
+### 5.1 Subscriptions
 
-used by:
+#### Joint / state input
 
-JointsCallback
+**`/isaac_joint_states`** — `sensor_msgs/msg/JointState`
 
-PositionCallback
+Used by:
 
-Hand contact monitor input
+- `JointsCallback`
+- `PositionCallback`
 
-/isaac_contact_states — std_msgs/msg/Float32MultiArray
+#### Hand contact monitor input
 
-length = 10 (5 left + 5 right)
+**`/isaac_contact_states`** — `std_msgs/msg/Float32MultiArray`
 
-scalar fingertip contact values from Isaac Sim
+- length = `10` (`5 left + 5 right`)
+- scalar fingertip contact values from Isaac Sim
 
-Forward mode inputs
+#### Forward mode inputs
 
-/forward_arm_joint_targets — std_msgs/msg/Float64MultiArray
+**`/forward_arm_joint_targets`** — `std_msgs/msg/Float64MultiArray`
 
-12 values
+- `12` values
+- `[left arm 6, right arm 6]`
 
-[left arm 6, right arm 6]
+**`/forward_hand_joint_targets`** — `std_msgs/msg/Float64MultiArray`
 
-/forward_hand_joint_targets — std_msgs/msg/Float64MultiArray
+Supported lengths:
 
-30 values = left15 + right15
+- `30` values = `left15 + right15`
+- `40` values = `left20 + right20`
 
-40 values = left20 + right20
+#### Inverse mode inputs
 
-Inverse mode inputs
+**`/target_arm_cartesian_pose`** — `std_msgs/msg/Float64MultiArray`
 
-/target_arm_cartesian_pose — std_msgs/msg/Float64MultiArray
+- `12` values
+- `[L x y z r p y, R x y z r p y]`
 
-12 values
+**`/delta_arm_cartesian_pose`** — `std_msgs/msg/Float64MultiArray`
 
-[L x y z r p y, R x y z r p y]
+- `12` values
+- `[L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]`
 
-/delta_arm_cartesian_pose — std_msgs/msg/Float64MultiArray
+**v22 / v24 behavior**
 
-12 values
+- delta is interpreted relative to the **latched initial pose**, not the continuously updated current pose
 
-[L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]
+**`/target_hand_fingertips`** — `std_msgs/msg/Float64MultiArray`
 
-v22/v24 behavior:
+- `30` values
+- per hand order = `THMB, INDX, MIDL, RING, BABY` (each `xyz`)
 
-delta is interpreted relative to the latched initial pose, not current pose
+**`/delta_hand_fingertips`** — `std_msgs/msg/Float64MultiArray`
 
-/target_hand_fingertips — std_msgs/msg/Float64MultiArray
+- `5` values
+- `[side, finger, dx, dy, dz]`
+- `side`: `0 = left`, `1 = right`
+- `finger`: `0 = thumb`, `1 = index`, `2 = middle`, `3 = ring`, `4 = baby`
 
-30 values
+#### Hand desired-force input (v24)
 
-per hand order = THMB, INDX, MIDL, RING, BABY (each xyz)
-
-/delta_hand_fingertips — std_msgs/msg/Float64MultiArray
-
-5 values
-
-[side, finger, dx, dy, dz]
-
-side: 0=left, 1=right
-
-finger: 0=thumb, 1=index, 2=middle, 3=ring, 4=baby
-
-Hand desired-force input (v24)
-
-/target_hand_force — std_msgs/msg/Float64MultiArray
+**`/target_hand_force`** — `std_msgs/msg/Float64MultiArray`
 
 Supported formats:
 
-compact v24 format
+**Compact v24 format**
 
-5 values
+- `5` values
+- `[side, finger, f_des_x, f_des_y, f_des_z]`
 
-[side, finger, f_des_x, f_des_y, f_des_z]
+**Legacy compatible format**
 
-legacy compatible format
+- `8` values
+- `[side, finger, p_des_x, p_des_y, p_des_z, f_des_x, f_des_y, f_des_z]`
 
-8 values
+**Important note**
 
-[side, finger, p_des_x, p_des_y, p_des_z, f_des_x, f_des_y, f_des_z]
+In v24, the legacy `p_des_*` part is ignored.
+Only the desired force is used.
 
-Important note:
+The fingertip target position is generated internally from:
 
-in v24, the legacy p_des_* part is ignored
+- current hand motion target
+- current hand mode (`forward` or `inverse`)
 
-only the desired force is used
+### 5.2 Publishers
 
-fingertip target position is generated internally from:
+**`/isaac_joint_command`** — `sensor_msgs/msg/JointState`
 
-current hand motion target
+- consolidated arm + hand command output
 
-current hand mode (forward or inverse)
+**`/hand_force_current_monitor`** — `std_msgs/msg/Float32MultiArray`
 
-5.2 Publishers
+- hand current force monitor topic
+- intended for plotting in `rqt_plot`
 
-/isaac_joint_command — sensor_msgs/msg/JointState
+**`/hand_force_target_monitor`** — `std_msgs/msg/Float32MultiArray`
 
-consolidated arm + hand command output
+- hand target force monitor topic
+- intended for plotting in `rqt_plot`
 
-/hand_force_current_monitor — std_msgs/msg/Float32MultiArray
+### 5.3 Service
 
-hand current force monitor topic
+**`/change_control_mode`** — `dualarm_forcecon_interfaces/srv/SetControlMode`
 
-intended for plotting in rqt_plot
+**Service request**
 
-/hand_force_target_monitor — std_msgs/msg/Float32MultiArray
-
-hand target force monitor topic
-
-intended for plotting in rqt_plot
-
-5.3 Service
-
-/change_control_mode — dualarm_forcecon_interfaces/srv/SetControlMode
-
-Service request:
-
+```text
 string arm_mode
 string hand_mode
+```
 
-Service response:
+**Service response**
 
+```text
 bool success
 string message
-6) Control Mode Change Commands (v24)
+```
+
+---
+
+## 6) Control Mode Change Commands (v24)
 
 This is one of the most important changes in v24.
 
-6.1 Service type check
+### 6.1 Service type check
+
+```bash
 ros2 service type /change_control_mode
+```
 
 Expected:
 
+```text
 dualarm_forcecon_interfaces/srv/SetControlMode
-6.2 Valid mode values
-Arm
+```
 
-idle
+### 6.2 Valid mode values
 
-forward
+**Arm**
 
-inverse
+- `idle`
+- `forward`
+- `inverse`
 
-Hand
+**Hand**
 
-idle
+- `idle`
+- `forward`
+- `inverse`
 
-forward
+### 6.3 Mode change command examples
 
-inverse
+#### A. Arm forward / Hand forward
 
-6.3 Mode change command examples
-A. Arm forward / Hand forward
+```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode "{arm_mode: 'forward', hand_mode: 'forward'}"
-B. Arm inverse / Hand inverse
+```
+
+#### B. Arm inverse / Hand inverse
+
+```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode "{arm_mode: 'inverse', hand_mode: 'inverse'}"
-C. Arm inverse / Hand forward
+```
+
+#### C. Arm inverse / Hand forward
+
+```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode "{arm_mode: 'inverse', hand_mode: 'forward'}"
-D. Arm forward / Hand inverse
+```
+
+#### D. Arm forward / Hand inverse
+
+```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode "{arm_mode: 'forward', hand_mode: 'inverse'}"
-E. Full idle
+```
+
+#### E. Full idle
+
+```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode "{arm_mode: 'idle', hand_mode: 'idle'}"
-6.4 Important v24 note
+```
 
-The following is no longer valid:
+### 6.4 Important v24 note
 
+The following is **no longer valid**:
+
+```text
 hand_mode: 'forcecon'
+```
 
 That mode was removed in v24.
 
-7) Coordinate / Frame Conventions
-7.1 Arm pose display
+---
 
-Arm pose in monitor uses project Isaac UI-matching Euler convention
+## 7) Coordinate / Frame Conventions
 
-world-base transform default:
+### 7.1 Arm pose display
 
-translation = [0.0, 0.0, 0.306]
+Arm pose in monitor uses the project Isaac UI-matching Euler convention.
 
-rotation = [0, 0, 0] deg unless parameterized
+Default world-base transform:
 
-7.2 Arm inverse input
+- translation = `[0.0, 0.0, 0.306]`
+- rotation = `[0, 0, 0] deg` unless parameterized
 
-controlled by:
+### 7.2 Arm inverse input
 
-ik_targets_frame_
+Controlled by:
 
-ik_euler_conv_
+- `ik_targets_frame_`
+- `ik_euler_conv_`
+- `ik_angle_unit_`
 
-ik_angle_unit_
-
-7.3 Hand pose display / command frame
+### 7.3 Hand pose display / command frame
 
 Hand fingertip positions are displayed in:
 
-LEFT_HAND_BASE
+- `LEFT_HAND_BASE`
+- `RIGHT_HAND_BASE`
 
-RIGHT_HAND_BASE
+Notes:
 
-Hand FK axis convention root fix is already integrated
+- hand FK axis convention root fix is already integrated
+- `HandPositionCallback()` uses corrected hand-base display convention
 
-HandPositionCallback() uses corrected hand-base display convention
+### 7.4 Hand fingertip order
 
-7.4 Hand fingertip order
+**Monitor print order**
 
-monitor print order:
-
+```text
 BABY -> RING -> MIDL -> INDX -> THMB
+```
 
-command order for /target_hand_fingertips (per hand):
+**Command order for `/target_hand_fingertips` (per hand)**
 
+```text
 THMB, INDX, MIDL, RING, BABY
+```
 
-7.5 Hand contact sensor ordering
+### 7.5 Hand contact sensor ordering
 
-observed sensor order per hand from Isaac:
+Observed sensor order per hand from Isaac:
 
+```text
 [BABY, RING, MIDL, INDX, THMB]
+```
 
-internal canonical storage:
+Internal canonical storage:
 
+```text
 THMB(0), INDX(1), MIDL(2), RING(3), BABY(4)
+```
 
-8) Current Baseline Behavior (v24)
-8.1 Arm
+---
 
-arm mode structure from v23 is preserved:
+## 8) Current Baseline Behavior (v24)
 
-idle / forward / inverse
+### 8.1 Arm
 
-delta arm command still uses:
+Arm mode structure from v23 is preserved:
 
-latched initial pose
+- `idle / forward / inverse`
 
-not continuously updated current pose
+Delta arm command still uses:
 
-8.2 Hand
+- **latched initial pose**
+- **not** continuously updated current pose
 
-hand mode is now:
+### 8.2 Hand
 
-idle / forward / inverse
+Hand mode is now:
 
-there is no separate forcecon mode
+- `idle / forward / inverse`
 
-force-aware correction happens only when:
+There is **no separate `forcecon` mode**.
 
-valid /target_hand_force is available
+Force-aware correction happens only when:
 
-contact is detected internally by admittance controller
+- valid `/target_hand_force` is available
+- contact is detected internally by the admittance controller
 
-8.3 Desired force path
+### 8.3 Desired force path
 
-current force:
+**Current force**
 
-comes from /isaac_contact_states
+- comes from `/isaac_contact_states`
+- converted into hand-base force vectors
 
-converted into hand-base force vectors
+**Desired force**
 
-desired force:
+- comes from `/target_hand_force`
+- target force monitor remains visible through:
+  - `/hand_force_target_monitor`
 
-comes from /target_hand_force
-
-target force monitor remains visible through:
-
-/hand_force_target_monitor
-
-8.4 Motion reference vs final command
+### 8.4 Motion reference vs final command
 
 Internally, v24 separates:
 
-motion reference target
-
-final joint command
+- motion reference target
+- final joint command
 
 This is the key design that makes contact-aware blending possible.
 
-9) Build / Run (v24)
-9.1 Build
+---
+
+## 9) Build / Run (v24)
+
+### 9.1 Build
+
+```bash
 cd ~/dualarm_ws
 colcon build --packages-select dualarm_forcecon_interfaces dualarm_forcecon
 source install/setup.bash
-9.2 Run node
+```
+
+### 9.2 Run node
+
+```bash
 ros2 run dualarm_forcecon dualarm_forcecon_node
-10) Example Commands by Mode
-10.1 Arm forward / Hand forward
-Change mode
+```
+
+---
+
+## 10) Example Commands by Mode
+
+### 10.1 Arm forward / Hand forward
+
+#### Change mode
+
+```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode "{arm_mode: 'forward', hand_mode: 'forward'}"
-Arm joint target
+```
+
+#### Arm joint target
+
+```bash
 ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [1.6419, -0.0058, -2.2344, 1.5607, 1.5936, -0.1104, -0.0459, 0.7361, 1.9809, 0.0, -1.1869, -0.7854]}"
-Hand joint target (30 values = left15 + right15)
+```
+
+#### Hand joint target (30 values = left15 + right15)
+
+```bash
 ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
 0.0,0.3948,0.3927, 0.0,0.0,0.0, 0.0,0.0,0.0, 0.0,-0.0400,0.7854, 0.0,0.0,0.0,
 0.0,0.3955,0.3840, 0.0,0.0,0.0, 0.0,0.0,0.0, 0.0,0.0,0.0, 0.0,0.0,0.0
 ]}"
-Hand desired force (compact v24 format)
+```
 
-Example: left hand, ring finger, desired force = (8, 0, 0)
+#### Hand desired force (compact v24 format)
 
+Example: left hand, ring finger, desired force = `(8, 0, 0)`
+
+```bash
 ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray "{data: [0, 3, 8.0, 0.0, 0.0]}"
-Hand desired force (legacy compatible format)
+```
+
+#### Hand desired force (legacy compatible format)
+
+```bash
 ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray "{data: [0, 3, 0.0133, -0.0331, 0.2384, 8.0, 0.0, 0.0]}"
-10.2 Arm inverse / Hand inverse
-Change mode
+```
+
+### 10.2 Arm inverse / Hand inverse
+
+#### Change mode
+
+```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode "{arm_mode: 'inverse', hand_mode: 'inverse'}"
-Arm Cartesian target
+```
+
+#### Arm Cartesian target
+
+```bash
 ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
 0.1001, 0.2666, -0.1263, 2.7370, 1.5062, -1.1601,
 0.5439, -0.3170, 0.1478, -3.0216, 1.5565, -1.6910
 ]}"
-Arm delta Cartesian target
+```
+
+#### Arm delta Cartesian target
+
+```bash
 ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
 0.020, -0.010, 0.015, 0.00, 0.00, 0.00,
 -0.020, 0.010, 0.015, 0.00, 0.00, 0.00
 ]}"
-Hand absolute fingertip target
+```
+
+#### Hand absolute fingertip target
+
+```bash
 ros2 topic pub --once /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
 0.1524,-0.0471,-0.1000, 0.2465,-0.0403,-0.0144, 0.2640,-0.0135,-0.0144, 0.2340,0.0133,-0.0444, 0.2310,0.0401,-0.0144,
 0.1522,0.0472,-0.1003, 0.2465,0.0403,-0.0144, 0.2640,0.0135,-0.0144, 0.2465,-0.0133,-0.0144, 0.2310,-0.0401,-0.0144
 ]}"
-Hand delta fingertip target
+```
+
+#### Hand delta fingertip target
+
+```bash
 ros2 topic pub --once /delta_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [0, 3, 0.005, 0.000, 0.000]}"
-Hand desired force during inverse mode
+```
 
-Example: right hand, index finger, desired force = (5, 0, 0)
+#### Hand desired force during inverse mode
 
+Example: right hand, index finger, desired force = `(5, 0, 0)`
+
+```bash
 ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray "{data: [1, 1, 5.0, 0.0, 0.0]}"
-10.3 Arm inverse / Hand forward
+```
+
+### 10.3 Arm inverse / Hand forward
 
 This is one of the most important teleoperation-like combinations.
 
-Change mode
+#### Change mode
+
+```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode "{arm_mode: 'inverse', hand_mode: 'forward'}"
-Arm Cartesian target
+```
+
+#### Arm Cartesian target
+
+```bash
 ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray "{data: [
 0.1001, 0.2666, -0.1263, 2.7370, 1.5062, -1.1601,
 0.5439, -0.3170, 0.1478, -3.0216, 1.5565, -1.6910
 ]}"
-Hand joint target
+```
+
+#### Hand joint target
+
+```bash
 ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray "{data: [
 0.0,0.3948,0.3927, 0.0,0.0,0.0, 0.0,0.0,0.0, 0.0,-0.0400,0.7854, 0.0,0.0,0.0,
 0.0,0.3955,0.3840, 0.0,0.0,0.0, 0.0,0.0,0.0, 0.0,0.0,0.0, 0.0,0.0,0.0
 ]}"
-Hand desired force
+```
+
+#### Hand desired force
 
 Example: left hand, ring finger
 
+```bash
 ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray "{data: [0, 3, 10.0, 0.0, 0.0]}"
+```
 
-This means:
+Meaning:
 
-arm is controlled in Cartesian inverse mode
+- arm is controlled in Cartesian inverse mode
+- hand posture comes from forward joint targets
+- if contact is detected, selected finger gets contact-aware correction internally
 
-hand posture comes from forward joint targets
+### 10.4 Arm forward / Hand inverse
 
-if contact is detected, selected finger gets contact-aware correction internally
+#### Change mode
 
-10.4 Arm forward / Hand inverse
-Change mode
+```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode "{arm_mode: 'forward', hand_mode: 'inverse'}"
-Arm joint target
+```
+
+#### Arm joint target
+
+```bash
 ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray "{data: [1.6419, -0.0058, -2.2344, 1.5607, 1.5936, -0.1104, -0.0459, 0.7361, 1.9809, 0.0, -1.1869, -0.7854]}"
-Hand Cartesian fingertip target
+```
+
+#### Hand Cartesian fingertip target
+
+```bash
 ros2 topic pub --once /target_hand_fingertips std_msgs/msg/Float64MultiArray "{data: [
 0.1524,-0.0471,-0.1000, 0.2465,-0.0403,-0.0144, 0.2640,-0.0135,-0.0144, 0.2340,0.0133,-0.0444, 0.2310,0.0401,-0.0144,
 0.1522,0.0472,-0.1003, 0.2465,0.0403,-0.0144, 0.2640,0.0135,-0.0144, 0.2465,-0.0133,-0.0144, 0.2310,-0.0401,-0.0144
 ]}"
-Hand desired force
+```
+
+#### Hand desired force
+
+```bash
 ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray "{data: [1, 0, 6.0, 0.0, 0.0]}"
-10.5 Full idle
-Change mode
+```
+
+### 10.5 Full idle
+
+#### Change mode
+
+```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode "{arm_mode: 'idle', hand_mode: 'idle'}"
+```
 
 Behavior:
 
-arm target syncs to current arm state
+- arm target syncs to current arm state
+- hand target syncs to current hand state
+- desired force target is cleared internally
 
-hand target syncs to current hand state
+---
 
-desired force target is cleared internally
+## 11) Important Notes for v24 Teleoperation Use
 
-11) Important Notes for v24 Teleoperation Use
-11.1 Recommended role split
+### 11.1 Recommended role split
 
 For future teleoperation-like structure, the natural mapping is:
 
-arm:
+- **arm**
+  - Vive tracker
+  - `arm_mode = inverse`
 
-Vive tracker
+- **hand posture**
+  - Manus glove
+  - `hand_mode = forward`
 
-arm_mode = inverse
+- **hand force intent**
+  - human intent -> `/target_hand_force`
+  - contact-aware regulation handled internally
 
-hand posture:
-
-Manus glove
-
-hand_mode = forward
-
-hand force intent:
-
-human intent → /target_hand_force
-
-contact-aware regulation handled internally
-
-11.2 Why this is better than old forcecon mode
+### 11.2 Why this is better than old `forcecon` mode
 
 Because v24 allows:
 
-motion command representation to remain clear
+- motion command representation to remain clear
+- contact-aware correction to be injected internally
+- no separate mode switching just for hand force regulation
 
-contact-aware correction to be injected internally
+This makes:
 
-no separate mode switching just for hand force regulation
+- mode policy simpler
+- teleoperation pipeline cleaner
+- motion/force blending more natural
 
-That makes:
+---
 
-mode policy simpler
-
-teleoperation pipeline cleaner
-
-motion/force blending more natural
-
-12) Current Baseline Conclusion
+## 12) Current Baseline Conclusion
 
 The essential meaning of v24 is:
 
-arm / hand split mode service from v23 is preserved
-
-hand forcecon mode is removed
-
-hand modes are now only:
-
-idle / forward / inverse
-
-hand force regulation is no longer a standalone mode
-
-it is now an internal contact-aware admittance branch inside hand forward / inverse
-
-/target_hand_force is now interpreted as a desired-force reference input, not a separate control mode trigger
+- arm/hand split mode service from v23 is preserved
+- hand `forcecon` mode is removed
+- hand modes are now only:
+  - `idle / forward / inverse`
+- hand force regulation is no longer a standalone mode
+- it is now an internal contact-aware admittance branch inside hand `forward` / `inverse`
+- `/target_hand_force` is now interpreted as a desired-force reference input, not a separate control mode trigger
 
 In short:
 
-hand mode
-=
-motion representation
-hand mode=motion representation
-contact state
-=
-force-aware internal branch
-contact state=force-aware internal branch
+```text
+hand mode      = motion representation
+contact state  = force-aware internal branch
+```
 
 This v24 structure is the new baseline.
