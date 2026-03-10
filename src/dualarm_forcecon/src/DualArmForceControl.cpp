@@ -133,7 +133,6 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     ik_euler_conv_    = node_->declare_parameter<std::string>("ik_euler_conv", "rpy");
     ik_angle_unit_    = node_->declare_parameter<std::string>("ik_angle_unit", "rad");
 
-    // cfg yaml path
     const std::string cfg_yaml_path = node_->declare_parameter<std::string>(
         "forcecon_cfg_yaml",
         "/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml"
@@ -193,7 +192,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     hand_force_target_monitor_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
         "/hand_force_target_monitor", 10);
 
-    mode_service_ = node_->create_service<std_srvs::srv::Trigger>(
+    mode_service_ = node_->create_service<dualarm_forcecon_interfaces::srv::SetControlMode>(
         "/change_control_mode",
         std::bind(&DualArmForceControl::ControlModeCallback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -202,6 +201,9 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     q_l_c_.setZero(6); q_r_c_.setZero(6); q_l_t_.setZero(6); q_r_t_.setZero(6);
     q_l_h_c_.setZero(20); q_r_h_c_.setZero(20); q_l_h_t_.setZero(20); q_r_h_t_.setZero(20);
+
+    f_l_c_.setZero(); f_r_c_.setZero();
+    f_l_t_.setZero(); f_r_t_.setZero();
 
     f_l_hand_c_.setZero(); f_r_hand_c_.setZero();
     f_l_hand_t_.setZero(); f_r_hand_t_.setZero();
@@ -222,13 +224,17 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     hand_force_cmd_f_des_base_.setZero();
     hand_force_cmd_stamp_ns_ = 0;
 
-    // forcecon hold snapshot init
     q_l_arm_forcecon_hold_.setZero(6);
     q_r_arm_forcecon_hold_.setZero(6);
     q_l_hand_forcecon_hold_.setZero(20);
     q_r_hand_forcecon_hold_.setZero(20);
     forcecon_hold_snapshot_valid_ = false;
     forcecon_prev_cycle_ = false;
+
+    arm_idle_synced_ = false;
+    hand_idle_synced_ = false;
+
+    delta_arm_base_pose_initialized_ = false;
 
     // -------------------------
     // Kinematics
@@ -256,7 +262,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     hand_ik_r_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(urdf_path_, "right_hand_base_link", tips);
 
     // -------------------------
-    // Load YAML cfg (once) and build per-finger controllers
+    // Load YAML cfg
     // -------------------------
     YAML::Node root;
     try {
@@ -305,23 +311,39 @@ DualArmForceControl::~DualArmForceControl() {}
 void DualArmForceControl::ControlLoop() {
     if (!is_initialized_ || joint_names_.empty()) return;
 
-    if (current_control_mode_ == "idle" && !idle_synced_) {
-        q_l_t_   = q_l_c_;
-        q_r_t_   = q_r_c_;
-        q_l_h_t_ = q_l_h_c_;
-        q_r_h_t_ = q_r_h_c_;
-        idle_synced_ = true;
-    } else if (current_control_mode_ != "idle") {
-        idle_synced_ = false;
+    // ------------------------------------------------------------------------
+    // ARM idle sync
+    // ------------------------------------------------------------------------
+    if (current_arm_control_mode_ == "idle" && !arm_idle_synced_) {
+        q_l_t_ = q_l_c_;
+        q_r_t_ = q_r_c_;
+        arm_idle_synced_ = true;
+    } else if (current_arm_control_mode_ != "idle") {
+        arm_idle_synced_ = false;
     }
 
-    const bool in_forcecon = (current_control_mode_ == "forcecon");
+    // ------------------------------------------------------------------------
+    // HAND idle sync
+    // ------------------------------------------------------------------------
+    if (current_hand_control_mode_ == "idle" && !hand_idle_synced_) {
+        q_l_h_t_ = q_l_h_c_;
+        q_r_h_t_ = q_r_h_c_;
+        hand_idle_synced_ = true;
+    } else if (current_hand_control_mode_ != "idle") {
+        hand_idle_synced_ = false;
+    }
+
+    // ------------------------------------------------------------------------
+    // HAND forcecon transition handling
+    // ------------------------------------------------------------------------
+    const bool in_forcecon = (current_hand_control_mode_ == "forcecon");
     const bool entering_forcecon = ( in_forcecon && !forcecon_prev_cycle_);
     const bool leaving_forcecon  = (!in_forcecon &&  forcecon_prev_cycle_);
 
     if (entering_forcecon) {
         q_l_arm_forcecon_hold_  = q_l_c_;
         q_r_arm_forcecon_hold_  = q_r_c_;
+
         q_l_hand_forcecon_hold_ = q_l_h_c_;
         q_r_hand_forcecon_hold_ = q_r_h_c_;
 
@@ -353,7 +375,10 @@ void DualArmForceControl::ControlLoop() {
         }
     }
 
-    if (current_control_mode_ == "forcecon" && hand_force_cmd_valid_) {
+    // ------------------------------------------------------------------------
+    // HAND forcecon controller execution
+    // ------------------------------------------------------------------------
+    if (current_hand_control_mode_ == "forcecon" && hand_force_cmd_valid_) {
         const bool is_left = (hand_force_cmd_hand_id_ == 0);
         const int finger_id = hand_force_cmd_finger_id_;
 
@@ -407,6 +432,9 @@ void DualArmForceControl::ControlLoop() {
         }
     }
 
+    // ------------------------------------------------------------------------
+    // Publish consolidated joint command
+    // ------------------------------------------------------------------------
     sensor_msgs::msg::JointState cmd;
     cmd.header.stamp = node_->now();
     cmd.name = joint_names_;

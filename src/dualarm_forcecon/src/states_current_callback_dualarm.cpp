@@ -7,7 +7,7 @@
 #include <array>
 #include <algorithm>
 #include <cctype>
-#include <mutex>   // 추가
+#include <mutex>
 
 namespace {
 // hand force debug cache (canonical row order: THMB, INDX, MIDL, RING, BABY)
@@ -76,18 +76,14 @@ void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::S
 }
 
 // --------------------
-// ArmPositionCallback (v22 patch: output stabilization / deadband
-// + latch initial base pose for DeltaArmPositionCallback)
+// ArmPositionCallback
 // --------------------
 void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
     (void)msg;
     if (!is_initialized_) return;
     if (!arm_fk_) return;
 
-    // ---- tuning (display stability) ----
-    // position deadband: 1 um
     constexpr double kPosDeadbandM = 1e-6;
-    // quaternion "same" threshold (component-wise max diff after hemisphere alignment)
     constexpr double kQuatDeadband = 1e-9;
 
     auto normalize_quat_msg = [](geometry_msgs::msg::Pose& p) {
@@ -121,7 +117,7 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
         q.normalize();
         qr.normalize();
         if (q.dot(qr) < 0.0) {
-            q.coeffs() *= -1.0; // keep hemisphere consistent
+            q.coeffs() *= -1.0;
         }
         p.orientation.x = q.x();
         p.orientation.y = q.y();
@@ -144,12 +140,10 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
         normalize_quat_msg(cand);
         quat_align_to_ref(cand, dst);
 
-        // position (axis-wise sticky deadband)
         if (std::fabs(cand.position.x - dst.position.x) >= kPosDeadbandM) dst.position.x = cand.position.x;
         if (std::fabs(cand.position.y - dst.position.y) >= kPosDeadbandM) dst.position.y = cand.position.y;
         if (std::fabs(cand.position.z - dst.position.z) >= kPosDeadbandM) dst.position.z = cand.position.z;
 
-        // orientation (update whole quaternion only if change is meaningful)
         const double dx = std::fabs(cand.orientation.x - dst.orientation.x);
         const double dy = std::fabs(cand.orientation.y - dst.orientation.y);
         const double dz = std::fabs(cand.orientation.z - dst.orientation.z);
@@ -162,13 +156,11 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
         }
     };
 
-    // static caches (callback-local; no header change required)
     static bool s_cur_l_init = false;
     static bool s_cur_r_init = false;
     static bool s_tar_l_init = false;
     static bool s_tar_r_init = false;
 
-    // ---------------- current pose (from q_c_) ----------------
     std::vector<double> jl(6), jr(6);
     for (int i = 0; i < 6; ++i) {
         jl[i] = q_l_c_(i);
@@ -181,8 +173,6 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
     apply_pose_deadband(current_pose_l_, cur_l_fk, s_cur_l_init);
     apply_pose_deadband(current_pose_r_, cur_r_fk, s_cur_r_init);
 
-    // ---------------- v22: latch initial base pose for delta-arm command ----------------
-    // 노드 실행 후 current pose가 처음 유효해졌을 때 1회만 저장
     if (!delta_arm_base_pose_initialized_ && s_cur_l_init && s_cur_r_init) {
         delta_arm_base_pose_l_ = current_pose_l_;
         delta_arm_base_pose_r_ = current_pose_r_;
@@ -201,16 +191,13 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
         );
     }
 
-    // ---------------- target pose (mode-dependent) ----------------
-    if (current_control_mode_ == "idle") {
-        // idle에서는 target을 current에 hard sync (표시 흔들림 최소화)
+    if (current_arm_control_mode_ == "idle") {
         target_pose_l_ = current_pose_l_;
         target_pose_r_ = current_pose_r_;
-
         s_tar_l_init = true;
         s_tar_r_init = true;
     }
-    else if (current_control_mode_ == "forward") {
+    else if (current_arm_control_mode_ == "forward") {
         std::vector<double> jl_t(6), jr_t(6);
         for (int i = 0; i < 6; ++i) {
             jl_t[i] = q_l_t_(i);
@@ -223,11 +210,11 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
         apply_pose_deadband(target_pose_l_, tar_l_fk, s_tar_l_init);
         apply_pose_deadband(target_pose_r_, tar_r_fk, s_tar_r_init);
     }
-    // inverse 모드에서는 target_pose_* 는 TargetArmPositionCallback / DeltaArmPositionCallback 이 관리
+    // arm inverse 모드에서는 target_pose_* 를 TargetArmPositionCallback / DeltaArmPositionCallback 이 관리
 }
 
 // --------------------
-// HandPositionCallback (v16 minor patch: fingertip output stabilization / deadband)
+// HandPositionCallback
 // --------------------
 void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
 {
@@ -235,8 +222,6 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     if (!is_initialized_) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
 
-    // ---- tuning (display stability) ----
-    // fingertip position deadband: 1 um
     constexpr double kFingerPosDeadbandM = 1e-6;
 
     auto safe_get = [&](const std::vector<Eigen::Vector3d>& v, int idx) -> Eigen::Vector3d {
@@ -269,7 +254,6 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
         if (std::fabs(src.z() - dst.z) >= kFingerPosDeadbandM) dst.z = src.z();
     };
 
-    // v12: 20DoF(표현) -> 15DoF(독립) 압축
     auto compress20to15 = [&](const Eigen::VectorXd& qh) -> std::vector<double> {
         std::vector<double> h15(15, 0.0);
 
@@ -280,36 +264,30 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
                 h15[b15 + 0] = qh(b20 + 0);
                 h15[b15 + 1] = qh(b20 + 1);
                 h15[b15 + 2] = qh(b20 + 2);
-                // qh(b20+3)는 mimic으로 간주하여 무시
             }
             return h15;
         }
 
-        // 혹시 이미 15DoF 저장 구조로 바뀐 경우도 호환
         const int n = std::min<int>(qh.size(), 15);
         for (int i = 0; i < n; ++i) h15[i] = qh(i);
         return h15;
     };
 
-    // static caches (callback-local; no header change required)
     static bool s_l_cur_init[5] = {false, false, false, false, false};
     static bool s_r_cur_init[5] = {false, false, false, false, false};
     static bool s_l_tar_init[5] = {false, false, false, false, false};
     static bool s_r_tar_init[5] = {false, false, false, false, false};
 
-    // 현재/타겟 손 관절을 15DoF independent로 변환
     const std::vector<double> hl15   = compress20to15(q_l_h_c_);
     const std::vector<double> hr15   = compress20to15(q_r_h_c_);
     const std::vector<double> hl_t15 = compress20to15(q_l_h_t_);
     const std::vector<double> hr_t15 = compress20to15(q_r_h_t_);
 
-    // Fingertip FK (order: thumb,index,middle,ring,baby)
     const std::vector<Eigen::Vector3d> tl   = hand_fk_l_->computeFingertips(hl15);
     const std::vector<Eigen::Vector3d> tr   = hand_fk_r_->computeFingertips(hr15);
     const std::vector<Eigen::Vector3d> tl_t = hand_fk_l_->computeFingertips(hl_t15);
     const std::vector<Eigen::Vector3d> tr_t = hand_fk_r_->computeFingertips(hr_t15);
 
-    // ---------------- current fingertip (thumb,index,middle,ring,baby) ----------------
     apply_point_deadband(f_l_thumb_,  safe_get(tl, 0), s_l_cur_init[0]);
     apply_point_deadband(f_l_index_,  safe_get(tl, 1), s_l_cur_init[1]);
     apply_point_deadband(f_l_middle_, safe_get(tl, 2), s_l_cur_init[2]);
@@ -322,9 +300,7 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     apply_point_deadband(f_r_ring_,   safe_get(tr, 3), s_r_cur_init[3]);
     apply_point_deadband(f_r_baby_,   safe_get(tr, 4), s_r_cur_init[4]);
 
-    // ---------------- target fingertip (monitor TAR line) ----------------
-    if (current_control_mode_ == "idle") {
-        // idle에서는 target = current (표시 안정화)
+    if (current_hand_control_mode_ == "idle") {
         t_f_l_thumb_  = f_l_thumb_;
         t_f_l_index_  = f_l_index_;
         t_f_l_middle_ = f_l_middle_;
@@ -356,28 +332,58 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     }
 }
 
-void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
-                                              std::shared_ptr<std_srvs::srv::Trigger::Response> res)
+void DualArmForceControl::ControlModeCallback(
+    const std::shared_ptr<dualarm_forcecon_interfaces::srv::SetControlMode::Request> req,
+    std::shared_ptr<dualarm_forcecon_interfaces::srv::SetControlMode::Response> res)
 {
-    (void)req;
-
-    const std::string prev_mode = current_control_mode_;
-
-    // mode cycle
-    if (current_control_mode_ == "idle") {
-        current_control_mode_ = "forward";
-    } else if (current_control_mode_ == "forward") {
-        current_control_mode_ = "inverse";
-    } else if (current_control_mode_ == "inverse") {
-        current_control_mode_ = "forcecon";
-    } else {
-        current_control_mode_ = "idle";
+    if (!req) {
+        res->success = false;
+        res->message = "Null request";
+        return;
     }
 
-    const bool entering_forcecon = (prev_mode != "forcecon" && current_control_mode_ == "forcecon");
-    const bool leaving_forcecon  = (prev_mode == "forcecon" && current_control_mode_ != "forcecon");
+    auto to_lower = [](std::string s) -> std::string {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+        return s;
+    };
 
-    // helper: reset all per-finger hand admittance states
+    const std::string prev_arm_mode  = current_arm_control_mode_;
+    const std::string prev_hand_mode = current_hand_control_mode_;
+
+    const std::string new_arm_mode  = to_lower(req->arm_mode);
+    const std::string new_hand_mode = to_lower(req->hand_mode);
+
+    auto valid_arm_mode = [](const std::string& m) -> bool {
+        return (m == "idle" || m == "forward" || m == "inverse");
+    };
+
+    auto valid_hand_mode = [](const std::string& m) -> bool {
+        return (m == "idle" || m == "forward" || m == "inverse" || m == "forcecon");
+    };
+
+    if (!valid_arm_mode(new_arm_mode)) {
+        res->success = false;
+        res->message = "Invalid arm_mode: " + req->arm_mode +
+                       " (allowed: idle, forward, inverse)";
+        return;
+    }
+
+    if (!valid_hand_mode(new_hand_mode)) {
+        res->success = false;
+        res->message = "Invalid hand_mode: " + req->hand_mode +
+                       " (allowed: idle, forward, inverse, forcecon)";
+        return;
+    }
+
+    current_arm_control_mode_  = new_arm_mode;
+    current_hand_control_mode_ = new_hand_mode;
+
+    const bool entering_hand_forcecon =
+        (prev_hand_mode != "forcecon" && current_hand_control_mode_ == "forcecon");
+    const bool leaving_hand_forcecon =
+        (prev_hand_mode == "forcecon" && current_hand_control_mode_ != "forcecon");
+
     auto reset_all_hand_adm = [&]() {
         for (int f = 0; f < 5; ++f) {
             if (hand_adm_l_[f]) hand_adm_l_[f]->resetState();
@@ -385,7 +391,6 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
         }
     };
 
-    // helper: clear latched forcecon command
     auto clear_forcecon_latch = [&]() {
         hand_force_cmd_valid_ = false;
         hand_force_cmd_hand_id_ = 0;
@@ -395,25 +400,35 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
         hand_force_cmd_stamp_ns_ = 0;
     };
 
-    // idle 진입 시 다음 ControlLoop에서 1회 sync 하도록
-    if (current_control_mode_ == "idle") {
-        idle_synced_ = false;
-    }
+    // ------------------------------------------------------------------------
+    // ARM mode handling
+    // ------------------------------------------------------------------------
+    arm_idle_synced_ = false;
 
-    // inverse / forcecon 진입 시 즉시 현재값으로 target sync
-    if (current_control_mode_ == "inverse" || current_control_mode_ == "forcecon") {
+    if (current_arm_control_mode_ == "inverse") {
         for (int i = 0; i < 6; ++i) {
             q_l_t_(i) = q_l_c_(i);
             q_r_t_(i) = q_r_c_(i);
         }
+
+        target_pose_l_ = current_pose_l_;
+        target_pose_r_ = current_pose_r_;
+    }
+
+    f_l_t_.setZero();
+    f_r_t_.setZero();
+
+    // ------------------------------------------------------------------------
+    // HAND mode handling
+    // ------------------------------------------------------------------------
+    hand_idle_synced_ = false;
+
+    if (current_hand_control_mode_ == "inverse" ||
+        current_hand_control_mode_ == "forcecon") {
         for (int i = 0; i < 20; ++i) {
             q_l_h_t_(i) = q_l_h_c_(i);
             q_r_h_t_(i) = q_r_h_c_(i);
         }
-
-        // monitor pose/fingertip target도 현재 상태로 시작
-        target_pose_l_ = current_pose_l_;
-        target_pose_r_ = current_pose_r_;
 
         t_f_l_thumb_  = f_l_thumb_;
         t_f_l_index_  = f_l_index_;
@@ -428,33 +443,29 @@ void DualArmForceControl::ControlModeCallback(const std::shared_ptr<std_srvs::sr
         t_f_r_baby_   = f_r_baby_;
     }
 
-    // arm force monitor target은 현재 미사용
-    f_l_t_.setZero();
-    f_r_t_.setZero();
-
-    // hand target force는 forcecon 외 모드에서 clear
-    if (current_control_mode_ == "idle" ||
-        current_control_mode_ == "forward" ||
-        current_control_mode_ == "inverse") {
+    if (current_hand_control_mode_ != "forcecon") {
         f_l_hand_t_.setZero();
         f_r_hand_t_.setZero();
     }
 
-    // v19 patch: forcecon mode transitions
-    if (entering_forcecon) {
+    if (entering_hand_forcecon) {
         clear_forcecon_latch();
         f_l_hand_t_.setZero();
-        f_r_hand_t_.setZero();   // stale TAR_F 방지
-        reset_all_hand_adm();    // 이전 접촉/anchor/offset 상태 제거
-    }
-
-    if (leaving_forcecon) {
-        clear_forcecon_latch();
+        f_r_hand_t_.setZero();
         reset_all_hand_adm();
     }
 
+    if (leaving_hand_forcecon) {
+        clear_forcecon_latch();
+        reset_all_hand_adm();
+        forcecon_hold_snapshot_valid_ = false;
+        forcecon_prev_cycle_ = false;
+    }
+
     res->success = true;
-    res->message = "Mode: " + current_control_mode_;
+    res->message =
+        "Arm mode: " + current_arm_control_mode_ +
+        ", Hand mode: " + current_hand_control_mode_;
 }
 
 void DualArmForceControl::HandContactForceCallback(
@@ -462,22 +473,13 @@ void DualArmForceControl::HandContactForceCallback(
 {
     if (!msg) return;
 
-    // ------------------------------------------------------------------------
-    // Reset CURRENT force buffers only
-    // IMPORTANT:
-    // - target force buffers(f_*_hand_t_)는 여기서 절대 건드리지 않음
-    // - sensor callback은 current measurement buffer(*_c_)만 갱신
-    // ------------------------------------------------------------------------
     auto reset_current_force_buffers_only = [&]() {
-        // arm force monitor (currently unused)
         f_l_c_.setZero();
         f_r_c_.setZero();
 
-        // hand current force (final monitor)
         f_l_hand_c_.setZero();
         f_r_hand_c_.setZero();
 
-        // debug buffers
         raw_l_hand_contact_.setZero();
         raw_r_hand_contact_.setZero();
         f_l_hand_sensor_c_.setZero();
@@ -487,7 +489,6 @@ void DualArmForceControl::HandContactForceCallback(
     };
     reset_current_force_buffers_only();
 
-    // Need 10 scalar values (5 left + 5 right)
     if (msg->data.size() < 10) {
         return;
     }
@@ -496,11 +497,6 @@ void DualArmForceControl::HandContactForceCallback(
         return;
     }
 
-    // ------------------------------------------------------------------------
-    // Helper: 20DoF (internal hand joint vector) -> 15DoF independent vector
-    // order(20): [thumb1..4, index1..4, middle1..4, ring1..4, baby1..4]
-    // order(15): [thumb1..3, index1..3, middle1..3, ring1..3, baby1..3]
-    // ------------------------------------------------------------------------
     auto compress20to15 = [](const Eigen::VectorXd& qh) -> std::vector<double> {
         std::vector<double> h15(15, 0.0);
 
@@ -520,10 +516,6 @@ void DualArmForceControl::HandContactForceCallback(
         return h15;
     };
 
-    // ------------------------------------------------------------------------
-    // Current hand joints -> fingertip rotation in wrist(hand-base) frame
-    // Returned order: [thumb, index, middle, ring, baby]
-    // ------------------------------------------------------------------------
     const std::vector<double> hl15 = compress20to15(q_l_h_c_);
     const std::vector<double> hr15 = compress20to15(q_r_h_c_);
 
@@ -535,69 +527,16 @@ void DualArmForceControl::HandContactForceCallback(
         return Rs[idx];
     };
 
-    // ------------------------------------------------------------------------
-    // [STEP 1] RAW scalar -> sensor-frame force vector
-    //
-    // Isaac scalar s is interpreted as +X component in sensor frame:
-    //   f_sensor = [s, 0, 0]
-    //
-    // (사용자 설정: 표면을 sensor -X로 누르면 측정값은 +X로 증가)
-    // ------------------------------------------------------------------------
-
-    // ------------------------------------------------------------------------
-    // [STEP 2-A] sensor frame -> tip frame (fixed mounting calibration)
-    //
-    // 현재 scalar-only 모델에서는 우선 Identity 유지
-    // (필요 시 추후 여기에서 센서 장착축 캘리브레이션)
-    // ------------------------------------------------------------------------
     const Eigen::Matrix3d R_tip_sensor = Eigen::Matrix3d::Identity();
 
-    // ------------------------------------------------------------------------
-    // [STEP 2-B] tip frame -> wrist(hand-base) frame (joint-angle dependent)
-    //
-    // f_wrist_raw = R_base_tip * f_tip
-    // ------------------------------------------------------------------------
-
-    // ------------------------------------------------------------------------
-    // [STEP 2-C] wrist/base output-axis calibration (FIXED ROTATION)
-    //
-    // 관측 증상:
-    // - 사진 자세에서 기존 WRS의 큰 -Fx 성분이 실제로는 +Fz로 해석되어야 함
-    //
-    // 따라서 wrist 출력축을 +Y축 기준 +90deg 회전시키는 보정 적용:
-    //   [x', y', z'] = [ z, y, -x ]
-    //
-    // 행렬 (Ry(+90deg)):
-    //   [ 0  0  1 ]
-    //   [ 0  1  0 ]
-    //   [-1  0  0 ]
-    //
-    // 효과:
-    // - 기존 큰 -fx  -> 큰 +fz 로 이동
-    // ------------------------------------------------------------------------
     Eigen::Matrix3d R_wrist_output_calib;
     R_wrist_output_calib <<  0.0, 0.0, 1.0,
                              0.0, 1.0, 0.0,
                             -1.0, 0.0, 0.0;
 
-    // ------------------------------------------------------------------------
-    // Message-index -> internal row mapping
-    // msg order per hand: [BABY, RING, MIDL, INDX, THMB]
-    // internal row order : [THMB, INDX, MIDL, RING, BABY]
-    // => BABY->4, RING->3, MIDL->2, INDX->1, THMB->0
-    // ------------------------------------------------------------------------
     const std::array<int,5> msg_to_row = {4, 3, 2, 1, 0};
-
-    // canonical row order names
     const std::array<const char*,5> finger_name = {{"THMB","INDX","MIDL","RING","BABY"}};
 
-    // ------------------------------------------------------------------------
-    // Convert one hand (5 scalars) into:
-    //   - RAW scalar
-    //   - SEN (sensor frame force vector)
-    //   - WRS (wrist/base frame force vector, rotated + calibrated)
-    // and store final current force to F_hand_cur
-    // ------------------------------------------------------------------------
     auto assign_one_hand = [&](Eigen::Matrix<double,5,1>& raw_contact_mat,
                                Eigen::Matrix<double,5,3>& F_sensor_mat,
                                Eigen::Matrix<double,5,3>& F_wrist_mat,
@@ -610,48 +549,32 @@ void DualArmForceControl::HandContactForceCallback(
         const bool do_dbg = ((dbg_decim++ % 20) == 0);
 
         for (int k = 0; k < 5; ++k) {
-            const int row = msg_to_row[k];   // internal canonical row index
+            const int row = msg_to_row[k];
             const double s = static_cast<double>(msg->data[msg_offset + k]);
 
-            // [1] RAW scalar store
             raw_contact_mat(row, 0) = s;
 
-            // [2] RAW -> sensor frame vector (SEN)
             const Eigen::Vector3d f_sensor(s, 0.0, 0.0);
             F_sensor_mat.row(row) = f_sensor.transpose();
 
-            // [3] sensor -> tip (fixed mounting calibration)
             const Eigen::Vector3d f_tip = R_tip_sensor * f_sensor;
-
-            // [4] tip -> wrist(base) (joint-angle dependent rotation)
             const Eigen::Matrix3d R_base_tip = safeR(R_base_tip_all, row);
             const Eigen::Vector3d f_wrist_raw = R_base_tip * f_tip;
-
-            // [5] wrist/base output-axis calibration (fixed rotation)
             Eigen::Vector3d f_wrist = R_wrist_output_calib * f_wrist_raw;
 
-            // tiny numerical cleanup
             for (int i = 0; i < 3; ++i) {
                 if (std::fabs(f_wrist(i)) < 1e-9) f_wrist(i) = 0.0;
             }
 
-            // store wrist/debug/final monitor
             F_wrist_mat.row(row) = f_wrist.transpose();
             F_hand_cur.row(row)  = f_wrist.transpose();
 
-            // optional debug print (contact present)
-            // if (do_dbg && std::fabs(s) > 1e-6) {
-            //     std::printf("[HandContactForceCb][%s] rotated wrist mapping (Ry +90deg calib)\n", hand_tag);
-            //     std::printf("  [%s] RAW=%7.3f | SEN=(%7.3f %7.3f %7.3f) | WRS=(%7.3f %7.3f %7.3f)\n",
-            //                 finger_name[row],
-            //                 s,
-            //                 f_sensor.x(), f_sensor.y(), f_sensor.z(),
-            //                 f_wrist.x(),  f_wrist.y(),  f_wrist.z());
-            // }
+            (void)do_dbg;
+            (void)finger_name;
+            (void)hand_tag;
         }
     };
 
-    // Left hand: msg[0..4]
     assign_one_hand(raw_l_hand_contact_,
                     f_l_hand_sensor_c_,
                     f_l_hand_wrist_c_,
@@ -660,7 +583,6 @@ void DualArmForceControl::HandContactForceCallback(
                     0,
                     "L");
 
-    // Right hand: msg[5..9]
     assign_one_hand(raw_r_hand_contact_,
                     f_r_hand_sensor_c_,
                     f_r_hand_wrist_c_,
@@ -668,10 +590,6 @@ void DualArmForceControl::HandContactForceCallback(
                     Rr_base_tip,
                     5,
                     "R");
-
-    // NOTE:
-    // - f_l_hand_t_ / f_r_hand_t_ 는 여기서 절대 건드리지 않음
-    // - desired target force는 TargetHandForceCallback 에서만 갱신
 }
 
 void DualArmForceControl::PublishHandForceMonitor()
@@ -681,10 +599,6 @@ void DualArmForceControl::PublishHandForceMonitor()
     std_msgs::msg::Float32MultiArray cur_msg;
     std_msgs::msg::Float32MultiArray tar_msg;
 
-    // layout:
-    // left  hand: thumb(x,y,z), index(x,y,z), middle(x,y,z), ring(x,y,z), baby(x,y,z) -> 15
-    // right hand: thumb(x,y,z), index(x,y,z), middle(x,y,z), ring(x,y,z), baby(x,y,z) -> 15
-    // total = 30
     cur_msg.data.resize(30, 0.0f);
     tar_msg.data.resize(30, 0.0f);
 
@@ -699,11 +613,9 @@ void DualArmForceControl::PublishHandForceMonitor()
         }
     };
 
-    // left = 0..14
     pack5x3(f_l_hand_c_, cur_msg.data, 0);
     pack5x3(f_l_hand_t_, tar_msg.data, 0);
 
-    // right = 15..29
     pack5x3(f_r_hand_c_, cur_msg.data, 15);
     pack5x3(f_r_hand_t_, tar_msg.data, 15);
 
@@ -711,14 +623,8 @@ void DualArmForceControl::PublishHandForceMonitor()
     hand_force_target_monitor_pub_->publish(tar_msg);
 }
 
-
-
 // ============================================================================
-// PrintDualArmStates (v18, compact view: CUR/TAR only)
-// - Finger print order: BABY -> RING -> MIDL -> INDX -> THMB
-// - Hand force row mapping (canonical): THMB=0, INDX=1, MIDL=2, RING=3, BABY=4
-// - CUR_F uses f_*_hand_c_ (currently WRS/wrist-base mapped force)
-// - TAR_F uses f_*_hand_t_
+// PrintDualArmStates
 // ============================================================================
 void DualArmForceControl::PrintDualArmStates() {
     if (!is_initialized_) return;
@@ -778,10 +684,7 @@ void DualArmForceControl::PrintDualArmStates() {
                                 const Eigen::RowVector3d& cur_f,
                                 const Eigen::RowVector3d& tar_f)
     {
-        // CUR line (WRS 기준 force가 f_*_hand_c_에 저장되어 있다고 가정)
         fmtFingerLine(name4, cur_p, cur_f, C_CUR_POS, C_CUR_F);
-
-        // TAR line
         fmtFingerLine(name4, tar_p, tar_f, C_TAR_POS, C_TAR_F);
         printf("\n");
     };
@@ -789,9 +692,10 @@ void DualArmForceControl::PrintDualArmStates() {
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v18 | Mode: [%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v22 | Arm:[%s%s%s] Hand:[%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
-           C_MODE, current_control_mode_.c_str(), C_RESET,
+           C_MODE, current_arm_control_mode_.c_str(), C_RESET,
+           C_MODE, current_hand_control_mode_.c_str(), C_RESET,
            C_CUR_POS, C_RESET,
            C_TAR_POS, C_RESET,
            C_CUR_F,   C_RESET,
@@ -799,9 +703,6 @@ void DualArmForceControl::PrintDualArmStates() {
            C_RESET);
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 
-    // ------------------------------------------------------------------------
-    // ARM (stored CUR_F / TAR_F)
-    // ------------------------------------------------------------------------
     printf("%s[L ARM]%s\n", C_TITLE, C_RESET);
     fmtArmLine("CUR", current_pose_l_, f_l_c_, C_CUR_POS, C_CUR_F);
     fmtArmLine("TAR", target_pose_l_,  f_l_t_, C_TAR_POS, C_TAR_F);
@@ -814,10 +715,6 @@ void DualArmForceControl::PrintDualArmStates() {
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
 
-    // ------------------------------------------------------------------------
-    // LEFT HAND (display order: BABY -> RING -> MIDL -> INDX -> THMB)
-    // Canonical row map: THMB=0, INDX=1, MIDL=2, RING=3, BABY=4
-    // ------------------------------------------------------------------------
     printf("%s[L HAND] (positions are expressed in LEFT_HAND_BASE frame)%s\n\n", C_TITLE, C_RESET);
 
     printFingerBlock("BABY",
@@ -842,9 +739,6 @@ void DualArmForceControl::PrintDualArmStates() {
 
     printf("%s------------------------------------------------------------------------------------------------------------%s\n", C_DIM, C_RESET);
 
-    // ------------------------------------------------------------------------
-    // RIGHT HAND (display order: BABY -> RING -> MIDL -> INDX -> THMB)
-    // ------------------------------------------------------------------------
     printf("%s[R HAND] (positions are expressed in RIGHT_HAND_BASE frame)%s\n\n", C_TITLE, C_RESET);
 
     printFingerBlock("BABY",

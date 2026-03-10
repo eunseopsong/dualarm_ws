@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.8)
 project(dualarm_forcecon)
 
+set(PYTHON_EXECUTABLE /usr/bin/python3)
+set(Python_EXECUTABLE /usr/bin/python3)
+set(Python3_EXECUTABLE /usr/bin/python3)
+
 # =========================
 # C++ standard
 # =========================
@@ -31,9 +35,9 @@ find_package(urdf REQUIRED)
 find_package(tf2_kdl REQUIRED)
 
 find_package(pinocchio REQUIRED)
-
-# yaml-cpp (needed for YAML::LoadFile / YAML::Node::as<...>)
 find_package(yaml-cpp REQUIRED)
+
+find_package(dualarm_forcecon_interfaces REQUIRED)
 
 # =========================
 # Target
@@ -62,15 +66,20 @@ ament_target_dependencies(dualarm_forcecon_node
   urdf
   tf2_kdl
   pinocchio
+  dualarm_forcecon_interfaces
 )
 
+# =========================
 # Eigen / KDL
+# =========================
 target_link_libraries(dualarm_forcecon_node
   Eigen3::Eigen
   orocos-kdl
 )
 
-# Pinocchio: ament에는 "pinocchio"로, 링크는 target로
+# =========================
+# Pinocchio
+# =========================
 if(TARGET pinocchio::pinocchio)
   target_link_libraries(dualarm_forcecon_node pinocchio::pinocchio)
 elseif(DEFINED pinocchio_LIBRARIES)
@@ -81,9 +90,8 @@ elseif(DEFINED pinocchio_LIBRARIES)
 endif()
 
 # =========================
-# yaml-cpp LINK (핵심 패치)
+# yaml-cpp LINK
 # =========================
-# Ubuntu/ROS 환경마다 타겟 이름이 다를 수 있어서 3단계로 안전하게 처리
 if(TARGET yaml-cpp::yaml-cpp)
   target_link_libraries(dualarm_forcecon_node yaml-cpp::yaml-cpp)
 elseif(TARGET yaml-cpp)
@@ -104,9 +112,11 @@ install(TARGETS dualarm_forcecon_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# include/dualarm_forcecon/** -> install/include/dualarm_forcecon/**
 install(DIRECTORY include/${PROJECT_NAME}/
   DESTINATION include/${PROJECT_NAME}
 )
 
+# =========================
+# Export
+# =========================
 ament_package()

@@ -5,7 +5,7 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"   // /isaac_contact_states + monitor topics
 #include "std_msgs/msg/float64_multi_array.hpp"   // target topics
-#include "std_srvs/srv/trigger.hpp"
+#include "dualarm_forcecon_interfaces/srv/set_control_mode.hpp"
 
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/point.hpp>
@@ -50,12 +50,13 @@ public:
     // Measured contact force callback (Isaac)
     void HandContactForceCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
 
-    // Force-control command callback (forcecon mode)
+    // Force-control command callback (hand forcecon mode)
     // /target_hand_force : [hand_id, finger_id, px, py, pz, fx, fy, fz]
     void TargetHandForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
 
-    void ControlModeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
-                             std::shared_ptr<std_srvs::srv::Trigger::Response> res);
+    void ControlModeCallback(
+        const std::shared_ptr<dualarm_forcecon_interfaces::srv::SetControlMode::Request> req,
+        std::shared_ptr<dualarm_forcecon_interfaces::srv::SetControlMode::Response> res);
 
     // Main loop / monitor
     void ControlLoop();
@@ -70,11 +71,11 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_sub_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr position_sub_;
 
-    // Cartesian targets (inverse mode)
+    // Cartesian targets
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_pos_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_pos_sub_;
 
-    // Delta Cartesian targets (inverse mode)
+    // Delta Cartesian targets
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr delta_arm_pos_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr delta_hand_pos_sub_;
 
@@ -94,7 +95,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr hand_force_current_monitor_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr hand_force_target_monitor_pub_;
 
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr mode_service_;
+    rclcpp::Service<dualarm_forcecon_interfaces::srv::SetControlMode>::SharedPtr mode_service_;
 
     rclcpp::TimerBase::SharedPtr print_timer_;
     rclcpp::TimerBase::SharedPtr control_timer_;
@@ -109,10 +110,14 @@ private:
     std::string ik_angle_unit_    = "rad";
 
     // Mode / init
-    std::string current_control_mode_ = "idle";
+    std::string current_arm_control_mode_  = "idle";   // idle / forward / inverse
+    std::string current_hand_control_mode_ = "idle";   // idle / forward / inverse / forcecon
+
     std::vector<std::string> joint_names_;
     bool is_initialized_ = false;
-    bool idle_synced_ = false;
+
+    bool arm_idle_synced_  = false;
+    bool hand_idle_synced_ = false;
 
     // Joint states
     Eigen::VectorXd q_l_c_, q_r_c_, q_l_t_, q_r_t_;          // arm 6DoF
@@ -129,7 +134,7 @@ private:
     Eigen::Matrix<double,5,3> f_r_hand_t_;
 
     // ------------------------------------------------------------------------
-    // v19 patch: latched forcecon command (callback stores, ControlLoop executes)
+    // latched forcecon command (callback stores, ControlLoop executes)
     // ------------------------------------------------------------------------
     bool hand_force_cmd_valid_{false};
     int  hand_force_cmd_hand_id_{0};     // 0=left, 1=right
@@ -139,7 +144,7 @@ private:
     int64_t hand_force_cmd_stamp_ns_{0};
 
     // ------------------------------------------------------------------------
-    // v19.1 patch: forcecon hold snapshot (freeze arm/wrist at forcecon entry)
+    // forcecon hold snapshot (freeze arm/wrist at forcecon entry)
     // ------------------------------------------------------------------------
     Eigen::VectorXd q_l_arm_forcecon_hold_;   // size 6
     Eigen::VectorXd q_r_arm_forcecon_hold_;   // size 6
@@ -150,7 +155,7 @@ private:
     bool forcecon_prev_cycle_{false};
 
     // ------------------------------------------------------------------------
-    // v22 patch: delta-arm command base pose latch
+    // delta-arm command base pose latch
     // - latched once from current_pose_l_/r_ after node start
     // - DeltaArmPositionCallback uses:
     //     target = latched_base_pose + delta

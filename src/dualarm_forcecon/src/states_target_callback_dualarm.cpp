@@ -18,16 +18,12 @@
 void DualArmForceControl::TargetArmPositionCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (current_control_mode_ != "inverse") return;
+    if (current_arm_control_mode_ != "inverse") return;
     if (!msg || msg->data.size() < 12) return;
     if (!arm_ik_l_ || !arm_ik_r_) return;
 
-    // ROS logger (DualArmForceControl는 Node 상속이 아닐 수 있으므로 node_ 사용)
     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
 
-    // -----------------------------
-    // [A] 입력 파싱 (RAW command)
-    // -----------------------------
     std::array<double,3> l_xyz_raw{msg->data[0], msg->data[1], msg->data[2]};
     std::array<double,3> l_eul    {msg->data[3], msg->data[4], msg->data[5]};
     std::array<double,3> r_xyz_raw{msg->data[6], msg->data[7], msg->data[8]};
@@ -42,19 +38,8 @@ void DualArmForceControl::TargetArmPositionCallback(
         return;
     }
 
-    // -----------------------------
-    // [B] frame / z-offset 처리
-    // -----------------------------
-    // 현재 패치:
-    // /target_arm_cartesian_pose 입력은 base frame 기준으로 사용한다.
-    // 따라서 world->base z offset 보정을 적용하지 않는다.
-    //
-    // (나중에 world frame 입력으로 다시 바꾸고 싶으면 true로 변경)
     constexpr bool kInputPoseIsWorldFrame = false;
-
-    // TODO: 네 프로젝트에서 실제 offset 멤버명이 있다면 아래 상수 대신 그 멤버로 교체
-    // 예) const double z_offset = world_base_z_offset_; / base_z_offset_ / ...
-    constexpr double z_offset = 0.306;  // [m] dualarm_forcecon baseline default (memory 기준)
+    constexpr double z_offset = 0.306;
 
     auto toLower = [](std::string s) {
         for (auto &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -71,7 +56,6 @@ void DualArmForceControl::TargetArmPositionCallback(
     bool l_offset_applied = false;
     bool r_offset_applied = false;
 
-    // 입력이 world이고 IK가 base를 기대할 때만 z offset 1회 적용
     if (kInputPoseIsWorldFrame && ik_expects_base) {
         l_xyz_ik[2] -= z_offset;
         r_xyz_ik[2] -= z_offset;
@@ -79,18 +63,12 @@ void DualArmForceControl::TargetArmPositionCallback(
         r_offset_applied = true;
     }
 
-    // -----------------------------
-    // [C] 현재 joint seed 준비
-    // -----------------------------
     std::vector<double> ql(6), qr(6);
     for (int i = 0; i < 6; ++i) {
         ql[i] = q_l_c_(i);
         qr[i] = q_r_c_(i);
     }
 
-    // -----------------------------
-    // [D] IK solve
-    // -----------------------------
     std::vector<double> rl, rr;
     bool l_ok = arm_ik_l_->solveIK(
         ql, l_xyz_ik, l_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rl);
@@ -112,10 +90,6 @@ void DualArmForceControl::TargetArmPositionCallback(
                     static_cast<int>(r_ok), rr.size());
     }
 
-    // -----------------------------
-    // [E] 모니터용 target pose 저장 (RAW 입력값 기준)
-    //     => UI에서 사용자가 보낸 값 그대로 표시되게 유지
-    // -----------------------------
     target_pose_l_.position.x = l_xyz_raw[0];
     target_pose_l_.position.y = l_xyz_raw[1];
     target_pose_l_.position.z = l_xyz_raw[2];
@@ -124,7 +98,6 @@ void DualArmForceControl::TargetArmPositionCallback(
     target_pose_r_.position.y = r_xyz_raw[1];
     target_pose_r_.position.z = r_xyz_raw[2];
 
-    // Euler -> Quaternion (표시용; IK 규칙과 최대한 맞춤)
     auto eulToQuat = [&](double ex, double ey, double ez) {
         double a0 = ex, a1 = ey, a2 = ez;
         if (ik_angle_unit_ == "deg") {
@@ -141,7 +114,7 @@ void DualArmForceControl::TargetArmPositionCallback(
         const std::string conv = toLower(ik_euler_conv_);
 
         if (conv == "zyx" || conv == "rzyx") q = Rz * Ry * Rx;
-        else                                 q = Rx * Ry * Rz;  // default
+        else                                 q = Rx * Ry * Rz;
 
         geometry_msgs::msg::Quaternion qq;
         qq.x = q.x();
@@ -154,15 +127,12 @@ void DualArmForceControl::TargetArmPositionCallback(
     target_pose_l_.orientation = eulToQuat(l_eul[0], l_eul[1], l_eul[2]);
     target_pose_r_.orientation = eulToQuat(r_eul[0], r_eul[1], r_eul[2]);
 
-    // -----------------------------
-    // [F] 디버그 로그 (과도한 스팸 방지: 20회당 1회)
-    // -----------------------------
     static int dbg_decim = 0;
     const bool do_dbg = ((dbg_decim++ % 20) == 0);
 
     if (do_dbg) {
         RCLCPP_INFO(logger,
-            "[TargetArmPosCb] mode=inverse frame=%s euler_conv=%s angle_unit=%s z_offset=%.4f input_is_world=%d",
+            "[TargetArmPosCb] arm_mode=inverse frame=%s euler_conv=%s angle_unit=%s z_offset=%.4f input_is_world=%d",
             ik_targets_frame_.c_str(), ik_euler_conv_.c_str(), ik_angle_unit_.c_str(),
             z_offset, static_cast<int>(kInputPoseIsWorldFrame));
 
@@ -196,27 +166,17 @@ void DualArmForceControl::TargetArmPositionCallback(
 }
 
 // ============================================================================
-// v11: TargetHandPositionCallback (inverse hand IK, pos-only)
-// msg size:
-//   - 15: LEFT only  (thumb..baby each xyz)  -> right는 hold
-//   - 30: LEFT(0..14) + RIGHT(15..29)
-// order per hand = [thumb xyz, index xyz, middle xyz, ring xyz, baby xyz]
-// all positions expressed in each HAND_BASE frame (left_joint_6/right_joint_6)
+// TargetHandPositionCallback (inverse hand IK, pos-only)
 // ============================================================================
 void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (current_control_mode_ != "inverse") return;
+    if (current_hand_control_mode_ != "inverse") return;
     if (!msg) return;
     if (msg->data.size() < 30) return;
 
     if (!hand_ik_l_ || !hand_ik_r_) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
 
-    // ------------------------------------------------------------
-    // 1) Parse target fingertip positions (HAND_BASE frame)
-    //    order: thumb,index,middle,ring,baby
-    //    data: left(15) + right(15)
-    // ------------------------------------------------------------
     std::array<Eigen::Vector3d,5> tgt_l;
     std::array<Eigen::Vector3d,5> tgt_r;
 
@@ -229,10 +189,6 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
         tgt_r[i] = Eigen::Vector3d(msg->data[b + 0], msg->data[b + 1], msg->data[b + 2]);
     }
 
-    // ------------------------------------------------------------
-    // 2) Initial guess (prefer current target joints for continuity)
-    //    q_*_h_t_ / q_*_h_c_ are stored as 20DoF representation
-    // ------------------------------------------------------------
     auto eigen20_to_stdvec20 = [&](const Eigen::VectorXd& qh) -> std::vector<double> {
         std::vector<double> out(20, 0.0);
         const int n = std::min<int>(qh.size(), 20);
@@ -250,12 +206,9 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
     std::vector<double> qr_init20 = near_zero_norm(q_r_h_t_) ? eigen20_to_stdvec20(q_r_h_c_)
                                                              : eigen20_to_stdvec20(q_r_h_t_);
 
-    // ------------------------------------------------------------
-    // 3) IK options (v13: independent finger IK)
-    // ------------------------------------------------------------
     dualarm_forcecon::HandInverseKinematics::Options opt;
     opt.max_iters       = 80;
-    opt.tol_pos_m       = 5e-4;   // 0.5 mm 수준
+    opt.tol_pos_m       = 5e-4;
     opt.lambda          = 1e-2;
     opt.lambda_min      = 1e-5;
     opt.lambda_max      = 1.0;
@@ -266,13 +219,9 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
     opt.use_urdf_like_limits = true;
     opt.verbose         = false;
 
-    // 기본은 모두 활성
     opt.mask    = {{true, true, true, true, true}};
     opt.weights = {{1.0, 1.0, 1.0, 1.0, 1.0}};
 
-    // ------------------------------------------------------------
-    // 4) Solve hand IK (returns 20DoF representation, with q4=q3 mimic)
-    // ------------------------------------------------------------
     std::vector<double> ql_sol20, qr_sol20;
     const bool ok_l = hand_ik_l_->solveIKFingertips(ql_init20, tgt_l, ql_sol20, opt);
     const bool ok_r = hand_ik_r_->solveIKFingertips(qr_init20, tgt_r, qr_sol20, opt);
@@ -284,11 +233,6 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
         for (int i = 0; i < 20; ++i) q_r_h_t_(i) = qr_sol20[i];
     }
 
-    // ------------------------------------------------------------
-    // 5) Update target fingertip display
-    //    - 성공 시: solved joints로 FK한 실제 command tip 표시
-    //    - 실패 시: requested target 그대로 표시
-    // ------------------------------------------------------------
     auto assign_point = [&](geometry_msgs::msg::Point& p, const Eigen::Vector3d& v) {
         p.x = v.x();
         p.y = v.y();
@@ -330,36 +274,20 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
         assign_point(t_f_r_baby_,   tgt_r[4]);
     }
 
-    // (선택) 로그
     if (!ok_l || !ok_r) {
-        // 필요하면 throttle 로그로 바꿔도 됨
         RCLCPP_WARN(node_->get_logger(),
-                    "[HandIK v13] solve result: left=%d right=%d (partial update may be applied)",
+                    "[HandIK] solve result: left=%d right=%d (partial update may be applied)",
                     static_cast<int>(ok_l), static_cast<int>(ok_r));
     }
 }
 
 // ============================================================================
-// v22: DeltaArmPositionCallback (inverse arm IK, delta command w.r.t latched initial pose)
-// msg: 12 = [L dx dy dz d(rx) d(ry) d(rz), R dx dy dz d(rx) d(ry) d(rz)]
-//
-// 동작:
-//   absolute_target = latched_initial_pose + delta
-//   -> TargetArmPositionCallback() 재사용 (frame/z-offset/IK 로직 일원화)
-//
-// 기준 pose:
-//   - 노드 실행 후 current_pose_l_/r_ 가 처음 유효해졌을 때의 pose를 latch
-//   - 이후 delta command는 항상 그 latched pose 기준으로 해석
-//
-// 주의:
-// - position delta는 latched initial pose 기준
-// - orientation delta도 latched initial Euler 기준 (현재 설정 unit 기준)
-// - orientation은 단순 Euler component-wise add 방식
+// DeltaArmPositionCallback (inverse arm IK, delta command w.r.t latched initial pose)
 // ============================================================================
 void DualArmForceControl::DeltaArmPositionCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (current_control_mode_ != "inverse") return;
+    if (current_arm_control_mode_ != "inverse") return;
     if (!msg || msg->data.size() < 12) return;
     if (!arm_ik_l_ || !arm_ik_r_) return;
 
@@ -369,9 +297,6 @@ void DualArmForceControl::DeltaArmPositionCallback(
         return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
     };
 
-    // -----------------------------
-    // [A] delta 입력 파싱
-    // -----------------------------
     std::array<double,3> l_dxyz{msg->data[0],  msg->data[1],  msg->data[2]};
     std::array<double,3> l_deul{msg->data[3],  msg->data[4],  msg->data[5]};
     std::array<double,3> r_dxyz{msg->data[6],  msg->data[7],  msg->data[8]};
@@ -382,17 +307,11 @@ void DualArmForceControl::DeltaArmPositionCallback(
         return;
     }
 
-    // -----------------------------
-    // [B] latched base pose 준비 여부 확인
-    // -----------------------------
     if (!delta_arm_base_pose_initialized_) {
         RCLCPP_WARN(logger, "[DeltaArmPositionCallback] base pose is not initialized yet.");
         return;
     }
 
-    // -----------------------------
-    // [C] latched base position 읽기
-    // -----------------------------
     std::array<double,3> l_xyz_base{
         delta_arm_base_pose_l_.position.x,
         delta_arm_base_pose_l_.position.y,
@@ -404,10 +323,6 @@ void DualArmForceControl::DeltaArmPositionCallback(
         delta_arm_base_pose_r_.position.z
     };
 
-    // -----------------------------
-    // [D] latched base orientation 읽기
-    // quaternion -> Euler(XYZ, deg)
-    // -----------------------------
     double l_ex_deg = 0.0, l_ey_deg = 0.0, l_ez_deg = 0.0;
     double r_ex_deg = 0.0, r_ey_deg = 0.0, r_ez_deg = 0.0;
 
@@ -417,10 +332,7 @@ void DualArmForceControl::DeltaArmPositionCallback(
         delta_arm_base_pose_r_.orientation, r_ex_deg, r_ey_deg, r_ez_deg);
 
     auto deg_to_current_unit = [&](double deg_val)->double {
-        // TargetArmPositionCallback에서 angle_unit_ 해석을 다시 하므로
-        // 여기서는 "base Euler 표현값"을 delta와 같은 단위로 맞춰서 합산만 수행
         if (ik_angle_unit_ == "deg") return deg_val;
-        // rad / auto 는 rad 기준으로 합산
         return deg_val * M_PI / 180.0;
     };
 
@@ -435,39 +347,29 @@ void DualArmForceControl::DeltaArmPositionCallback(
         deg_to_current_unit(r_ez_deg)
     };
 
-    // -----------------------------
-    // [E] 절대 target 생성 = latched base + delta
-    // -----------------------------
     std_msgs::msg::Float64MultiArray abs_msg;
     abs_msg.data.resize(12);
 
-    // Left XYZ
     abs_msg.data[0] = l_xyz_base[0] + l_dxyz[0];
     abs_msg.data[1] = l_xyz_base[1] + l_dxyz[1];
     abs_msg.data[2] = l_xyz_base[2] + l_dxyz[2];
-    // Left Euler
     abs_msg.data[3] = l_eul_base[0] + l_deul[0];
     abs_msg.data[4] = l_eul_base[1] + l_deul[1];
     abs_msg.data[5] = l_eul_base[2] + l_deul[2];
 
-    // Right XYZ
     abs_msg.data[6]  = r_xyz_base[0] + r_dxyz[0];
     abs_msg.data[7]  = r_xyz_base[1] + r_dxyz[1];
     abs_msg.data[8]  = r_xyz_base[2] + r_dxyz[2];
-    // Right Euler
     abs_msg.data[9]  = r_eul_base[0] + r_deul[0];
     abs_msg.data[10] = r_eul_base[1] + r_deul[1];
     abs_msg.data[11] = r_eul_base[2] + r_deul[2];
 
-    // -----------------------------
-    // [F] 디버그 로그 (스팸 방지)
-    // -----------------------------
     static int dbg_decim = 0;
     const bool do_dbg = ((dbg_decim++ % 20) == 0);
 
     if (do_dbg) {
         RCLCPP_INFO(logger,
-            "[DeltaArmPosCb] angle_unit=%s euler_conv=%s | delta interpreted w.r.t latched initial pose",
+            "[DeltaArmPosCb] arm_mode=inverse angle_unit=%s euler_conv=%s | delta interpreted w.r.t latched initial pose",
             ik_angle_unit_.c_str(), ik_euler_conv_.c_str());
 
         RCLCPP_INFO(logger,
@@ -495,44 +397,23 @@ void DualArmForceControl::DeltaArmPositionCallback(
             abs_msg.data[9], abs_msg.data[10], abs_msg.data[11]);
     }
 
-    // -----------------------------
-    // [G] 기존 절대 target callback 재사용
-    // -----------------------------
     auto abs_msg_ptr = std::make_shared<std_msgs::msg::Float64MultiArray>(abs_msg);
     TargetArmPositionCallback(abs_msg_ptr);
 }
 
-
 // ============================================================================
 // DeltaHandPositionCallback (inverse hand IK, delta command for one fingertip)
-// msg: 5 = [side, finger, dx, dy, dz]
-//
-// side   : 0=left, 1=right
-// finger : 0=thumb, 1=index, 2=middle, 3=ring, 4=baby
-// dxyz   : fingertip delta in each HAND_BASE frame [m]
-//
-// 동작:
-//   absolute_target_fingertips = current_fingertips + delta(one selected finger)
-//   -> TargetHandPositionCallback() 재사용 (IK/모니터 업데이트 로직 일원화)
-//
-// 주의:
-// - delta는 각 손의 HAND_BASE frame 기준
-// - 현재 fingertip 위치는 f_* (CUR monitor) 값을 사용
-// - inverse 모드에서만 동작
 // ============================================================================
 void DualArmForceControl::DeltaHandPositionCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (current_control_mode_ != "inverse") return;
+    if (current_hand_control_mode_ != "inverse") return;
     if (!msg || msg->data.size() < 5) return;
     if (!hand_ik_l_ || !hand_ik_r_) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
 
     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
 
-    // -----------------------------
-    // [A] 입력 파싱
-    // -----------------------------
     const double side_d   = msg->data[0];
     const double finger_d = msg->data[1];
 
@@ -541,8 +422,8 @@ void DualArmForceControl::DeltaHandPositionCallback(
         return;
     }
 
-    const int side   = static_cast<int>(std::llround(side_d));    // 0=left, 1=right
-    const int finger = static_cast<int>(std::llround(finger_d));  // 0..4 canonical
+    const int side   = static_cast<int>(std::llround(side_d));
+    const int finger = static_cast<int>(std::llround(finger_d));
 
     if (!(side == 0 || side == 1)) {
         RCLCPP_WARN(logger, "[DeltaHandPositionCallback] invalid side=%d (use 0:left, 1:right)", side);
@@ -559,10 +440,6 @@ void DualArmForceControl::DeltaHandPositionCallback(
         return;
     }
 
-    // -----------------------------
-    // [B] 현재 fingertip 위치(CUR monitor) 읽기
-    // order per hand = [thumb, index, middle, ring, baby]
-    // -----------------------------
     auto point_to_vec3 = [](const geometry_msgs::msg::Point& p) -> Eigen::Vector3d {
         return Eigen::Vector3d(p.x, p.y, p.z);
     };
@@ -582,11 +459,6 @@ void DualArmForceControl::DeltaHandPositionCallback(
     cur_r[3] = point_to_vec3(f_r_ring_);
     cur_r[4] = point_to_vec3(f_r_baby_);
 
-    // -----------------------------
-    // [C] 절대 target 생성 = current + delta (선택 finger만)
-    //     TargetHandPositionCallback 포맷(30) 구성:
-    //     left(15) + right(15)
-    // -----------------------------
     std::array<Eigen::Vector3d,5> tgt_l = cur_l;
     std::array<Eigen::Vector3d,5> tgt_r = cur_r;
 
@@ -596,7 +468,6 @@ void DualArmForceControl::DeltaHandPositionCallback(
     std_msgs::msg::Float64MultiArray abs_msg;
     abs_msg.data.resize(30, 0.0);
 
-    // left hand (0..14)
     for (int i = 0; i < 5; ++i) {
         const int b = i * 3;
         abs_msg.data[b + 0] = tgt_l[i].x();
@@ -604,7 +475,6 @@ void DualArmForceControl::DeltaHandPositionCallback(
         abs_msg.data[b + 2] = tgt_l[i].z();
     }
 
-    // right hand (15..29)
     for (int i = 0; i < 5; ++i) {
         const int b = 15 + i * 3;
         abs_msg.data[b + 0] = tgt_r[i].x();
@@ -612,9 +482,6 @@ void DualArmForceControl::DeltaHandPositionCallback(
         abs_msg.data[b + 2] = tgt_r[i].z();
     }
 
-    // -----------------------------
-    // [D] 디버그 로그 (스팸 방지)
-    // -----------------------------
     static int dbg_decim = 0;
     const bool do_dbg = ((dbg_decim++ % 20) == 0);
 
@@ -625,7 +492,7 @@ void DualArmForceControl::DeltaHandPositionCallback(
                                                   : tgt_r[static_cast<size_t>(finger)];
 
         RCLCPP_INFO(logger,
-            "[DeltaHandPosCb] side=%s finger=%d | cur=(%.4f %.4f %.4f) + d=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
+            "[DeltaHandPosCb] hand_mode=inverse side=%s finger=%d | cur=(%.4f %.4f %.4f) + d=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
             (side == 0 ? "L" : "R"),
             finger,
             p_cur.x(), p_cur.y(), p_cur.z(),
@@ -633,22 +500,17 @@ void DualArmForceControl::DeltaHandPositionCallback(
             p_tgt.x(), p_tgt.y(), p_tgt.z());
     }
 
-    // -----------------------------
-    // [E] 기존 절대 target callback 재사용 (IK/표시 일관성 유지)
-    // -----------------------------
     auto abs_msg_ptr = std::make_shared<std_msgs::msg::Float64MultiArray>(abs_msg);
     TargetHandPositionCallback(abs_msg_ptr);
 }
 
 // --------------------
 // TargetArmJointsCallback (forward)
-// supports:
-//   - 12 : [L arm 6, R arm 6]
 // --------------------
 void DualArmForceControl::TargetArmJointsCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (current_control_mode_ != "forward") return;
+    if (current_arm_control_mode_ != "forward") return;
     if (!msg) return;
     if (msg->data.size() < 12) return;
 
@@ -660,33 +522,23 @@ void DualArmForceControl::TargetArmJointsCallback(
 
 // --------------------
 // TargetHandJointsCallback (forward)
-// supports:
-//   - 30 : hand15(left) + hand15(right)
-//   - 40 : hand20(left) + hand20(right)  (joint4 canonicalized to joint3)
-// legacy compatibility (optional):
-//   - 42 : arm12 + hand15 + hand15
-//   - 52 : arm12 + hand20 + hand20
 // --------------------
 void DualArmForceControl::TargetHandJointsCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (current_control_mode_ != "forward") return;
+    if (current_hand_control_mode_ != "forward") return;
     if (!msg) return;
 
     const size_t n = msg->data.size();
 
-    // Helper: finger-wise mimic enforce on 20DoF hand vector
-    // layout = [thumb1..4, index1..4, middle1..4, ring1..4, baby1..4]
     auto enforce_mimic_q4_eq_q3 = [&](Eigen::VectorXd& qh20) {
         if (qh20.size() < 20) return;
         for (int f = 0; f < 5; ++f) {
             const int b = f * 4;
-            qh20(b + 3) = qh20(b + 2);  // joint4 = joint3
+            qh20(b + 3) = qh20(b + 2);
         }
     };
 
-    // Helper: 15DoF -> 20DoF expand (joint4 = joint3)
-    // input order (15): [thumb1,2,3, index1,2,3, middle1,2,3, ring1,2,3, baby1,2,3]
     auto assign_hand15_to_qh20 = [&](Eigen::VectorXd& qh20, const size_t offset) {
         if (qh20.size() < 20) return;
         for (int f = 0; f < 5; ++f) {
@@ -696,68 +548,49 @@ void DualArmForceControl::TargetHandJointsCallback(
             qh20(b20 + 0) = msg->data[offset + b15 + 0];
             qh20(b20 + 1) = msg->data[offset + b15 + 1];
             qh20(b20 + 2) = msg->data[offset + b15 + 2];
-            qh20(b20 + 3) = msg->data[offset + b15 + 2]; // mimic
+            qh20(b20 + 3) = msg->data[offset + b15 + 2];
         }
     };
 
-    // Helper: 20DoF direct copy, then canonicalize q4=q3
     auto assign_hand20_to_qh20 = [&](Eigen::VectorXd& qh20, const size_t offset) {
         if (qh20.size() < 20) return;
         for (int i = 0; i < 20; ++i) qh20(i) = msg->data[offset + i];
         enforce_mimic_q4_eq_q3(qh20);
     };
 
-    // ----------------------------
-    // Preferred split formats
-    // ----------------------------
     if (n >= 40) {
-        // 40 = left20 + right20
         assign_hand20_to_qh20(q_l_h_t_, 0);
         assign_hand20_to_qh20(q_r_h_t_, 20);
         return;
     }
 
     if (n >= 30) {
-        // 30 = left15 + right15
         assign_hand15_to_qh20(q_l_h_t_, 0);
         assign_hand15_to_qh20(q_r_h_t_, 15);
         return;
     }
 
-    // ----------------------------
-    // Legacy compatibility (optional)
-    // ----------------------------
     if (n >= 52) {
-        // 12 + 20 + 20
         assign_hand20_to_qh20(q_l_h_t_, 12);
         assign_hand20_to_qh20(q_r_h_t_, 32);
         return;
     }
 
     if (n >= 42) {
-        // 12 + 15 + 15
         assign_hand15_to_qh20(q_l_h_t_, 12);
         assign_hand15_to_qh20(q_r_h_t_, 27);
         return;
     }
-
-    // else: invalid hand message size -> ignore
 }
 
 void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (current_control_mode_ != "forcecon") return;
+    if (current_hand_control_mode_ != "forcecon") return;
     if (!msg) return;
     if (msg->data.size() < 8) return;
 
     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
 
-    // ----------------------------------------------------------------------
-    // 0) Parse
-    // /target_hand_force : [hand_id, finger_id, px, py, pz, fx, fy, fz]
-    //   hand_id   : 0=left, 1=right
-    //   finger_id : 0..4 (thumb,index,middle,ring,baby)
-    // ----------------------------------------------------------------------
     const double hand_id_d   = msg->data[0];
     const double finger_id_d = msg->data[1];
 
@@ -766,8 +599,8 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
         return;
     }
 
-    const int hand_id   = static_cast<int>(std::llround(hand_id_d));     // 0=left, 1=right
-    const int finger_id = static_cast<int>(std::llround(finger_id_d));   // canonical 0..4
+    const int hand_id   = static_cast<int>(std::llround(hand_id_d));
+    const int finger_id = static_cast<int>(std::llround(finger_id_d));
 
     if (!(hand_id == 0 || hand_id == 1)) {
         RCLCPP_WARN(logger, "[TargetHandForceCallback] invalid hand_id=%d (use 0:left, 1:right)", hand_id);
@@ -788,35 +621,19 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
     }
 
     const bool is_left = (hand_id == 0);
-
-    // ----------------------------------------------------------------------
-    // 1) forcecon 세션 첫 명령이면 "hold target"을 현재 상태로 1회 고정
-    //
-    // 목적:
-    // - forcecon 중 손목/팔이 중력으로 조금 처진 현재값(q_c_)를
-    //   매 콜백마다 target(q_t_)로 따라가게 하지 않기 위함
-    // - 첫 명령 시점 기준으로 팔/다른 손가락은 hold
-    //
-    // 전제:
-    // - hand_force_cmd_valid_ 가 forcecon 세션 시작 시 false 이어야 함
-    //   (ControlModeCallback에서 리셋 권장)
-    // ----------------------------------------------------------------------
     const bool first_force_cmd_in_session = (!hand_force_cmd_valid_);
 
     if (first_force_cmd_in_session) {
-        // Arm target latch (중요: 이후 콜백에서는 다시 덮어쓰지 않음)
         const int n_la = std::min<int>(q_l_t_.size(), q_l_c_.size());
         const int n_ra = std::min<int>(q_r_t_.size(), q_r_c_.size());
         for (int i = 0; i < n_la; ++i) q_l_t_(i) = q_l_c_(i);
         for (int i = 0; i < n_ra; ++i) q_r_t_(i) = q_r_c_(i);
 
-        // Hand target latch (비대상 손가락/반대손 hold)
         const int n_lh = std::min<int>(q_l_h_t_.size(), q_l_h_c_.size());
         const int n_rh = std::min<int>(q_r_h_t_.size(), q_r_h_c_.size());
         for (int i = 0; i < n_lh; ++i) q_l_h_t_(i) = q_l_h_c_(i);
         for (int i = 0; i < n_rh; ++i) q_r_h_t_(i) = q_r_h_c_(i);
 
-        // 모니터 target pose/fingertip도 현재값으로 시작 (표시 안정화)
         target_pose_l_ = current_pose_l_;
         target_pose_r_ = current_pose_r_;
 
@@ -836,20 +653,12 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
             "[TargetHandForceCb] forcecon hold target latched (first cmd in session). arm/hand non-target joints fixed.");
     }
 
-    // ----------------------------------------------------------------------
-    // 2) Monitor target force update (TAR_F visible immediately)
-    //    policy: one active force command at a time -> clear both sides then set selected row
-    // ----------------------------------------------------------------------
     f_l_hand_t_.setZero();
     f_r_hand_t_.setZero();
 
     if (is_left) f_l_hand_t_.row(finger_id) = f_des_base.transpose();
     else         f_r_hand_t_.row(finger_id) = f_des_base.transpose();
 
-    // ----------------------------------------------------------------------
-    // 3) Monitor target fingertip position update (requested p_des shown immediately)
-    //    실제 p_cmd(제어기 출력)는 ControlLoop(forcecon)에서 계속 갱신 가능
-    // ----------------------------------------------------------------------
     auto setFingerTargetPoint = [&](bool left, int fid, const Eigen::Vector3d& p) {
         geometry_msgs::msg::Point pt;
         pt.x = p.x(); pt.y = p.y(); pt.z = p.z();
@@ -876,9 +685,6 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
     };
     setFingerTargetPoint(is_left, finger_id, p_des_base);
 
-    // ----------------------------------------------------------------------
-    // 4) Latch forcecon command (callback stores only; ControlLoop executes at 100Hz)
-    // ----------------------------------------------------------------------
     hand_force_cmd_valid_      = true;
     hand_force_cmd_hand_id_    = hand_id;
     hand_force_cmd_finger_id_  = finger_id;
@@ -886,19 +692,12 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
     hand_force_cmd_f_des_base_ = f_des_base;
     hand_force_cmd_stamp_ns_   = node_ ? node_->get_clock()->now().nanoseconds() : 0;
 
-    // ----------------------------------------------------------------------
-    // 5) Controller state reset when active finger changes (or first command)
-    //    - 다른 손가락/손으로 바뀔 때 앵커/오프셋 carry-over 방지
-    // ----------------------------------------------------------------------
     static int prev_key = -1;
     const int key = (is_left ? 0 : 5) + finger_id;
 
     if (first_force_cmd_in_session || key != prev_key) {
         auto& adm_arr = is_left ? hand_adm_l_ : hand_adm_r_;
         if (adm_arr[static_cast<size_t>(finger_id)]) {
-            // measured pose 기준으로 초기화하면 초기 점프 완화에 유리
-            // (hand FK가 ControlLoop에서 바로 갱신되므로 resetState()만 써도 되지만,
-            //  여기서는 current fingertip monitor 값을 이용해 조금 더 보수적으로 초기화)
             Eigen::Vector3d p_init = p_des_base;
             if (is_left) {
                 switch (finger_id) {
@@ -923,13 +722,10 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
         prev_key = key;
     }
 
-    // ----------------------------------------------------------------------
-    // 6) Decimated debug
-    // ----------------------------------------------------------------------
     static int dbg_decim = 0;
     if ((dbg_decim++ % 20) == 0) {
         RCLCPP_INFO(logger,
-            "[TargetHandForceCb][LATCH] side=%s finger=%d | first=%d | "
+            "[TargetHandForceCb][LATCH] hand_mode=forcecon side=%s finger=%d | first=%d | "
             "p_des=(%.4f %.4f %.4f) | f_des=(%.3f %.3f %.3f) | execution=ControlLoop | arm_target=HOLD_LATCHED",
             is_left ? "L" : "R",
             finger_id,
