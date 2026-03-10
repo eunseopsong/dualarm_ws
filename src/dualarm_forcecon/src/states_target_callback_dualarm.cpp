@@ -11,9 +11,6 @@
 // ============================================================================
 // v13 patched: TargetArmPositionCallback (inverse arm IK)
 // msg: 12 = [L x y z r p y, R x y z r p y]
-// - /target_arm_cartesian_pose 입력 xyz는 "base frame" 기준이라고 가정 (현재 패치)
-// - ik_targets_frame_ == "base" 인 경우에도 추가 z offset 보정하지 않음
-// - raw / ik-input / IK 성공여부 디버그 로그 추가
 // ============================================================================
 void DualArmForceControl::TargetArmPositionCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
@@ -167,6 +164,9 @@ void DualArmForceControl::TargetArmPositionCallback(
 
 // ============================================================================
 // TargetHandPositionCallback (inverse hand IK, pos-only)
+//   v24:
+//   - writes hand motion reference q_h_motion_t_
+//   - final q_cmd(q_h_t_) is built in ControlLoop
 // ============================================================================
 void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
@@ -201,10 +201,10 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
         return (v.norm() < 1e-12);
     };
 
-    std::vector<double> ql_init20 = near_zero_norm(q_l_h_t_) ? eigen20_to_stdvec20(q_l_h_c_)
-                                                             : eigen20_to_stdvec20(q_l_h_t_);
-    std::vector<double> qr_init20 = near_zero_norm(q_r_h_t_) ? eigen20_to_stdvec20(q_r_h_c_)
-                                                             : eigen20_to_stdvec20(q_r_h_t_);
+    std::vector<double> ql_init20 = near_zero_norm(q_l_h_motion_t_) ? eigen20_to_stdvec20(q_l_h_c_)
+                                                                    : eigen20_to_stdvec20(q_l_h_motion_t_);
+    std::vector<double> qr_init20 = near_zero_norm(q_r_h_motion_t_) ? eigen20_to_stdvec20(q_r_h_c_)
+                                                                    : eigen20_to_stdvec20(q_r_h_motion_t_);
 
     dualarm_forcecon::HandInverseKinematics::Options opt;
     opt.max_iters       = 80;
@@ -227,10 +227,10 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
     const bool ok_r = hand_ik_r_->solveIKFingertips(qr_init20, tgt_r, qr_sol20, opt);
 
     if (ok_l && ql_sol20.size() >= 20) {
-        for (int i = 0; i < 20; ++i) q_l_h_t_(i) = ql_sol20[i];
+        for (int i = 0; i < 20; ++i) q_l_h_motion_t_(i) = ql_sol20[i];
     }
     if (ok_r && qr_sol20.size() >= 20) {
-        for (int i = 0; i < 20; ++i) q_r_h_t_(i) = qr_sol20[i];
+        for (int i = 0; i < 20; ++i) q_r_h_motion_t_(i) = qr_sol20[i];
     }
 
     auto assign_point = [&](geometry_msgs::msg::Point& p, const Eigen::Vector3d& v) {
@@ -282,7 +282,7 @@ void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float6
 }
 
 // ============================================================================
-// DeltaArmPositionCallback (inverse arm IK, delta command w.r.t latched initial pose)
+// DeltaArmPositionCallback
 // ============================================================================
 void DualArmForceControl::DeltaArmPositionCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
@@ -402,7 +402,7 @@ void DualArmForceControl::DeltaArmPositionCallback(
 }
 
 // ============================================================================
-// DeltaHandPositionCallback (inverse hand IK, delta command for one fingertip)
+// DeltaHandPositionCallback
 // ============================================================================
 void DualArmForceControl::DeltaHandPositionCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
@@ -522,6 +522,9 @@ void DualArmForceControl::TargetArmJointsCallback(
 
 // --------------------
 // TargetHandJointsCallback (forward)
+//   v24:
+//   - writes hand motion reference q_h_motion_t_
+//   - final q_cmd(q_h_t_) is built in ControlLoop
 // --------------------
 void DualArmForceControl::TargetHandJointsCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
@@ -559,35 +562,45 @@ void DualArmForceControl::TargetHandJointsCallback(
     };
 
     if (n >= 40) {
-        assign_hand20_to_qh20(q_l_h_t_, 0);
-        assign_hand20_to_qh20(q_r_h_t_, 20);
+        assign_hand20_to_qh20(q_l_h_motion_t_, 0);
+        assign_hand20_to_qh20(q_r_h_motion_t_, 20);
         return;
     }
 
     if (n >= 30) {
-        assign_hand15_to_qh20(q_l_h_t_, 0);
-        assign_hand15_to_qh20(q_r_h_t_, 15);
+        assign_hand15_to_qh20(q_l_h_motion_t_, 0);
+        assign_hand15_to_qh20(q_r_h_motion_t_, 15);
         return;
     }
 
     if (n >= 52) {
-        assign_hand20_to_qh20(q_l_h_t_, 12);
-        assign_hand20_to_qh20(q_r_h_t_, 32);
+        assign_hand20_to_qh20(q_l_h_motion_t_, 12);
+        assign_hand20_to_qh20(q_r_h_motion_t_, 32);
         return;
     }
 
     if (n >= 42) {
-        assign_hand15_to_qh20(q_l_h_t_, 12);
-        assign_hand15_to_qh20(q_r_h_t_, 27);
+        assign_hand15_to_qh20(q_l_h_motion_t_, 12);
+        assign_hand15_to_qh20(q_r_h_motion_t_, 27);
         return;
     }
 }
 
+// ============================================================================
+// TargetHandForceCallback
+//   v24:
+//   - no separate forcecon mode
+//   - valid in hand forward / inverse
+//   - /target_hand_force provides desired force reference only
+//   - supported:
+//       [hand_id, finger_id, fx, fy, fz]
+//       [hand_id, finger_id, px, py, pz, fx, fy, fz]  // legacy, p ignored
+// ============================================================================
 void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (current_hand_control_mode_ != "forcecon") return;
+    if (current_hand_control_mode_ == "idle") return;
     if (!msg) return;
-    if (msg->data.size() < 8) return;
+    if (msg->data.size() < 5) return;
 
     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
 
@@ -611,94 +624,39 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
         return;
     }
 
-    Eigen::Vector3d p_des_base(msg->data[2], msg->data[3], msg->data[4]);
-    Eigen::Vector3d f_des_base(msg->data[5], msg->data[6], msg->data[7]);
+    Eigen::Vector3d f_des_base = Eigen::Vector3d::Zero();
+    if (msg->data.size() >= 8) {
+        f_des_base = Eigen::Vector3d(msg->data[5], msg->data[6], msg->data[7]); // legacy format
+    } else {
+        f_des_base = Eigen::Vector3d(msg->data[2], msg->data[3], msg->data[4]); // compact format
+    }
 
-    if (!(std::isfinite(p_des_base.x()) && std::isfinite(p_des_base.y()) && std::isfinite(p_des_base.z()) &&
-          std::isfinite(f_des_base.x()) && std::isfinite(f_des_base.y()) && std::isfinite(f_des_base.z()))) {
-        RCLCPP_WARN(logger, "[TargetHandForceCallback] non-finite desired pose/force");
+    if (!(std::isfinite(f_des_base.x()) && std::isfinite(f_des_base.y()) && std::isfinite(f_des_base.z()))) {
+        RCLCPP_WARN(logger, "[TargetHandForceCallback] non-finite desired force");
         return;
     }
 
     const bool is_left = (hand_id == 0);
-    const bool first_force_cmd_in_session = (!hand_force_cmd_valid_);
-
-    if (first_force_cmd_in_session) {
-        const int n_la = std::min<int>(q_l_t_.size(), q_l_c_.size());
-        const int n_ra = std::min<int>(q_r_t_.size(), q_r_c_.size());
-        for (int i = 0; i < n_la; ++i) q_l_t_(i) = q_l_c_(i);
-        for (int i = 0; i < n_ra; ++i) q_r_t_(i) = q_r_c_(i);
-
-        const int n_lh = std::min<int>(q_l_h_t_.size(), q_l_h_c_.size());
-        const int n_rh = std::min<int>(q_r_h_t_.size(), q_r_h_c_.size());
-        for (int i = 0; i < n_lh; ++i) q_l_h_t_(i) = q_l_h_c_(i);
-        for (int i = 0; i < n_rh; ++i) q_r_h_t_(i) = q_r_h_c_(i);
-
-        target_pose_l_ = current_pose_l_;
-        target_pose_r_ = current_pose_r_;
-
-        t_f_l_thumb_  = f_l_thumb_;
-        t_f_l_index_  = f_l_index_;
-        t_f_l_middle_ = f_l_middle_;
-        t_f_l_ring_   = f_l_ring_;
-        t_f_l_baby_   = f_l_baby_;
-
-        t_f_r_thumb_  = f_r_thumb_;
-        t_f_r_index_  = f_r_index_;
-        t_f_r_middle_ = f_r_middle_;
-        t_f_r_ring_   = f_r_ring_;
-        t_f_r_baby_   = f_r_baby_;
-
-        RCLCPP_INFO(logger,
-            "[TargetHandForceCb] forcecon hold target latched (first cmd in session). arm/hand non-target joints fixed.");
-    }
 
     f_l_hand_t_.setZero();
     f_r_hand_t_.setZero();
-
     if (is_left) f_l_hand_t_.row(finger_id) = f_des_base.transpose();
     else         f_r_hand_t_.row(finger_id) = f_des_base.transpose();
-
-    auto setFingerTargetPoint = [&](bool left, int fid, const Eigen::Vector3d& p) {
-        geometry_msgs::msg::Point pt;
-        pt.x = p.x(); pt.y = p.y(); pt.z = p.z();
-
-        if (left) {
-            switch (fid) {
-                case 0: t_f_l_thumb_  = pt; break;
-                case 1: t_f_l_index_  = pt; break;
-                case 2: t_f_l_middle_ = pt; break;
-                case 3: t_f_l_ring_   = pt; break;
-                case 4: t_f_l_baby_   = pt; break;
-                default: break;
-            }
-        } else {
-            switch (fid) {
-                case 0: t_f_r_thumb_  = pt; break;
-                case 1: t_f_r_index_  = pt; break;
-                case 2: t_f_r_middle_ = pt; break;
-                case 3: t_f_r_ring_   = pt; break;
-                case 4: t_f_r_baby_   = pt; break;
-                default: break;
-            }
-        }
-    };
-    setFingerTargetPoint(is_left, finger_id, p_des_base);
 
     hand_force_cmd_valid_      = true;
     hand_force_cmd_hand_id_    = hand_id;
     hand_force_cmd_finger_id_  = finger_id;
-    hand_force_cmd_p_des_base_ = p_des_base;
     hand_force_cmd_f_des_base_ = f_des_base;
     hand_force_cmd_stamp_ns_   = node_ ? node_->get_clock()->now().nanoseconds() : 0;
 
     static int prev_key = -1;
     const int key = (is_left ? 0 : 5) + finger_id;
 
-    if (first_force_cmd_in_session || key != prev_key) {
+    if (key != prev_key) {
         auto& adm_arr = is_left ? hand_adm_l_ : hand_adm_r_;
-        if (adm_arr[static_cast<size_t>(finger_id)]) {
-            Eigen::Vector3d p_init = p_des_base;
+        if (adm_arr[static_cast<std::size_t>(finger_id)]) {
+            Eigen::Vector3d p_init = Eigen::Vector3d::Zero();
+
             if (is_left) {
                 switch (finger_id) {
                     case 0: p_init = Eigen::Vector3d(f_l_thumb_.x,  f_l_thumb_.y,  f_l_thumb_.z);  break;
@@ -717,7 +675,7 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
                 }
             }
 
-            adm_arr[static_cast<size_t>(finger_id)]->resetState(p_init);
+            adm_arr[static_cast<std::size_t>(finger_id)]->resetState(p_init);
         }
         prev_key = key;
     }
@@ -725,12 +683,11 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
     static int dbg_decim = 0;
     if ((dbg_decim++ % 20) == 0) {
         RCLCPP_INFO(logger,
-            "[TargetHandForceCb][LATCH] hand_mode=forcecon side=%s finger=%d | first=%d | "
-            "p_des=(%.4f %.4f %.4f) | f_des=(%.3f %.3f %.3f) | execution=ControlLoop | arm_target=HOLD_LATCHED",
+            "[TargetHandForceCb][v24] hand_mode=%s side=%s finger=%d | "
+            "f_des=(%.3f %.3f %.3f) | x_target is generated internally from motion target",
+            current_hand_control_mode_.c_str(),
             is_left ? "L" : "R",
             finger_id,
-            static_cast<int>(first_force_cmd_in_session),
-            p_des_base.x(), p_des_base.y(), p_des_base.z(),
             f_des_base.x(), f_des_base.y(), f_des_base.z());
     }
 }

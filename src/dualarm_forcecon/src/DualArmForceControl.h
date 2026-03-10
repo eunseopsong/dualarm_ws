@@ -3,8 +3,8 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
-#include "std_msgs/msg/float32_multi_array.hpp"   // /isaac_contact_states + monitor topics
-#include "std_msgs/msg/float64_multi_array.hpp"   // target topics
+#include "std_msgs/msg/float32_multi_array.hpp"
+#include "std_msgs/msg/float64_multi_array.hpp"
 #include "dualarm_forcecon_interfaces/srv/set_control_mode.hpp"
 
 #include <geometry_msgs/msg/pose.hpp>
@@ -50,8 +50,10 @@ public:
     // Measured contact force callback (Isaac)
     void HandContactForceCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
 
-    // Force-control command callback (hand forcecon mode)
-    // /target_hand_force : [hand_id, finger_id, px, py, pz, fx, fy, fz]
+    // Desired-force reference callback for contact-aware hand control
+    // Supported:
+    //   [hand_id, finger_id, fx, fy, fz]
+    //   [hand_id, finger_id, px, py, pz, fx, fy, fz]  // legacy, p is ignored in v24
     void TargetHandForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
 
     void ControlModeCallback(
@@ -83,7 +85,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_joint_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_joint_sub_;
 
-    // Force-control target topic
+    // Desired-force reference topic
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_force_sub_;
 
     // Contact states topic from Isaac
@@ -111,7 +113,7 @@ private:
 
     // Mode / init
     std::string current_arm_control_mode_  = "idle";   // idle / forward / inverse
-    std::string current_hand_control_mode_ = "idle";   // idle / forward / inverse / forcecon
+    std::string current_hand_control_mode_ = "idle";   // idle / forward / inverse
 
     std::vector<std::string> joint_names_;
     bool is_initialized_ = false;
@@ -120,8 +122,11 @@ private:
     bool hand_idle_synced_ = false;
 
     // Joint states
-    Eigen::VectorXd q_l_c_, q_r_c_, q_l_t_, q_r_t_;          // arm 6DoF
-    Eigen::VectorXd q_l_h_c_, q_r_h_c_, q_l_h_t_, q_r_h_t_;  // hand 20DoF canonical (q4 mimic slot included)
+    Eigen::VectorXd q_l_c_, q_r_c_, q_l_t_, q_r_t_;          // arm 6DoF current / final cmd
+    Eigen::VectorXd q_l_h_c_, q_r_h_c_, q_l_h_t_, q_r_h_t_;  // hand 20DoF current / final cmd
+
+    // Hand motion-reference targets (before contact-aware admittance)
+    Eigen::VectorXd q_l_h_motion_t_, q_r_h_motion_t_;        // hand 20DoF motion target
 
     // Arm forces monitor (currently unused measured source => zero)
     Eigen::Vector3d f_l_c_{0,0,0}, f_r_c_{0,0,0};
@@ -133,33 +138,17 @@ private:
     Eigen::Matrix<double,5,3> f_l_hand_t_;
     Eigen::Matrix<double,5,3> f_r_hand_t_;
 
-    // ------------------------------------------------------------------------
-    // latched forcecon command (callback stores, ControlLoop executes)
-    // ------------------------------------------------------------------------
+    // Latched desired-force command (single active finger command)
     bool hand_force_cmd_valid_{false};
     int  hand_force_cmd_hand_id_{0};     // 0=left, 1=right
     int  hand_force_cmd_finger_id_{3};   // canonical: 0..4
-    Eigen::Vector3d hand_force_cmd_p_des_base_{Eigen::Vector3d::Zero()};
     Eigen::Vector3d hand_force_cmd_f_des_base_{Eigen::Vector3d::Zero()};
     int64_t hand_force_cmd_stamp_ns_{0};
 
-    // ------------------------------------------------------------------------
-    // forcecon hold snapshot (freeze arm/wrist at forcecon entry)
-    // ------------------------------------------------------------------------
-    Eigen::VectorXd q_l_arm_forcecon_hold_;   // size 6
-    Eigen::VectorXd q_r_arm_forcecon_hold_;   // size 6
-    Eigen::VectorXd q_l_hand_forcecon_hold_;  // size 20
-    Eigen::VectorXd q_r_hand_forcecon_hold_;  // size 20
-
-    bool forcecon_hold_snapshot_valid_{false};
-    bool forcecon_prev_cycle_{false};
-
-    // ------------------------------------------------------------------------
     // delta-arm command base pose latch
     // - latched once from current_pose_l_/r_ after node start
     // - DeltaArmPositionCallback uses:
     //     target = latched_base_pose + delta
-    // ------------------------------------------------------------------------
     bool delta_arm_base_pose_initialized_{false};
     geometry_msgs::msg::Pose delta_arm_base_pose_l_;
     geometry_msgs::msg::Pose delta_arm_base_pose_r_;

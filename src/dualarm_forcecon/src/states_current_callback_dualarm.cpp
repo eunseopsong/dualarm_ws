@@ -278,15 +278,11 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     static bool s_l_tar_init[5] = {false, false, false, false, false};
     static bool s_r_tar_init[5] = {false, false, false, false, false};
 
-    const std::vector<double> hl15   = compress20to15(q_l_h_c_);
-    const std::vector<double> hr15   = compress20to15(q_r_h_c_);
-    const std::vector<double> hl_t15 = compress20to15(q_l_h_t_);
-    const std::vector<double> hr_t15 = compress20to15(q_r_h_t_);
+    const std::vector<double> hl15 = compress20to15(q_l_h_c_);
+    const std::vector<double> hr15 = compress20to15(q_r_h_c_);
 
-    const std::vector<Eigen::Vector3d> tl   = hand_fk_l_->computeFingertips(hl15);
-    const std::vector<Eigen::Vector3d> tr   = hand_fk_r_->computeFingertips(hr15);
-    const std::vector<Eigen::Vector3d> tl_t = hand_fk_l_->computeFingertips(hl_t15);
-    const std::vector<Eigen::Vector3d> tr_t = hand_fk_r_->computeFingertips(hr_t15);
+    const std::vector<Eigen::Vector3d> tl = hand_fk_l_->computeFingertips(hl15);
+    const std::vector<Eigen::Vector3d> tr = hand_fk_r_->computeFingertips(hr15);
 
     apply_point_deadband(f_l_thumb_,  safe_get(tl, 0), s_l_cur_init[0]);
     apply_point_deadband(f_l_index_,  safe_get(tl, 1), s_l_cur_init[1]);
@@ -317,19 +313,28 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
             s_l_tar_init[i] = true;
             s_r_tar_init[i] = true;
         }
-    } else {
-        apply_point_deadband(t_f_l_thumb_,  safe_get(tl_t, 0), s_l_tar_init[0]);
-        apply_point_deadband(t_f_l_index_,  safe_get(tl_t, 1), s_l_tar_init[1]);
-        apply_point_deadband(t_f_l_middle_, safe_get(tl_t, 2), s_l_tar_init[2]);
-        apply_point_deadband(t_f_l_ring_,   safe_get(tl_t, 3), s_l_tar_init[3]);
-        apply_point_deadband(t_f_l_baby_,   safe_get(tl_t, 4), s_l_tar_init[4]);
-
-        apply_point_deadband(t_f_r_thumb_,  safe_get(tr_t, 0), s_r_tar_init[0]);
-        apply_point_deadband(t_f_r_index_,  safe_get(tr_t, 1), s_r_tar_init[1]);
-        apply_point_deadband(t_f_r_middle_, safe_get(tr_t, 2), s_r_tar_init[2]);
-        apply_point_deadband(t_f_r_ring_,   safe_get(tr_t, 3), s_r_tar_init[3]);
-        apply_point_deadband(t_f_r_baby_,   safe_get(tr_t, 4), s_r_tar_init[4]);
     }
+    else if (current_hand_control_mode_ == "forward") {
+        const std::vector<double> hl_ref15 = compress20to15(q_l_h_motion_t_);
+        const std::vector<double> hr_ref15 = compress20to15(q_r_h_motion_t_);
+
+        const std::vector<Eigen::Vector3d> tl_ref = hand_fk_l_->computeFingertips(hl_ref15);
+        const std::vector<Eigen::Vector3d> tr_ref = hand_fk_r_->computeFingertips(hr_ref15);
+
+        apply_point_deadband(t_f_l_thumb_,  safe_get(tl_ref, 0), s_l_tar_init[0]);
+        apply_point_deadband(t_f_l_index_,  safe_get(tl_ref, 1), s_l_tar_init[1]);
+        apply_point_deadband(t_f_l_middle_, safe_get(tl_ref, 2), s_l_tar_init[2]);
+        apply_point_deadband(t_f_l_ring_,   safe_get(tl_ref, 3), s_l_tar_init[3]);
+        apply_point_deadband(t_f_l_baby_,   safe_get(tl_ref, 4), s_l_tar_init[4]);
+
+        apply_point_deadband(t_f_r_thumb_,  safe_get(tr_ref, 0), s_r_tar_init[0]);
+        apply_point_deadband(t_f_r_index_,  safe_get(tr_ref, 1), s_r_tar_init[1]);
+        apply_point_deadband(t_f_r_middle_, safe_get(tr_ref, 2), s_r_tar_init[2]);
+        apply_point_deadband(t_f_r_ring_,   safe_get(tr_ref, 3), s_r_tar_init[3]);
+        apply_point_deadband(t_f_r_baby_,   safe_get(tr_ref, 4), s_r_tar_init[4]);
+    }
+    // inverse 모드에서는 target fingertip position(t_f_*)을
+    // TargetHandPositionCallback / DeltaHandPositionCallback 이 직접 관리한다.
 }
 
 void DualArmForceControl::ControlModeCallback(
@@ -359,7 +364,7 @@ void DualArmForceControl::ControlModeCallback(
     };
 
     auto valid_hand_mode = [](const std::string& m) -> bool {
-        return (m == "idle" || m == "forward" || m == "inverse" || m == "forcecon");
+        return (m == "idle" || m == "forward" || m == "inverse");
     };
 
     if (!valid_arm_mode(new_arm_mode)) {
@@ -372,17 +377,12 @@ void DualArmForceControl::ControlModeCallback(
     if (!valid_hand_mode(new_hand_mode)) {
         res->success = false;
         res->message = "Invalid hand_mode: " + req->hand_mode +
-                       " (allowed: idle, forward, inverse, forcecon)";
+                       " (allowed: idle, forward, inverse)";
         return;
     }
 
     current_arm_control_mode_  = new_arm_mode;
     current_hand_control_mode_ = new_hand_mode;
-
-    const bool entering_hand_forcecon =
-        (prev_hand_mode != "forcecon" && current_hand_control_mode_ == "forcecon");
-    const bool leaving_hand_forcecon =
-        (prev_hand_mode == "forcecon" && current_hand_control_mode_ != "forcecon");
 
     auto reset_all_hand_adm = [&]() {
         for (int f = 0; f < 5; ++f) {
@@ -391,13 +391,14 @@ void DualArmForceControl::ControlModeCallback(
         }
     };
 
-    auto clear_forcecon_latch = [&]() {
+    auto clear_hand_force_cmd = [&]() {
         hand_force_cmd_valid_ = false;
         hand_force_cmd_hand_id_ = 0;
         hand_force_cmd_finger_id_ = 3;
-        hand_force_cmd_p_des_base_.setZero();
         hand_force_cmd_f_des_base_.setZero();
         hand_force_cmd_stamp_ns_ = 0;
+        f_l_hand_t_.setZero();
+        f_r_hand_t_.setZero();
     };
 
     // ------------------------------------------------------------------------
@@ -423,9 +424,12 @@ void DualArmForceControl::ControlModeCallback(
     // ------------------------------------------------------------------------
     hand_idle_synced_ = false;
 
-    if (current_hand_control_mode_ == "inverse" ||
-        current_hand_control_mode_ == "forcecon") {
+    if (current_hand_control_mode_ == "idle" ||
+        current_hand_control_mode_ == "forward" ||
+        current_hand_control_mode_ == "inverse") {
         for (int i = 0; i < 20; ++i) {
+            q_l_h_motion_t_(i) = q_l_h_c_(i);
+            q_r_h_motion_t_(i) = q_r_h_c_(i);
             q_l_h_t_(i) = q_l_h_c_(i);
             q_r_h_t_(i) = q_r_h_c_(i);
         }
@@ -443,23 +447,9 @@ void DualArmForceControl::ControlModeCallback(
         t_f_r_baby_   = f_r_baby_;
     }
 
-    if (current_hand_control_mode_ != "forcecon") {
-        f_l_hand_t_.setZero();
-        f_r_hand_t_.setZero();
-    }
-
-    if (entering_hand_forcecon) {
-        clear_forcecon_latch();
-        f_l_hand_t_.setZero();
-        f_r_hand_t_.setZero();
+    if (prev_hand_mode != current_hand_control_mode_) {
+        clear_hand_force_cmd();
         reset_all_hand_adm();
-    }
-
-    if (leaving_hand_forcecon) {
-        clear_forcecon_latch();
-        reset_all_hand_adm();
-        forcecon_hold_snapshot_valid_ = false;
-        forcecon_prev_cycle_ = false;
     }
 
     res->success = true;
@@ -692,7 +682,7 @@ void DualArmForceControl::PrintDualArmStates() {
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v22 | Arm:[%s%s%s] Hand:[%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v24 | Arm:[%s%s%s] Hand:[%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
            C_MODE, current_arm_control_mode_.c_str(), C_RESET,
            C_MODE, current_hand_control_mode_.c_str(), C_RESET,

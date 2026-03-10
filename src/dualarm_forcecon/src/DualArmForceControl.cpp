@@ -35,7 +35,6 @@ bool readScalar(const YAML::Node& n, const char* key, T& out) {
 }
 
 void applyYamlToHandCfg(const YAML::Node& n, dualarm_forcecon::HandAdmittanceControl::Config& cfg) {
-    // arrays
     readArrayDouble<3>(n, "mass", cfg.mass);
     readArrayDouble<3>(n, "damping", cfg.damping);
     readArrayDouble<3>(n, "stiffness", cfg.stiffness);
@@ -49,7 +48,6 @@ void applyYamlToHandCfg(const YAML::Node& n, dualarm_forcecon::HandAdmittanceCon
     readArrayDouble<3>(n, "max_step_m", cfg.max_step_m);
     readArrayDouble<3>(n, "max_adm_velocity_mps", cfg.max_adm_velocity_mps);
 
-    // scalars / bools
     readScalar<bool>(n, "use_hybrid_force_position_mode", cfg.use_hybrid_force_position_mode);
     readScalar<int>(n, "hybrid_force_axis", cfg.hybrid_force_axis);
 
@@ -83,7 +81,6 @@ void applyYamlToHandCfg(const YAML::Node& n, dualarm_forcecon::HandAdmittanceCon
     readScalar<bool>(n, "slip_guard_reanchor_tangent", cfg.slip_guard_reanchor_tangent);
     readScalar<double>(n, "slip_guard_velocity_damping", cfg.slip_guard_velocity_damping);
 
-    // IK options
     readScalar<int>(n, "ik_max_iters", cfg.ik_max_iters);
     readScalar<double>(n, "ik_tol_pos_m", cfg.ik_tol_pos_m);
     readScalar<double>(n, "ik_lambda", cfg.ik_lambda);
@@ -94,7 +91,6 @@ void applyYamlToHandCfg(const YAML::Node& n, dualarm_forcecon::HandAdmittanceCon
     readScalar<double>(n, "ik_max_step", cfg.ik_max_step);
     readScalar<double>(n, "ik_mu_posture", cfg.ik_mu_posture);
 
-    // fallback
     readScalar<bool>(n, "prefer_last_success_q_seed", cfg.prefer_last_success_q_seed);
     readScalar<bool>(n, "keep_last_success_on_ik_fail", cfg.keep_last_success_on_ik_fail);
     readScalar<bool>(n, "damp_velocity_on_ik_fail", cfg.damp_velocity_on_ik_fail);
@@ -200,7 +196,9 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // State init
     // -------------------------
     q_l_c_.setZero(6); q_r_c_.setZero(6); q_l_t_.setZero(6); q_r_t_.setZero(6);
-    q_l_h_c_.setZero(20); q_r_h_c_.setZero(20); q_l_h_t_.setZero(20); q_r_h_t_.setZero(20);
+    q_l_h_c_.setZero(20); q_r_h_c_.setZero(20);
+    q_l_h_t_.setZero(20); q_r_h_t_.setZero(20);
+    q_l_h_motion_t_.setZero(20); q_r_h_motion_t_.setZero(20);
 
     f_l_c_.setZero(); f_r_c_.setZero();
     f_l_t_.setZero(); f_r_t_.setZero();
@@ -220,16 +218,8 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     hand_force_cmd_valid_ = false;
     hand_force_cmd_hand_id_ = 0;
     hand_force_cmd_finger_id_ = 3;
-    hand_force_cmd_p_des_base_.setZero();
     hand_force_cmd_f_des_base_.setZero();
     hand_force_cmd_stamp_ns_ = 0;
-
-    q_l_arm_forcecon_hold_.setZero(6);
-    q_r_arm_forcecon_hold_.setZero(6);
-    q_l_hand_forcecon_hold_.setZero(20);
-    q_r_hand_forcecon_hold_.setZero(20);
-    forcecon_hold_snapshot_valid_ = false;
-    forcecon_prev_cycle_ = false;
 
     arm_idle_synced_ = false;
     hand_idle_synced_ = false;
@@ -326,6 +316,8 @@ void DualArmForceControl::ControlLoop() {
     // HAND idle sync
     // ------------------------------------------------------------------------
     if (current_hand_control_mode_ == "idle" && !hand_idle_synced_) {
+        q_l_h_motion_t_ = q_l_h_c_;
+        q_r_h_motion_t_ = q_r_h_c_;
         q_l_h_t_ = q_l_h_c_;
         q_r_h_t_ = q_r_h_c_;
         hand_idle_synced_ = true;
@@ -334,98 +326,134 @@ void DualArmForceControl::ControlLoop() {
     }
 
     // ------------------------------------------------------------------------
-    // HAND forcecon transition handling
+    // HAND base command = motion target
+    //   - forward  : motion target = joint target
+    //   - inverse  : motion target = IK(x_target)
+    //   - contact  : selected finger only gets admittance-based correction
     // ------------------------------------------------------------------------
-    const bool in_forcecon = (current_hand_control_mode_ == "forcecon");
-    const bool entering_forcecon = ( in_forcecon && !forcecon_prev_cycle_);
-    const bool leaving_forcecon  = (!in_forcecon &&  forcecon_prev_cycle_);
+    if (current_hand_control_mode_ == "idle") {
+        f_l_hand_t_.setZero();
+        f_r_hand_t_.setZero();
+    } else {
+        q_l_h_t_ = q_l_h_motion_t_;
+        q_r_h_t_ = q_r_h_motion_t_;
 
-    if (entering_forcecon) {
-        q_l_arm_forcecon_hold_  = q_l_c_;
-        q_r_arm_forcecon_hold_  = q_r_c_;
-
-        q_l_hand_forcecon_hold_ = q_l_h_c_;
-        q_r_hand_forcecon_hold_ = q_r_h_c_;
-
-        forcecon_hold_snapshot_valid_ = true;
-
-        q_l_t_   = q_l_arm_forcecon_hold_;
-        q_r_t_   = q_r_arm_forcecon_hold_;
-        q_l_h_t_ = q_l_hand_forcecon_hold_;
-        q_r_h_t_ = q_r_hand_forcecon_hold_;
-    }
-
-    if (leaving_forcecon) {
-        forcecon_hold_snapshot_valid_ = false;
-    }
-
-    forcecon_prev_cycle_ = in_forcecon;
-
-    if (in_forcecon) {
-        if (forcecon_hold_snapshot_valid_) {
-            q_l_t_   = q_l_arm_forcecon_hold_;
-            q_r_t_   = q_r_arm_forcecon_hold_;
-            q_l_h_t_ = q_l_hand_forcecon_hold_;
-            q_r_h_t_ = q_r_hand_forcecon_hold_;
+        if (!hand_force_cmd_valid_) {
+            f_l_hand_t_.setZero();
+            f_r_hand_t_.setZero();
         } else {
-            q_l_t_   = q_l_c_;
-            q_r_t_   = q_r_c_;
-            q_l_h_t_ = q_l_h_c_;
-            q_r_h_t_ = q_r_h_c_;
-        }
-    }
+            f_l_hand_t_.setZero();
+            f_r_hand_t_.setZero();
 
-    // ------------------------------------------------------------------------
-    // HAND forcecon controller execution
-    // ------------------------------------------------------------------------
-    if (current_hand_control_mode_ == "forcecon" && hand_force_cmd_valid_) {
-        const bool is_left = (hand_force_cmd_hand_id_ == 0);
-        const int finger_id = hand_force_cmd_finger_id_;
+            const bool is_left = (hand_force_cmd_hand_id_ == 0);
+            const int finger_id = hand_force_cmd_finger_id_;
 
-        if (finger_id >= 0 && finger_id < 5) {
-            auto& adm_arr = is_left ? hand_adm_l_ : hand_adm_r_;
-            auto adm_ptr = adm_arr[static_cast<size_t>(finger_id)];
+            if (finger_id >= 0 && finger_id < 5) {
+                if (is_left) f_l_hand_t_.row(finger_id) = hand_force_cmd_f_des_base_.transpose();
+                else         f_r_hand_t_.row(finger_id) = hand_force_cmd_f_des_base_.transpose();
 
-            if (adm_ptr && adm_ptr->isOk()) {
-                const Eigen::Matrix<double,5,3>& f_hand_cur = is_left ? f_l_hand_c_ : f_r_hand_c_;
-                Eigen::VectorXd& q_h_c = is_left ? q_l_h_c_ : q_r_h_c_;
-                Eigen::VectorXd& q_h_t = is_left ? q_l_h_t_ : q_r_h_t_;
+                auto eigen20_to_stdvec20 = [](const Eigen::VectorXd& qh) -> std::vector<double> {
+                    std::vector<double> out(20, 0.0);
+                    const int n = std::min<int>(qh.size(), 20);
+                    for (int i = 0; i < n; ++i) out[i] = qh(i);
+                    return out;
+                };
 
-                std::vector<double> q_cur20(20, 0.0);
-                for (int i = 0; i < 20 && i < q_h_c.size(); ++i) q_cur20[i] = q_h_c(i);
+                auto point_to_vec3 = [](const geometry_msgs::msg::Point& p) -> Eigen::Vector3d {
+                    return Eigen::Vector3d(p.x, p.y, p.z);
+                };
 
-                double dt_s = 0.01;
-                if (node_) {
-                    static std::array<bool,10> s_valid = {false,false,false,false,false,false,false,false,false,false};
-                    static std::array<int64_t,10> s_last_ns = {0,0,0,0,0,0,0,0,0,0};
+                auto get_target_finger_point = [&](bool left, int fid) -> Eigen::Vector3d {
+                    if (left) {
+                        switch (fid) {
+                            case 0: return point_to_vec3(t_f_l_thumb_);
+                            case 1: return point_to_vec3(t_f_l_index_);
+                            case 2: return point_to_vec3(t_f_l_middle_);
+                            case 3: return point_to_vec3(t_f_l_ring_);
+                            case 4: return point_to_vec3(t_f_l_baby_);
+                            default: return Eigen::Vector3d::Zero();
+                        }
+                    } else {
+                        switch (fid) {
+                            case 0: return point_to_vec3(t_f_r_thumb_);
+                            case 1: return point_to_vec3(t_f_r_index_);
+                            case 2: return point_to_vec3(t_f_r_middle_);
+                            case 3: return point_to_vec3(t_f_r_ring_);
+                            case 4: return point_to_vec3(t_f_r_baby_);
+                            default: return Eigen::Vector3d::Zero();
+                        }
+                    }
+                };
 
-                    const int key = (is_left ? 0 : 5) + finger_id;
-                    const int64_t now_ns = node_->get_clock()->now().nanoseconds();
+                auto safe_tip = [](const std::vector<Eigen::Vector3d>& tips, int idx) -> Eigen::Vector3d {
+                    if (idx < 0 || idx >= static_cast<int>(tips.size())) return Eigen::Vector3d::Zero();
+                    return tips[static_cast<std::size_t>(idx)];
+                };
 
-                    if (s_valid[key]) dt_s = static_cast<double>(now_ns - s_last_ns[key]) * 1e-9;
-                    s_last_ns[key] = now_ns;
-                    s_valid[key] = true;
+                auto apply_active_finger_cmd = [&](Eigen::VectorXd& q_cmd20,
+                                                   const dualarm_forcecon::HandAdmittanceControl::StepOutput& out_step,
+                                                   int fid)
+                {
+                    const int b = fid * 4;
+                    if (b + 3 >= q_cmd20.size()) return;
+                    q_cmd20(b + 0) = out_step.q_cmd_123[0];
+                    q_cmd20(b + 1) = out_step.q_cmd_123[1];
+                    q_cmd20(b + 2) = out_step.q_cmd_123[2];
+                    q_cmd20(b + 3) = out_step.q_cmd_4_mimic;
+                };
 
-                    if (!std::isfinite(dt_s) || dt_s <= 0.0) dt_s = 0.01;
-                    dt_s = std::max(1e-4, std::min(dt_s, 5e-2));
-                }
+                auto& adm_arr = is_left ? hand_adm_l_ : hand_adm_r_;
+                auto adm_ptr = adm_arr[static_cast<std::size_t>(finger_id)];
 
-                dualarm_forcecon::HandAdmittanceControl::StepInput in;
-                in.p_des_base = hand_force_cmd_p_des_base_;
-                in.f_des_base = hand_force_cmd_f_des_base_;
-                in.f_meas_base = f_hand_cur.row(finger_id).transpose();
-                in.q_hand_current20 = q_cur20;
-                in.dt_s = dt_s;
+                if (adm_ptr && adm_ptr->isOk()) {
+                    Eigen::VectorXd& q_h_c = is_left ? q_l_h_c_ : q_r_h_c_;
+                    Eigen::VectorXd& q_h_motion = is_left ? q_l_h_motion_t_ : q_r_h_motion_t_;
+                    Eigen::VectorXd& q_h_cmd = is_left ? q_l_h_t_ : q_r_h_t_;
+                    const Eigen::Matrix<double,5,3>& f_hand_cur = is_left ? f_l_hand_c_ : f_r_hand_c_;
+                    auto hand_fk = is_left ? hand_fk_l_ : hand_fk_r_;
 
-                auto out = adm_ptr->step(in);
+                    std::vector<double> q_cur20 = eigen20_to_stdvec20(q_h_c);
+                    std::vector<double> q_motion20 = eigen20_to_stdvec20(q_h_motion);
 
-                if (out.controller_ok) {
-                    const int b = finger_id * 4;
-                    if (b + 3 < q_h_t.size()) {
-                        q_h_t(b + 0) = out.q_cmd_123[0];
-                        q_h_t(b + 1) = out.q_cmd_123[1];
-                        q_h_t(b + 2) = out.q_cmd_123[2];
-                        q_h_t(b + 3) = out.q_cmd_4_mimic;
+                    double dt_s = 0.01;
+                    if (node_) {
+                        static std::array<bool,10> s_valid = {false,false,false,false,false,false,false,false,false,false};
+                        static std::array<int64_t,10> s_last_ns = {0,0,0,0,0,0,0,0,0,0};
+
+                        const int key = (is_left ? 0 : 5) + finger_id;
+                        const int64_t now_ns = node_->get_clock()->now().nanoseconds();
+
+                        if (s_valid[key]) dt_s = static_cast<double>(now_ns - s_last_ns[key]) * 1e-9;
+                        s_last_ns[key] = now_ns;
+                        s_valid[key] = true;
+
+                        if (!std::isfinite(dt_s) || dt_s <= 0.0) dt_s = 0.01;
+                        dt_s = std::max(1e-4, std::min(dt_s, 5e-2));
+                    }
+
+                    Eigen::Vector3d p_des_base = Eigen::Vector3d::Zero();
+
+                    if (current_hand_control_mode_ == "forward") {
+                        const std::vector<Eigen::Vector3d> tips_ref = hand_fk->computeFingertips(q_motion20);
+                        p_des_base = safe_tip(tips_ref, finger_id);
+                    } else {
+                        p_des_base = get_target_finger_point(is_left, finger_id);
+                    }
+
+                    dualarm_forcecon::HandAdmittanceControl::StepInput in;
+                    in.p_des_base = p_des_base;
+                    in.f_des_base = hand_force_cmd_f_des_base_;
+                    in.f_meas_base = f_hand_cur.row(finger_id).transpose();
+                    in.q_hand_current20 = q_cur20;
+                    in.dt_s = dt_s;
+
+                    const auto out = adm_ptr->step(in);
+
+                    // v24 policy:
+                    // - no contact -> pure motion target
+                    // - contact    -> motion target + admittance correction on selected finger
+                    if (out.controller_ok && out.contact_on) {
+                        apply_active_finger_cmd(q_h_cmd, out, finger_id);
                     }
                 }
             }
