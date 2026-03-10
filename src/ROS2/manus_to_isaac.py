@@ -197,37 +197,3 @@ if __name__ == '__main__':
     main()
 
 
-'''
-에이딘 ROS1 Manus to Aidin 변환
-
-glove_data_r_renew[0] = ((-1.0)*(glove_data_r[0]-glove_data_r_bias[0])+15);
-glove_data_r_renew[1] = ((1.0)*(glove_data_r[1]-glove_data_r_bias[1])+25);
-glove_data_r_renew[2] = ((-1.0)*(glove_data_r[2]-glove_data_r_bias[2])+154);
-
-for(int i = 1 ; i < 5 ; i++) 456 8910 121314 161718 202122
-{
-	glove_data_r_renew[4*i] = ((-1.0)*(glove_data_r[4*i]-glove_data_r_bias[4*i])+0);  
-	glove_data_r_renew[4*i+1] = ((-1.0)*(glove_data_r[4*i+1]-glove_data_r_bias[4*i+1])+50);
-	glove_data_r_renew[4*i+2] = ((-1.0)*(glove_data_r[4*i+2]-glove_data_r_bias[4*i+2])+220);
-}
-
-traj_TQ[0] = 2.0*glove_data_r_renew[1]*PI/180;  // q1 (MCP F/E)
-traj_TQ[1] = 1.2*glove_data_r_renew[0]*PI/180;  // q2 (MCP A/A)
-traj_TQ[2] = 1.2*glove_data_r_renew[2]*PI/180;  // q3 (PIP,DIP F/E)
-
-traj_TQ[4] = 0.8*glove_data_r_renew[5]*PI/180;  
-traj_TQ[5] = 1.5*glove_data_r_renew[4]*PI/180;
-traj_TQ[6] = 0.8*glove_data_r_renew[6]*PI/180; 
-
-traj_TQ[8] = 0.8*glove_data_r_renew[9]*PI/180;  
-traj_TQ[9] = 1.5*glove_data_r_renew[8]*PI/180;
-traj_TQ[10] = 0.8*glove_data_r_renew[10]*PI/180; 
-
-traj_TQ[12] = 0.8*glove_data_r_renew[13]*PI/180;  
-traj_TQ[13] = glove_data_r_renew[12]*PI/180;
-traj_TQ[14] = 0.8*glove_data_r_renew[14]*PI/180; 
-
-traj_TQ[16] = 0.8*glove_data_r_renew[17]*PI/180;  
-traj_TQ[17] = glove_data_r_renew[16]*PI/180;
-traj_TQ[18] = 0.8*glove_data_r_renew[18]*PI/180;
-'''

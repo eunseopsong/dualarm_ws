@@ -7,3 +7,7 @@ log/
 # VS Code
 .vscode/
 *.code-workspace
+
+# Manus SDK binaries
+src/ROS2/ManusSDK/lib/*.so
+src/ROS2/ManusSDK/lib/*.a
