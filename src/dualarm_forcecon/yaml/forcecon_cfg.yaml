@@ -14,7 +14,7 @@ hand_admittance:
     # --- admittance MDK ---
     mass:      [3.00, 3.00, 3.00]
     damping:   [500.0, 500.0, 500.0]
-    stiffness: [0.0,  0.0,  0.0]
+    stiffness: [1000.0,  1000.0,  1000.0]
 
     # --- force error sign/definition ---
     force_error_des_minus_meas: true
