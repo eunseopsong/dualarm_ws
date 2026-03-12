@@ -8,8 +8,88 @@
 #include <algorithm>
 #include <cctype>
 
+namespace {
+
+inline void setPointFromVec(geometry_msgs::msg::Point& p, const Eigen::Vector3d& v)
+{
+    p.x = v.x();
+    p.y = v.y();
+    p.z = v.z();
+}
+
+inline Eigen::Vector3d pointToVec(const geometry_msgs::msg::Point& p)
+{
+    return Eigen::Vector3d(p.x, p.y, p.z);
+}
+
+inline bool isFiniteVec3(const Eigen::Vector3d& v)
+{
+    return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
+}
+
+inline Eigen::Vector3d safeGetTip(const std::vector<Eigen::Vector3d>& v, int idx)
+{
+    if (idx < 0 || idx >= static_cast<int>(v.size())) return Eigen::Vector3d::Zero();
+    return v[static_cast<std::size_t>(idx)];
+}
+
+inline void matrixRowToPoint(const Eigen::Matrix<double,5,3>& M, int row, geometry_msgs::msg::Point& p)
+{
+    if (row < 0 || row >= 5) {
+        p.x = 0.0; p.y = 0.0; p.z = 0.0;
+        return;
+    }
+    p.x = M(row, 0);
+    p.y = M(row, 1);
+    p.z = M(row, 2);
+}
+
+inline void writeMatrixRow(Eigen::Matrix<double,5,3>& M, int row, const Eigen::Vector3d& v)
+{
+    if (row < 0 || row >= 5) return;
+    M(row, 0) = v.x();
+    M(row, 1) = v.y();
+    M(row, 2) = v.z();
+}
+
+inline std::vector<double> compress20to15(const Eigen::VectorXd& qh)
+{
+    std::vector<double> h15(15, 0.0);
+
+    if (qh.size() >= 20) {
+        for (int f = 0; f < 5; ++f) {
+            const int b20 = f * 4;
+            const int b15 = f * 3;
+            h15[b15 + 0] = qh(b20 + 0);
+            h15[b15 + 1] = qh(b20 + 1);
+            h15[b15 + 2] = qh(b20 + 2);
+        }
+        return h15;
+    }
+
+    const int n = std::min<int>(qh.size(), 15);
+    for (int i = 0; i < n; ++i) h15[i] = qh(i);
+    return h15;
+}
+
+inline void updatePointSetFromMatrix(const Eigen::Matrix<double,5,3>& M,
+                                     geometry_msgs::msg::Point& thumb,
+                                     geometry_msgs::msg::Point& index,
+                                     geometry_msgs::msg::Point& middle,
+                                     geometry_msgs::msg::Point& ring,
+                                     geometry_msgs::msg::Point& baby)
+{
+    matrixRowToPoint(M, 0, thumb);
+    matrixRowToPoint(M, 1, index);
+    matrixRowToPoint(M, 2, middle);
+    matrixRowToPoint(M, 3, ring);
+    matrixRowToPoint(M, 4, baby);
+}
+
+} // namespace
+
 // ============================================================================
-// v13 patched: TargetArmPositionCallback (inverse arm IK)
+// TargetArmPositionCallback (inverse arm IK)
 // msg: 12 = [L x y z r p y, R x y z r p y]
 // ============================================================================
 void DualArmForceControl::TargetArmPositionCallback(
@@ -128,156 +208,100 @@ void DualArmForceControl::TargetArmPositionCallback(
     const bool do_dbg = ((dbg_decim++ % 20) == 0);
 
     if (do_dbg) {
-        RCLCPP_INFO(logger,
-            "[TargetArmPosCb] arm_mode=inverse frame=%s euler_conv=%s angle_unit=%s z_offset=%.4f input_is_world=%d",
-            ik_targets_frame_.c_str(), ik_euler_conv_.c_str(), ik_angle_unit_.c_str(),
-            z_offset, static_cast<int>(kInputPoseIsWorldFrame));
+        // RCLCPP_INFO(logger,
+        //     "[TargetArmPosCb] arm_mode=inverse frame=%s euler_conv=%s angle_unit=%s z_offset=%.4f input_is_world=%d",
+        //     ik_targets_frame_.c_str(), ik_euler_conv_.c_str(), ik_angle_unit_.c_str(),
+        //     z_offset, static_cast<int>(kInputPoseIsWorldFrame));
 
-        RCLCPP_INFO(logger,
-            "[L] raw xyz=(%.4f %.4f %.4f) -> ik xyz=(%.4f %.4f %.4f) offset=%d | eul=(%.3f %.3f %.3f) | ok=%d",
-            l_xyz_raw[0], l_xyz_raw[1], l_xyz_raw[2],
-            l_xyz_ik[0],  l_xyz_ik[1],  l_xyz_ik[2],
-            static_cast<int>(l_offset_applied),
-            l_eul[0], l_eul[1], l_eul[2],
-            static_cast<int>(l_ok && rl.size() >= 6));
+        // RCLCPP_INFO(logger,
+        //     "[L] raw xyz=(%.4f %.4f %.4f) -> ik xyz=(%.4f %.4f %.4f) offset=%d | eul=(%.3f %.3f %.3f) | ok=%d",
+        //     l_xyz_raw[0], l_xyz_raw[1], l_xyz_raw[2],
+        //     l_xyz_ik[0],  l_xyz_ik[1],  l_xyz_ik[2],
+        //     static_cast<int>(l_offset_applied),
+        //     l_eul[0], l_eul[1], l_eul[2],
+        //     static_cast<int>(l_ok && rl.size() >= 6));
 
-        RCLCPP_INFO(logger,
-            "[R] raw xyz=(%.4f %.4f %.4f) -> ik xyz=(%.4f %.4f %.4f) offset=%d | eul=(%.3f %.3f %.3f) | ok=%d",
-            r_xyz_raw[0], r_xyz_raw[1], r_xyz_raw[2],
-            r_xyz_ik[0],  r_xyz_ik[1],  r_xyz_ik[2],
-            static_cast<int>(r_offset_applied),
-            r_eul[0], r_eul[1], r_eul[2],
-            static_cast<int>(r_ok && rr.size() >= 6));
+        // RCLCPP_INFO(logger,
+        //     "[R] raw xyz=(%.4f %.4f %.4f) -> ik xyz=(%.4f %.4f %.4f) offset=%d | eul=(%.3f %.3f %.3f) | ok=%d",
+        //     r_xyz_raw[0], r_xyz_raw[1], r_xyz_raw[2],
+        //     r_xyz_ik[0],  r_xyz_ik[1],  r_xyz_ik[2],
+        //     static_cast<int>(r_offset_applied),
+        //     r_eul[0], r_eul[1], r_eul[2],
+        //     static_cast<int>(r_ok && rr.size() >= 6));
 
-        if (l_ok && rl.size() >= 6) {
-            RCLCPP_INFO(logger,
-                "[IK Q L] q_t=[%.3f %.3f %.3f %.3f %.3f %.3f]",
-                q_l_t_(0), q_l_t_(1), q_l_t_(2), q_l_t_(3), q_l_t_(4), q_l_t_(5));
-        }
-        if (r_ok && rr.size() >= 6) {
-            RCLCPP_INFO(logger,
-                "[IK Q R] q_t=[%.3f %.3f %.3f %.3f %.3f %.3f]",
-                q_r_t_(0), q_r_t_(1), q_r_t_(2), q_r_t_(3), q_r_t_(4), q_r_t_(5));
-        }
+        // if (l_ok && rl.size() >= 6) {
+        //     RCLCPP_INFO(logger,
+        //         "[IK Q L] q_t=[%.3f %.3f %.3f %.3f %.3f %.3f]",
+        //         q_l_t_(0), q_l_t_(1), q_l_t_(2), q_l_t_(3), q_l_t_(4), q_l_t_(5));
+        // }
+        // if (r_ok && rr.size() >= 6) {
+        //     RCLCPP_INFO(logger,
+        //         "[IK Q R] q_t=[%.3f %.3f %.3f %.3f %.3f %.3f]",
+        //         q_r_t_(0), q_r_t_(1), q_r_t_(2), q_r_t_(3), q_r_t_(4), q_r_t_(5));
+        // }
     }
 }
 
 // ============================================================================
-// TargetHandPositionCallback (inverse hand IK, pos-only)
-//   v24:
-//   - writes hand motion reference q_h_motion_t_
-//   - final q_cmd(q_h_t_) is built in ControlLoop
+// TargetHandPositionCallback (inverse hand target store-only)
+//   v25-style patch:
+//   - DOES NOT run IK here
+//   - stores Cartesian fingertip target x_d_*
+//   - final q_cmd is built in ControlLoop via
+//       x_d, x_0, F_d, F_ext -> admittance -> x_cmd -> IK -> q_cmd
 // ============================================================================
+
 void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
     if (current_hand_control_mode_ != "inverse") return;
     if (!msg) return;
     if (msg->data.size() < 30) return;
 
-    if (!hand_ik_l_ || !hand_ik_r_) return;
-    if (!hand_fk_l_ || !hand_fk_r_) return;
+    auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
 
-    std::array<Eigen::Vector3d,5> tgt_l;
-    std::array<Eigen::Vector3d,5> tgt_r;
-
+    // left 5 fingertips
     for (int i = 0; i < 5; ++i) {
         const int b = i * 3;
-        tgt_l[i] = Eigen::Vector3d(msg->data[b + 0], msg->data[b + 1], msg->data[b + 2]);
+        const Eigen::Vector3d xd(msg->data[b + 0], msg->data[b + 1], msg->data[b + 2]);
+        if (!isFiniteVec3(xd)) {
+            RCLCPP_WARN(logger, "[TargetHandPositionCallback] Non-finite left target at finger=%d", i);
+            return;
+        }
+        writeMatrixRow(x_l_hand_d_, i, xd);
     }
+
+    // right 5 fingertips
     for (int i = 0; i < 5; ++i) {
         const int b = 15 + i * 3;
-        tgt_r[i] = Eigen::Vector3d(msg->data[b + 0], msg->data[b + 1], msg->data[b + 2]);
+        const Eigen::Vector3d xd(msg->data[b + 0], msg->data[b + 1], msg->data[b + 2]);
+        if (!isFiniteVec3(xd)) {
+            RCLCPP_WARN(logger, "[TargetHandPositionCallback] Non-finite right target at finger=%d", i);
+            return;
+        }
+        writeMatrixRow(x_r_hand_d_, i, xd);
     }
 
-    auto eigen20_to_stdvec20 = [&](const Eigen::VectorXd& qh) -> std::vector<double> {
-        std::vector<double> out(20, 0.0);
-        const int n = std::min<int>(qh.size(), 20);
-        for (int i = 0; i < n; ++i) out[i] = qh(i);
-        return out;
-    };
+    hand_cartesian_target_l_initialized_ = true;
+    hand_cartesian_target_r_initialized_ = true;
 
-    auto near_zero_norm = [](const Eigen::VectorXd& v)->bool {
-        if (v.size() == 0) return true;
-        return (v.norm() < 1e-12);
-    };
+    // monitor target points
+    updatePointSetFromMatrix(
+        x_l_hand_d_,
+        t_f_l_thumb_, t_f_l_index_, t_f_l_middle_, t_f_l_ring_, t_f_l_baby_);
 
-    std::vector<double> ql_init20 = near_zero_norm(q_l_h_motion_t_) ? eigen20_to_stdvec20(q_l_h_c_)
-                                                                    : eigen20_to_stdvec20(q_l_h_motion_t_);
-    std::vector<double> qr_init20 = near_zero_norm(q_r_h_motion_t_) ? eigen20_to_stdvec20(q_r_h_c_)
-                                                                    : eigen20_to_stdvec20(q_r_h_motion_t_);
+    updatePointSetFromMatrix(
+        x_r_hand_d_,
+        t_f_r_thumb_, t_f_r_index_, t_f_r_middle_, t_f_r_ring_, t_f_r_baby_);
 
-    dualarm_forcecon::HandInverseKinematics::Options opt;
-    opt.max_iters       = 80;
-    opt.tol_pos_m       = 5e-4;
-    opt.lambda          = 1e-2;
-    opt.lambda_min      = 1e-5;
-    opt.lambda_max      = 1.0;
-    opt.alpha           = 0.8;
-    opt.alpha_min       = 0.05;
-    opt.max_step        = 0.12;
-    opt.mu_posture      = 1e-4;
-    opt.use_urdf_like_limits = true;
-    opt.verbose         = false;
+    static int dbg_decim = 0;
+    const bool do_dbg = ((dbg_decim++ % 20) == 0);
 
-    opt.mask    = {{true, true, true, true, true}};
-    opt.weights = {{1.0, 1.0, 1.0, 1.0, 1.0}};
-
-    std::vector<double> ql_sol20, qr_sol20;
-    const bool ok_l = hand_ik_l_->solveIKFingertips(ql_init20, tgt_l, ql_sol20, opt);
-    const bool ok_r = hand_ik_r_->solveIKFingertips(qr_init20, tgt_r, qr_sol20, opt);
-
-    if (ok_l && ql_sol20.size() >= 20) {
-        for (int i = 0; i < 20; ++i) q_l_h_motion_t_(i) = ql_sol20[i];
-    }
-    if (ok_r && qr_sol20.size() >= 20) {
-        for (int i = 0; i < 20; ++i) q_r_h_motion_t_(i) = qr_sol20[i];
-    }
-
-    auto assign_point = [&](geometry_msgs::msg::Point& p, const Eigen::Vector3d& v) {
-        p.x = v.x();
-        p.y = v.y();
-        p.z = v.z();
-    };
-
-    auto safe_get = [&](const std::vector<Eigen::Vector3d>& v, int idx) -> Eigen::Vector3d {
-        if (idx < 0 || idx >= static_cast<int>(v.size())) return Eigen::Vector3d::Zero();
-        return v[idx];
-    };
-
-    if (ok_l && ql_sol20.size() >= 20) {
-        const auto tl_cmd = hand_fk_l_->computeFingertips(ql_sol20);
-        assign_point(t_f_l_thumb_,  safe_get(tl_cmd, 0));
-        assign_point(t_f_l_index_,  safe_get(tl_cmd, 1));
-        assign_point(t_f_l_middle_, safe_get(tl_cmd, 2));
-        assign_point(t_f_l_ring_,   safe_get(tl_cmd, 3));
-        assign_point(t_f_l_baby_,   safe_get(tl_cmd, 4));
-    } else {
-        assign_point(t_f_l_thumb_,  tgt_l[0]);
-        assign_point(t_f_l_index_,  tgt_l[1]);
-        assign_point(t_f_l_middle_, tgt_l[2]);
-        assign_point(t_f_l_ring_,   tgt_l[3]);
-        assign_point(t_f_l_baby_,   tgt_l[4]);
-    }
-
-    if (ok_r && qr_sol20.size() >= 20) {
-        const auto tr_cmd = hand_fk_r_->computeFingertips(qr_sol20);
-        assign_point(t_f_r_thumb_,  safe_get(tr_cmd, 0));
-        assign_point(t_f_r_index_,  safe_get(tr_cmd, 1));
-        assign_point(t_f_r_middle_, safe_get(tr_cmd, 2));
-        assign_point(t_f_r_ring_,   safe_get(tr_cmd, 3));
-        assign_point(t_f_r_baby_,   safe_get(tr_cmd, 4));
-    } else {
-        assign_point(t_f_r_thumb_,  tgt_r[0]);
-        assign_point(t_f_r_index_,  tgt_r[1]);
-        assign_point(t_f_r_middle_, tgt_r[2]);
-        assign_point(t_f_r_ring_,   tgt_r[3]);
-        assign_point(t_f_r_baby_,   tgt_r[4]);
-    }
-
-    if (!ok_l || !ok_r) {
-        RCLCPP_WARN(node_->get_logger(),
-                    "[HandIK] solve result: left=%d right=%d (partial update may be applied)",
-                    static_cast<int>(ok_l), static_cast<int>(ok_r));
+    if (do_dbg) {
+        // RCLCPP_INFO(logger,
+        //     "[TargetHandPosCb] hand_mode=inverse | store-only Cartesian target updated "
+        //     "| L_ring=(%.4f %.4f %.4f) R_ring=(%.4f %.4f %.4f)",
+        //     x_l_hand_d_(3,0), x_l_hand_d_(3,1), x_l_hand_d_(3,2),
+        //     x_r_hand_d_(3,0), x_r_hand_d_(3,1), x_r_hand_d_(3,2));
     }
 }
 
@@ -368,33 +392,33 @@ void DualArmForceControl::DeltaArmPositionCallback(
     const bool do_dbg = ((dbg_decim++ % 20) == 0);
 
     if (do_dbg) {
-        RCLCPP_INFO(logger,
-            "[DeltaArmPosCb] arm_mode=inverse angle_unit=%s euler_conv=%s | delta interpreted w.r.t latched initial pose",
-            ik_angle_unit_.c_str(), ik_euler_conv_.c_str());
+        // RCLCPP_INFO(logger,
+        //     "[DeltaArmPosCb] arm_mode=inverse angle_unit=%s euler_conv=%s | delta interpreted w.r.t latched initial pose",
+        //     ik_angle_unit_.c_str(), ik_euler_conv_.c_str());
 
-        RCLCPP_INFO(logger,
-            "[L] base xyz=(%.4f %.4f %.4f) + dxyz=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
-            l_xyz_base[0], l_xyz_base[1], l_xyz_base[2],
-            l_dxyz[0], l_dxyz[1], l_dxyz[2],
-            abs_msg.data[0], abs_msg.data[1], abs_msg.data[2]);
+        // RCLCPP_INFO(logger,
+        //     "[L] base xyz=(%.4f %.4f %.4f) + dxyz=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
+        //     l_xyz_base[0], l_xyz_base[1], l_xyz_base[2],
+        //     l_dxyz[0], l_dxyz[1], l_dxyz[2],
+        //     abs_msg.data[0], abs_msg.data[1], abs_msg.data[2]);
 
-        RCLCPP_INFO(logger,
-            "[L] base eul=(%.4f %.4f %.4f) + deul=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
-            l_eul_base[0], l_eul_base[1], l_eul_base[2],
-            l_deul[0], l_deul[1], l_deul[2],
-            abs_msg.data[3], abs_msg.data[4], abs_msg.data[5]);
+        // RCLCPP_INFO(logger,
+        //     "[L] base eul=(%.4f %.4f %.4f) + deul=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
+        //     l_eul_base[0], l_eul_base[1], l_eul_base[2],
+        //     l_deul[0], l_deul[1], l_deul[2],
+        //     abs_msg.data[3], abs_msg.data[4], abs_msg.data[5]);
 
-        RCLCPP_INFO(logger,
-            "[R] base xyz=(%.4f %.4f %.4f) + dxyz=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
-            r_xyz_base[0], r_xyz_base[1], r_xyz_base[2],
-            r_dxyz[0], r_dxyz[1], r_dxyz[2],
-            abs_msg.data[6], abs_msg.data[7], abs_msg.data[8]);
+        // RCLCPP_INFO(logger,
+        //     "[R] base xyz=(%.4f %.4f %.4f) + dxyz=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
+        //     r_xyz_base[0], r_xyz_base[1], r_xyz_base[2],
+        //     r_dxyz[0], r_dxyz[1], r_dxyz[2],
+        //     abs_msg.data[6], abs_msg.data[7], abs_msg.data[8]);
 
-        RCLCPP_INFO(logger,
-            "[R] base eul=(%.4f %.4f %.4f) + deul=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
-            r_eul_base[0], r_eul_base[1], r_eul_base[2],
-            r_deul[0], r_deul[1], r_deul[2],
-            abs_msg.data[9], abs_msg.data[10], abs_msg.data[11]);
+        // RCLCPP_INFO(logger,
+        //     "[R] base eul=(%.4f %.4f %.4f) + deul=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
+        //     r_eul_base[0], r_eul_base[1], r_eul_base[2],
+        //     r_deul[0], r_deul[1], r_deul[2],
+        //     abs_msg.data[9], abs_msg.data[10], abs_msg.data[11]);
     }
 
     auto abs_msg_ptr = std::make_shared<std_msgs::msg::Float64MultiArray>(abs_msg);
@@ -403,13 +427,16 @@ void DualArmForceControl::DeltaArmPositionCallback(
 
 // ============================================================================
 // DeltaHandPositionCallback
+//   v25-style patch:
+//   - inverse utility
+//   - builds absolute Cartesian fingertip target and forwards to
+//     TargetHandPositionCallback()
 // ============================================================================
 void DualArmForceControl::DeltaHandPositionCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
     if (current_hand_control_mode_ != "inverse") return;
     if (!msg || msg->data.size() < 5) return;
-    if (!hand_ik_l_ || !hand_ik_r_) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
 
     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
@@ -435,35 +462,31 @@ void DualArmForceControl::DeltaHandPositionCallback(
     }
 
     const Eigen::Vector3d dxyz(msg->data[2], msg->data[3], msg->data[4]);
-    if (!std::isfinite(dxyz.x()) || !std::isfinite(dxyz.y()) || !std::isfinite(dxyz.z())) {
+    if (!isFiniteVec3(dxyz)) {
         RCLCPP_WARN(logger, "[DeltaHandPositionCallback] Non-finite delta xyz input. Ignore.");
         return;
     }
 
-    auto point_to_vec3 = [](const geometry_msgs::msg::Point& p) -> Eigen::Vector3d {
-        return Eigen::Vector3d(p.x, p.y, p.z);
-    };
-
     std::array<Eigen::Vector3d,5> cur_l;
     std::array<Eigen::Vector3d,5> cur_r;
 
-    cur_l[0] = point_to_vec3(f_l_thumb_);
-    cur_l[1] = point_to_vec3(f_l_index_);
-    cur_l[2] = point_to_vec3(f_l_middle_);
-    cur_l[3] = point_to_vec3(f_l_ring_);
-    cur_l[4] = point_to_vec3(f_l_baby_);
+    cur_l[0] = pointToVec(f_l_thumb_);
+    cur_l[1] = pointToVec(f_l_index_);
+    cur_l[2] = pointToVec(f_l_middle_);
+    cur_l[3] = pointToVec(f_l_ring_);
+    cur_l[4] = pointToVec(f_l_baby_);
 
-    cur_r[0] = point_to_vec3(f_r_thumb_);
-    cur_r[1] = point_to_vec3(f_r_index_);
-    cur_r[2] = point_to_vec3(f_r_middle_);
-    cur_r[3] = point_to_vec3(f_r_ring_);
-    cur_r[4] = point_to_vec3(f_r_baby_);
+    cur_r[0] = pointToVec(f_r_thumb_);
+    cur_r[1] = pointToVec(f_r_index_);
+    cur_r[2] = pointToVec(f_r_middle_);
+    cur_r[3] = pointToVec(f_r_ring_);
+    cur_r[4] = pointToVec(f_r_baby_);
 
     std::array<Eigen::Vector3d,5> tgt_l = cur_l;
     std::array<Eigen::Vector3d,5> tgt_r = cur_r;
 
-    if (side == 0) tgt_l[static_cast<size_t>(finger)] += dxyz;
-    else           tgt_r[static_cast<size_t>(finger)] += dxyz;
+    if (side == 0) tgt_l[static_cast<std::size_t>(finger)] += dxyz;
+    else           tgt_r[static_cast<std::size_t>(finger)] += dxyz;
 
     std_msgs::msg::Float64MultiArray abs_msg;
     abs_msg.data.resize(30, 0.0);
@@ -486,18 +509,18 @@ void DualArmForceControl::DeltaHandPositionCallback(
     const bool do_dbg = ((dbg_decim++ % 20) == 0);
 
     if (do_dbg) {
-        const Eigen::Vector3d p_cur = (side == 0) ? cur_l[static_cast<size_t>(finger)]
-                                                  : cur_r[static_cast<size_t>(finger)];
-        const Eigen::Vector3d p_tgt = (side == 0) ? tgt_l[static_cast<size_t>(finger)]
-                                                  : tgt_r[static_cast<size_t>(finger)];
+        const Eigen::Vector3d p_cur = (side == 0) ? cur_l[static_cast<std::size_t>(finger)]
+                                                  : cur_r[static_cast<std::size_t>(finger)];
+        const Eigen::Vector3d p_tgt = (side == 0) ? tgt_l[static_cast<std::size_t>(finger)]
+                                                  : tgt_r[static_cast<std::size_t>(finger)];
 
-        RCLCPP_INFO(logger,
-            "[DeltaHandPosCb] hand_mode=inverse side=%s finger=%d | cur=(%.4f %.4f %.4f) + d=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
-            (side == 0 ? "L" : "R"),
-            finger,
-            p_cur.x(), p_cur.y(), p_cur.z(),
-            dxyz.x(), dxyz.y(), dxyz.z(),
-            p_tgt.x(), p_tgt.y(), p_tgt.z());
+        // RCLCPP_INFO(logger,
+        //     "[DeltaHandPosCb] hand_mode=inverse side=%s finger=%d | cur=(%.4f %.4f %.4f) + d=(%.4f %.4f %.4f) -> tgt=(%.4f %.4f %.4f)",
+        //     (side == 0 ? "L" : "R"),
+        //     finger,
+        //     p_cur.x(), p_cur.y(), p_cur.z(),
+        //     dxyz.x(), dxyz.y(), dxyz.z(),
+        //     p_tgt.x(), p_tgt.y(), p_tgt.z());
     }
 
     auto abs_msg_ptr = std::make_shared<std_msgs::msg::Float64MultiArray>(abs_msg);
@@ -522,9 +545,10 @@ void DualArmForceControl::TargetArmJointsCallback(
 
 // --------------------
 // TargetHandJointsCallback (forward)
-//   v24:
-//   - writes hand motion reference q_h_motion_t_
-//   - final q_cmd(q_h_t_) is built in ControlLoop
+//   v25-style patch:
+//   - writes q_h_motion_t_ (authoritative forward input)
+//   - also updates Cartesian target cache x_hand_d_ via FK
+//   - final q_cmd(q_h_t_) is built later in ControlLoop
 // --------------------
 void DualArmForceControl::TargetHandJointsCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
@@ -561,40 +585,62 @@ void DualArmForceControl::TargetHandJointsCallback(
         enforce_mimic_q4_eq_q3(qh20);
     };
 
-    if (n >= 40) {
-        assign_hand20_to_qh20(q_l_h_motion_t_, 0);
-        assign_hand20_to_qh20(q_r_h_motion_t_, 20);
-        return;
-    }
-
-    if (n >= 30) {
-        assign_hand15_to_qh20(q_l_h_motion_t_, 0);
-        assign_hand15_to_qh20(q_r_h_motion_t_, 15);
-        return;
-    }
-
+    // NOTE:
+    // check larger legacy packet sizes first
     if (n >= 52) {
         assign_hand20_to_qh20(q_l_h_motion_t_, 12);
         assign_hand20_to_qh20(q_r_h_motion_t_, 32);
+    }
+    else if (n >= 42) {
+        assign_hand15_to_qh20(q_l_h_motion_t_, 12);
+        assign_hand15_to_qh20(q_r_h_motion_t_, 27);
+    }
+    else if (n >= 40) {
+        assign_hand20_to_qh20(q_l_h_motion_t_, 0);
+        assign_hand20_to_qh20(q_r_h_motion_t_, 20);
+    }
+    else if (n >= 30) {
+        assign_hand15_to_qh20(q_l_h_motion_t_, 0);
+        assign_hand15_to_qh20(q_r_h_motion_t_, 15);
+    }
+    else {
         return;
     }
 
-    if (n >= 42) {
-        assign_hand15_to_qh20(q_l_h_motion_t_, 12);
-        assign_hand15_to_qh20(q_r_h_motion_t_, 27);
-        return;
+    // Build Cartesian target cache x_d from motion target via FK
+    if (hand_fk_l_ && hand_fk_r_) {
+        const std::vector<double> ql15 = compress20to15(q_l_h_motion_t_);
+        const std::vector<double> qr15 = compress20to15(q_r_h_motion_t_);
+
+        const std::vector<Eigen::Vector3d> tips_l = hand_fk_l_->computeFingertips(ql15);
+        const std::vector<Eigen::Vector3d> tips_r = hand_fk_r_->computeFingertips(qr15);
+
+        for (int i = 0; i < 5; ++i) {
+            writeMatrixRow(x_l_hand_d_, i, safeGetTip(tips_l, i));
+            writeMatrixRow(x_r_hand_d_, i, safeGetTip(tips_r, i));
+        }
+
+        hand_cartesian_target_l_initialized_ = true;
+        hand_cartesian_target_r_initialized_ = true;
+
+        updatePointSetFromMatrix(
+            x_l_hand_d_,
+            t_f_l_thumb_, t_f_l_index_, t_f_l_middle_, t_f_l_ring_, t_f_l_baby_);
+
+        updatePointSetFromMatrix(
+            x_r_hand_d_,
+            t_f_r_thumb_, t_f_r_index_, t_f_r_middle_, t_f_r_ring_, t_f_r_baby_);
     }
 }
 
 // ============================================================================
 // TargetHandForceCallback
-//   v24:
+//   v25-style patch:
 //   - no separate forcecon mode
 //   - valid in hand forward / inverse
-//   - /target_hand_force provides desired force reference only
-//   - supported:
-//       [hand_id, finger_id, fx, fy, fz]
-//       [hand_id, finger_id, px, py, pz, fx, fy, fz]  // legacy, p ignored
+//   - authoritative desired-force state:
+//       f_l_hand_t_ / f_r_hand_t_
+//   - legacy single-active-finger latch kept temporarily for migration/debug
 // ============================================================================
 void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
@@ -626,68 +672,68 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
 
     Eigen::Vector3d f_des_base = Eigen::Vector3d::Zero();
     if (msg->data.size() >= 8) {
-        f_des_base = Eigen::Vector3d(msg->data[5], msg->data[6], msg->data[7]); // legacy format
+        // legacy format: [hand_id, finger_id, px, py, pz, fx, fy, fz]
+        f_des_base = Eigen::Vector3d(msg->data[5], msg->data[6], msg->data[7]);
     } else {
-        f_des_base = Eigen::Vector3d(msg->data[2], msg->data[3], msg->data[4]); // compact format
+        // compact format: [hand_id, finger_id, fx, fy, fz]
+        f_des_base = Eigen::Vector3d(msg->data[2], msg->data[3], msg->data[4]);
     }
 
-    if (!(std::isfinite(f_des_base.x()) && std::isfinite(f_des_base.y()) && std::isfinite(f_des_base.z()))) {
+    if (!isFiniteVec3(f_des_base)) {
         RCLCPP_WARN(logger, "[TargetHandForceCallback] non-finite desired force");
         return;
     }
 
     const bool is_left = (hand_id == 0);
 
+    // single-command semantics 유지:
+    // current command packet defines one active fingertip target force.
     f_l_hand_t_.setZero();
     f_r_hand_t_.setZero();
-    if (is_left) f_l_hand_t_.row(finger_id) = f_des_base.transpose();
-    else         f_r_hand_t_.row(finger_id) = f_des_base.transpose();
 
+    if (is_left) writeMatrixRow(f_l_hand_t_, finger_id, f_des_base);
+    else         writeMatrixRow(f_r_hand_t_, finger_id, f_des_base);
+
+    // legacy latch kept temporarily for downstream migration / debug
     hand_force_cmd_valid_      = true;
     hand_force_cmd_hand_id_    = hand_id;
     hand_force_cmd_finger_id_  = finger_id;
     hand_force_cmd_f_des_base_ = f_des_base;
     hand_force_cmd_stamp_ns_   = node_ ? node_->get_clock()->now().nanoseconds() : 0;
 
-    static int prev_key = -1;
-    const int key = (is_left ? 0 : 5) + finger_id;
-
-    if (key != prev_key) {
-        auto& adm_arr = is_left ? hand_adm_l_ : hand_adm_r_;
-        if (adm_arr[static_cast<std::size_t>(finger_id)]) {
-            Eigen::Vector3d p_init = Eigen::Vector3d::Zero();
-
-            if (is_left) {
-                switch (finger_id) {
-                    case 0: p_init = Eigen::Vector3d(f_l_thumb_.x,  f_l_thumb_.y,  f_l_thumb_.z);  break;
-                    case 1: p_init = Eigen::Vector3d(f_l_index_.x,  f_l_index_.y,  f_l_index_.z);  break;
-                    case 2: p_init = Eigen::Vector3d(f_l_middle_.x, f_l_middle_.y, f_l_middle_.z); break;
-                    case 3: p_init = Eigen::Vector3d(f_l_ring_.x,   f_l_ring_.y,   f_l_ring_.z);   break;
-                    case 4: p_init = Eigen::Vector3d(f_l_baby_.x,   f_l_baby_.y,   f_l_baby_.z);   break;
-                }
-            } else {
-                switch (finger_id) {
-                    case 0: p_init = Eigen::Vector3d(f_r_thumb_.x,  f_r_thumb_.y,  f_r_thumb_.z);  break;
-                    case 1: p_init = Eigen::Vector3d(f_r_index_.x,  f_r_index_.y,  f_r_index_.z);  break;
-                    case 2: p_init = Eigen::Vector3d(f_r_middle_.x, f_r_middle_.y, f_r_middle_.z); break;
-                    case 3: p_init = Eigen::Vector3d(f_r_ring_.x,   f_r_ring_.y,   f_r_ring_.z);   break;
-                    case 4: p_init = Eigen::Vector3d(f_r_baby_.x,   f_r_baby_.y,   f_r_baby_.z);   break;
-                }
+    // reset only the targeted admittance controller state so the next control
+    // loop iteration starts from the current fingertip pose cleanly.
+    auto& adm_arr = is_left ? hand_adm_l_ : hand_adm_r_;
+    if (adm_arr[static_cast<std::size_t>(finger_id)]) {
+        Eigen::Vector3d p_init = Eigen::Vector3d::Zero();
+        if (is_left) {
+            switch (finger_id) {
+                case 0: p_init = pointToVec(f_l_thumb_);  break;
+                case 1: p_init = pointToVec(f_l_index_);  break;
+                case 2: p_init = pointToVec(f_l_middle_); break;
+                case 3: p_init = pointToVec(f_l_ring_);   break;
+                case 4: p_init = pointToVec(f_l_baby_);   break;
             }
-
-            adm_arr[static_cast<std::size_t>(finger_id)]->resetState(p_init);
+        } else {
+            switch (finger_id) {
+                case 0: p_init = pointToVec(f_r_thumb_);  break;
+                case 1: p_init = pointToVec(f_r_index_);  break;
+                case 2: p_init = pointToVec(f_r_middle_); break;
+                case 3: p_init = pointToVec(f_r_ring_);   break;
+                case 4: p_init = pointToVec(f_r_baby_);   break;
+            }
         }
-        prev_key = key;
+        adm_arr[static_cast<std::size_t>(finger_id)]->resetState(p_init);
     }
 
     static int dbg_decim = 0;
     if ((dbg_decim++ % 20) == 0) {
-        RCLCPP_INFO(logger,
-            "[TargetHandForceCb][v24] hand_mode=%s side=%s finger=%d | "
-            "f_des=(%.3f %.3f %.3f) | x_target is generated internally from motion target",
-            current_hand_control_mode_.c_str(),
-            is_left ? "L" : "R",
-            finger_id,
-            f_des_base.x(), f_des_base.y(), f_des_base.z());
+        // RCLCPP_INFO(logger,
+        //     "[TargetHandForceCb][store-only] hand_mode=%s side=%s finger=%d | "
+        //     "f_des=(%.3f %.3f %.3f)",
+        //     current_hand_control_mode_.c_str(),
+        //     is_left ? "L" : "R",
+        //     finger_id,
+        //     f_des_base.x(), f_des_base.y(), f_des_base.z());
     }
 }

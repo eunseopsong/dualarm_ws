@@ -957,20 +957,20 @@ private:
         const int decim = std::max(1, cfg_.debug_decimation);
         if ((debug_counter_ % decim) != 0) return;
 
-        RCLCPP_INFO(
-            debug_logger_,
-            "[HandAdm][%s] x0=(%.4f %.4f %.4f) xd=(%.4f %.4f %.4f) xcmd=(%.4f %.4f %.4f) "
-            "Fext=(%.3f %.3f %.3f) Fd=(%.3f %.3f %.3f) K=(%.3f %.3f %.3f) contact=%d slip=%d",
-            fingerName(finger_id_).c_str(),
-            out.x_0_base.x(), out.x_0_base.y(), out.x_0_base.z(),
-            out.x_d_base.x(), out.x_d_base.y(), out.x_d_base.z(),
-            out.x_cmd_base.x(), out.x_cmd_base.y(), out.x_cmd_base.z(),
-            out.f_ext_base.x(), out.f_ext_base.y(), out.f_ext_base.z(),
-            out.f_d_used.x(), out.f_d_used.y(), out.f_d_used.z(),
-            out.k_eff.x(), out.k_eff.y(), out.k_eff.z(),
-            static_cast<int>(out.contact_on),
-            static_cast<int>(out.slip_detected)
-        );
+        // RCLCPP_INFO(
+        //     debug_logger_,
+        //     "[HandAdm][%s] x0=(%.4f %.4f %.4f) xd=(%.4f %.4f %.4f) xcmd=(%.4f %.4f %.4f) "
+        //     "Fext=(%.3f %.3f %.3f) Fd=(%.3f %.3f %.3f) K=(%.3f %.3f %.3f) contact=%d slip=%d",
+        //     fingerName(finger_id_).c_str(),
+        //     out.x_0_base.x(), out.x_0_base.y(), out.x_0_base.z(),
+        //     out.x_d_base.x(), out.x_d_base.y(), out.x_d_base.z(),
+        //     out.x_cmd_base.x(), out.x_cmd_base.y(), out.x_cmd_base.z(),
+        //     out.f_ext_base.x(), out.f_ext_base.y(), out.f_ext_base.z(),
+        //     out.f_d_used.x(), out.f_d_used.y(), out.f_d_used.z(),
+        //     out.k_eff.x(), out.k_eff.y(), out.k_eff.z(),
+        //     static_cast<int>(out.contact_on),
+        //     static_cast<int>(out.slip_detected)
+        // );
     }
 
 private:

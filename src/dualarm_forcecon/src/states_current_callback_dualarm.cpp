@@ -10,46 +10,127 @@
 #include <mutex>
 
 namespace {
-// hand force debug cache (canonical row order: THMB, INDX, MIDL, RING, BABY)
-std::mutex g_hand_force_dbg_mtx;
 
-// raw scalar from /isaac_contact_states (per finger)
-Eigen::Matrix<double,5,1> g_l_hand_raw_scalar = Eigen::Matrix<double,5,1>::Zero();
-Eigen::Matrix<double,5,1> g_r_hand_raw_scalar = Eigen::Matrix<double,5,1>::Zero();
+inline bool isFiniteVec3(const Eigen::Vector3d& v)
+{
+    return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
+}
 
-// reconstructed force in sensor frame
-Eigen::Matrix<double,5,3> g_l_hand_force_sensor = Eigen::Matrix<double,5,3>::Zero();
-Eigen::Matrix<double,5,3> g_r_hand_force_sensor = Eigen::Matrix<double,5,3>::Zero();
+inline Eigen::Vector3d pointToVec(const geometry_msgs::msg::Point& p)
+{
+    return Eigen::Vector3d(p.x, p.y, p.z);
+}
 
-// converted force in wrist(hand-base) frame (same convention as monitor CUR_F)
-Eigen::Matrix<double,5,3> g_l_hand_force_wrist = Eigen::Matrix<double,5,3>::Zero();
-Eigen::Matrix<double,5,3> g_r_hand_force_wrist = Eigen::Matrix<double,5,3>::Zero();
+inline void setPointFromVec(geometry_msgs::msg::Point& p, const Eigen::Vector3d& v)
+{
+    p.x = v.x();
+    p.y = v.y();
+    p.z = v.z();
+}
+
+inline Eigen::Vector3d safeGetTip(const std::vector<Eigen::Vector3d>& v, int idx)
+{
+    if (idx < 0 || idx >= static_cast<int>(v.size())) return Eigen::Vector3d::Zero();
+    const Eigen::Vector3d& p = v[static_cast<std::size_t>(idx)];
+    if (!isFiniteVec3(p)) return Eigen::Vector3d::Zero();
+    return p;
+}
+
+inline Eigen::Matrix3d safeGetRot(const std::vector<Eigen::Matrix3d>& v, int idx)
+{
+    if (idx < 0 || idx >= static_cast<int>(v.size())) return Eigen::Matrix3d::Identity();
+    return v[static_cast<std::size_t>(idx)];
+}
+
+inline void writeMatrixRow(Eigen::Matrix<double,5,3>& M, int row, const Eigen::Vector3d& v)
+{
+    if (row < 0 || row >= 5) return;
+    M(row, 0) = v.x();
+    M(row, 1) = v.y();
+    M(row, 2) = v.z();
+}
+
+inline Eigen::Vector3d readMatrixRow(const Eigen::Matrix<double,5,3>& M, int row)
+{
+    if (row < 0 || row >= 5) return Eigen::Vector3d::Zero();
+    return Eigen::Vector3d(M(row, 0), M(row, 1), M(row, 2));
+}
+
+inline void matrixRowToPoint(const Eigen::Matrix<double,5,3>& M, int row, geometry_msgs::msg::Point& p)
+{
+    if (row < 0 || row >= 5) {
+        p.x = 0.0; p.y = 0.0; p.z = 0.0;
+        return;
+    }
+    p.x = M(row, 0);
+    p.y = M(row, 1);
+    p.z = M(row, 2);
+}
+
+inline void updatePointSetFromMatrix(const Eigen::Matrix<double,5,3>& M,
+                                     geometry_msgs::msg::Point& thumb,
+                                     geometry_msgs::msg::Point& index,
+                                     geometry_msgs::msg::Point& middle,
+                                     geometry_msgs::msg::Point& ring,
+                                     geometry_msgs::msg::Point& baby)
+{
+    matrixRowToPoint(M, 0, thumb);
+    matrixRowToPoint(M, 1, index);
+    matrixRowToPoint(M, 2, middle);
+    matrixRowToPoint(M, 3, ring);
+    matrixRowToPoint(M, 4, baby);
+}
+
+inline std::vector<double> compress20to15(const Eigen::VectorXd& qh)
+{
+    std::vector<double> h15(15, 0.0);
+
+    if (qh.size() >= 20) {
+        for (int f = 0; f < 5; ++f) {
+            const int b20 = f * 4;
+            const int b15 = f * 3;
+            h15[b15 + 0] = qh(b20 + 0);
+            h15[b15 + 1] = qh(b20 + 1);
+            h15[b15 + 2] = qh(b20 + 2);
+        }
+        return h15;
+    }
+
+    const int n = std::min<int>(qh.size(), 15);
+    for (int i = 0; i < n; ++i) h15[i] = qh(i);
+    return h15;
+}
+
 } // namespace
 
 // --------------------
 // JointsCallback
 // --------------------
-void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
-    if (joint_names_.empty()) { joint_names_ = msg->name; is_initialized_ = true; }
+void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
+{
+    if (joint_names_.empty()) {
+        joint_names_ = msg->name;
+        is_initialized_ = true;
+    }
 
     for (size_t i = 0; i < msg->name.size(); ++i) {
         const std::string& n = msg->name[i];
         const double p = msg->position[i];
 
         // arms
-        if      (n=="left_joint_1")  q_l_c_(0)=p;
-        else if (n=="left_joint_2")  q_l_c_(1)=p;
-        else if (n=="left_joint_3")  q_l_c_(2)=p;
-        else if (n=="left_joint_4")  q_l_c_(3)=p;
-        else if (n=="left_joint_5")  q_l_c_(4)=p;
-        else if (n=="left_joint_6")  q_l_c_(5)=p;
+        if      (n == "left_joint_1")  q_l_c_(0) = p;
+        else if (n == "left_joint_2")  q_l_c_(1) = p;
+        else if (n == "left_joint_3")  q_l_c_(2) = p;
+        else if (n == "left_joint_4")  q_l_c_(3) = p;
+        else if (n == "left_joint_5")  q_l_c_(4) = p;
+        else if (n == "left_joint_6")  q_l_c_(5) = p;
 
-        else if (n=="right_joint_1") q_r_c_(0)=p;
-        else if (n=="right_joint_2") q_r_c_(1)=p;
-        else if (n=="right_joint_3") q_r_c_(2)=p;
-        else if (n=="right_joint_4") q_r_c_(3)=p;
-        else if (n=="right_joint_5") q_r_c_(4)=p;
-        else if (n=="right_joint_6") q_r_c_(5)=p;
+        else if (n == "right_joint_1") q_r_c_(0) = p;
+        else if (n == "right_joint_2") q_r_c_(1) = p;
+        else if (n == "right_joint_3") q_r_c_(2) = p;
+        else if (n == "right_joint_4") q_r_c_(3) = p;
+        else if (n == "right_joint_5") q_r_c_(4) = p;
+        else if (n == "right_joint_6") q_r_c_(5) = p;
 
         else {
             auto hj = dualarm_forcecon::kin::parseHandJointName(n);
@@ -58,8 +139,8 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
             const int idx = hj.finger_id * 4 + hj.joint_id;  // 0..19
             if (idx < 0 || idx >= 20) continue;
 
-            if (hj.is_left)  q_l_h_c_(idx) = p;
-            else             q_r_h_c_(idx) = p;
+            if (hj.is_left) q_l_h_c_(idx) = p;
+            else            q_r_h_c_(idx) = p;
         }
     }
 }
@@ -67,7 +148,8 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
 // --------------------
 // PositionCallback (WRAPPER)
 // --------------------
-void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
+void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
+{
     (void)msg;
     if (!is_initialized_) return;
 
@@ -78,7 +160,8 @@ void DualArmForceControl::PositionCallback(const sensor_msgs::msg::JointState::S
 // --------------------
 // ArmPositionCallback
 // --------------------
-void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
+void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
+{
     (void)msg;
     if (!is_initialized_) return;
     if (!arm_fk_) return;
@@ -178,17 +261,17 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
         delta_arm_base_pose_r_ = current_pose_r_;
         delta_arm_base_pose_initialized_ = true;
 
-        RCLCPP_INFO(
-            node_->get_logger(),
-            "[DeltaArmBase] latched initial base pose | "
-            "L=(%.4f %.4f %.4f) R=(%.4f %.4f %.4f)",
-            delta_arm_base_pose_l_.position.x,
-            delta_arm_base_pose_l_.position.y,
-            delta_arm_base_pose_l_.position.z,
-            delta_arm_base_pose_r_.position.x,
-            delta_arm_base_pose_r_.position.y,
-            delta_arm_base_pose_r_.position.z
-        );
+        // RCLCPP_INFO(
+        //     node_->get_logger(),
+        //     "[DeltaArmBase] latched initial base pose | "
+        //     "L=(%.4f %.4f %.4f) R=(%.4f %.4f %.4f)",
+        //     delta_arm_base_pose_l_.position.x,
+        //     delta_arm_base_pose_l_.position.y,
+        //     delta_arm_base_pose_l_.position.z,
+        //     delta_arm_base_pose_r_.position.x,
+        //     delta_arm_base_pose_r_.position.y,
+        //     delta_arm_base_pose_r_.position.z
+        // );
     }
 
     if (current_arm_control_mode_ == "idle") {
@@ -215,6 +298,9 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
 
 // --------------------
 // HandPositionCallback
+//   - current fingertip position x_0 source
+//   - current fingertip rotation cache source
+//   - updates target-point monitor depending on mode
 // --------------------
 void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
 {
@@ -224,27 +310,12 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
 
     constexpr double kFingerPosDeadbandM = 1e-6;
 
-    auto safe_get = [&](const std::vector<Eigen::Vector3d>& v, int idx) -> Eigen::Vector3d {
-        if (idx < 0 || idx >= static_cast<int>(v.size())) return Eigen::Vector3d::Zero();
-        const Eigen::Vector3d& p = v[idx];
-        if (!std::isfinite(p.x()) || !std::isfinite(p.y()) || !std::isfinite(p.z())) {
-            return Eigen::Vector3d::Zero();
-        }
-        return p;
-    };
-
-    auto set_point_from_vec = [&](geometry_msgs::msg::Point& p, const Eigen::Vector3d& v) {
-        p.x = v.x();
-        p.y = v.y();
-        p.z = v.z();
-    };
-
     auto apply_point_deadband = [&](geometry_msgs::msg::Point& dst,
                                     const Eigen::Vector3d& src,
                                     bool& is_init_cache)
     {
         if (!is_init_cache) {
-            set_point_from_vec(dst, src);
+            setPointFromVec(dst, src);
             is_init_cache = true;
             return;
         }
@@ -254,29 +325,12 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
         if (std::fabs(src.z() - dst.z) >= kFingerPosDeadbandM) dst.z = src.z();
     };
 
-    auto compress20to15 = [&](const Eigen::VectorXd& qh) -> std::vector<double> {
-        std::vector<double> h15(15, 0.0);
-
-        if (qh.size() >= 20) {
-            for (int f = 0; f < 5; ++f) {
-                const int b20 = f * 4;
-                const int b15 = f * 3;
-                h15[b15 + 0] = qh(b20 + 0);
-                h15[b15 + 1] = qh(b20 + 1);
-                h15[b15 + 2] = qh(b20 + 2);
-            }
-            return h15;
-        }
-
-        const int n = std::min<int>(qh.size(), 15);
-        for (int i = 0; i < n; ++i) h15[i] = qh(i);
-        return h15;
-    };
-
     static bool s_l_cur_init[5] = {false, false, false, false, false};
     static bool s_r_cur_init[5] = {false, false, false, false, false};
     static bool s_l_tar_init[5] = {false, false, false, false, false};
     static bool s_r_tar_init[5] = {false, false, false, false, false};
+    static bool s_l_cmd_init[5] = {false, false, false, false, false};
+    static bool s_r_cmd_init[5] = {false, false, false, false, false};
 
     const std::vector<double> hl15 = compress20to15(q_l_h_c_);
     const std::vector<double> hr15 = compress20to15(q_r_h_c_);
@@ -284,30 +338,72 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
     const std::vector<Eigen::Vector3d> tl = hand_fk_l_->computeFingertips(hl15);
     const std::vector<Eigen::Vector3d> tr = hand_fk_r_->computeFingertips(hr15);
 
-    apply_point_deadband(f_l_thumb_,  safe_get(tl, 0), s_l_cur_init[0]);
-    apply_point_deadband(f_l_index_,  safe_get(tl, 1), s_l_cur_init[1]);
-    apply_point_deadband(f_l_middle_, safe_get(tl, 2), s_l_cur_init[2]);
-    apply_point_deadband(f_l_ring_,   safe_get(tl, 3), s_l_cur_init[3]);
-    apply_point_deadband(f_l_baby_,   safe_get(tl, 4), s_l_cur_init[4]);
+    const std::vector<Eigen::Matrix3d> Rl = hand_fk_l_->computeTipRotationsBase(hl15);
+    const std::vector<Eigen::Matrix3d> Rr = hand_fk_r_->computeTipRotationsBase(hr15);
 
-    apply_point_deadband(f_r_thumb_,  safe_get(tr, 0), s_r_cur_init[0]);
-    apply_point_deadband(f_r_index_,  safe_get(tr, 1), s_r_cur_init[1]);
-    apply_point_deadband(f_r_middle_, safe_get(tr, 2), s_r_cur_init[2]);
-    apply_point_deadband(f_r_ring_,   safe_get(tr, 3), s_r_cur_init[3]);
-    apply_point_deadband(f_r_baby_,   safe_get(tr, 4), s_r_cur_init[4]);
+    // current fingertip position cache
+    for (int i = 0; i < 5; ++i) {
+        writeMatrixRow(x_l_hand_c_, i, safeGetTip(tl, i));
+        writeMatrixRow(x_r_hand_c_, i, safeGetTip(tr, i));
+
+        R_l_base_tip_c_[static_cast<std::size_t>(i)] = safeGetRot(Rl, i);
+        R_r_base_tip_c_[static_cast<std::size_t>(i)] = safeGetRot(Rr, i);
+    }
+
+    // current point monitor
+    apply_point_deadband(f_l_thumb_,  readMatrixRow(x_l_hand_c_, 0), s_l_cur_init[0]);
+    apply_point_deadband(f_l_index_,  readMatrixRow(x_l_hand_c_, 1), s_l_cur_init[1]);
+    apply_point_deadband(f_l_middle_, readMatrixRow(x_l_hand_c_, 2), s_l_cur_init[2]);
+    apply_point_deadband(f_l_ring_,   readMatrixRow(x_l_hand_c_, 3), s_l_cur_init[3]);
+    apply_point_deadband(f_l_baby_,   readMatrixRow(x_l_hand_c_, 4), s_l_cur_init[4]);
+
+    apply_point_deadband(f_r_thumb_,  readMatrixRow(x_r_hand_c_, 0), s_r_cur_init[0]);
+    apply_point_deadband(f_r_index_,  readMatrixRow(x_r_hand_c_, 1), s_r_cur_init[1]);
+    apply_point_deadband(f_r_middle_, readMatrixRow(x_r_hand_c_, 2), s_r_cur_init[2]);
+    apply_point_deadband(f_r_ring_,   readMatrixRow(x_r_hand_c_, 3), s_r_cur_init[3]);
+    apply_point_deadband(f_r_baby_,   readMatrixRow(x_r_hand_c_, 4), s_r_cur_init[4]);
+
+    // If command Cartesian cache is still zero-ish, initialize with current
+    for (int i = 0; i < 5; ++i) {
+        const Eigen::Vector3d xl_cmd = readMatrixRow(x_l_hand_cmd_, i);
+        const Eigen::Vector3d xr_cmd = readMatrixRow(x_r_hand_cmd_, i);
+
+        if (xl_cmd.norm() < 1e-12) writeMatrixRow(x_l_hand_cmd_, i, readMatrixRow(x_l_hand_c_, i));
+        if (xr_cmd.norm() < 1e-12) writeMatrixRow(x_r_hand_cmd_, i, readMatrixRow(x_r_hand_c_, i));
+    }
+
+    // command point monitor (optional future extension)
+    apply_point_deadband(c_f_l_thumb_,  readMatrixRow(x_l_hand_cmd_, 0), s_l_cmd_init[0]);
+    apply_point_deadband(c_f_l_index_,  readMatrixRow(x_l_hand_cmd_, 1), s_l_cmd_init[1]);
+    apply_point_deadband(c_f_l_middle_, readMatrixRow(x_l_hand_cmd_, 2), s_l_cmd_init[2]);
+    apply_point_deadband(c_f_l_ring_,   readMatrixRow(x_l_hand_cmd_, 3), s_l_cmd_init[3]);
+    apply_point_deadband(c_f_l_baby_,   readMatrixRow(x_l_hand_cmd_, 4), s_l_cmd_init[4]);
+
+    apply_point_deadband(c_f_r_thumb_,  readMatrixRow(x_r_hand_cmd_, 0), s_r_cmd_init[0]);
+    apply_point_deadband(c_f_r_index_,  readMatrixRow(x_r_hand_cmd_, 1), s_r_cmd_init[1]);
+    apply_point_deadband(c_f_r_middle_, readMatrixRow(x_r_hand_cmd_, 2), s_r_cmd_init[2]);
+    apply_point_deadband(c_f_r_ring_,   readMatrixRow(x_r_hand_cmd_, 3), s_r_cmd_init[3]);
+    apply_point_deadband(c_f_r_baby_,   readMatrixRow(x_r_hand_cmd_, 4), s_r_cmd_init[4]);
 
     if (current_hand_control_mode_ == "idle") {
-        t_f_l_thumb_  = f_l_thumb_;
-        t_f_l_index_  = f_l_index_;
-        t_f_l_middle_ = f_l_middle_;
-        t_f_l_ring_   = f_l_ring_;
-        t_f_l_baby_   = f_l_baby_;
+        // idle: desired == current
+        x_l_hand_d_ = x_l_hand_c_;
+        x_r_hand_d_ = x_r_hand_c_;
+        x_l_hand_ref_ = x_l_hand_c_;
+        x_r_hand_ref_ = x_r_hand_c_;
+        x_l_hand_cmd_ = x_l_hand_c_;
+        x_r_hand_cmd_ = x_r_hand_c_;
 
-        t_f_r_thumb_  = f_r_thumb_;
-        t_f_r_index_  = f_r_index_;
-        t_f_r_middle_ = f_r_middle_;
-        t_f_r_ring_   = f_r_ring_;
-        t_f_r_baby_   = f_r_baby_;
+        updatePointSetFromMatrix(
+            x_l_hand_d_,
+            t_f_l_thumb_, t_f_l_index_, t_f_l_middle_, t_f_l_ring_, t_f_l_baby_);
+
+        updatePointSetFromMatrix(
+            x_r_hand_d_,
+            t_f_r_thumb_, t_f_r_index_, t_f_r_middle_, t_f_r_ring_, t_f_r_baby_);
+
+        hand_cartesian_target_l_initialized_ = true;
+        hand_cartesian_target_r_initialized_ = true;
 
         for (int i = 0; i < 5; ++i) {
             s_l_tar_init[i] = true;
@@ -315,26 +411,57 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
         }
     }
     else if (current_hand_control_mode_ == "forward") {
+        // forward: x_d comes from motion joint target via FK
         const std::vector<double> hl_ref15 = compress20to15(q_l_h_motion_t_);
         const std::vector<double> hr_ref15 = compress20to15(q_r_h_motion_t_);
 
         const std::vector<Eigen::Vector3d> tl_ref = hand_fk_l_->computeFingertips(hl_ref15);
         const std::vector<Eigen::Vector3d> tr_ref = hand_fk_r_->computeFingertips(hr_ref15);
 
-        apply_point_deadband(t_f_l_thumb_,  safe_get(tl_ref, 0), s_l_tar_init[0]);
-        apply_point_deadband(t_f_l_index_,  safe_get(tl_ref, 1), s_l_tar_init[1]);
-        apply_point_deadband(t_f_l_middle_, safe_get(tl_ref, 2), s_l_tar_init[2]);
-        apply_point_deadband(t_f_l_ring_,   safe_get(tl_ref, 3), s_l_tar_init[3]);
-        apply_point_deadband(t_f_l_baby_,   safe_get(tl_ref, 4), s_l_tar_init[4]);
+        for (int i = 0; i < 5; ++i) {
+            writeMatrixRow(x_l_hand_d_, i, safeGetTip(tl_ref, i));
+            writeMatrixRow(x_r_hand_d_, i, safeGetTip(tr_ref, i));
+        }
 
-        apply_point_deadband(t_f_r_thumb_,  safe_get(tr_ref, 0), s_r_tar_init[0]);
-        apply_point_deadband(t_f_r_index_,  safe_get(tr_ref, 1), s_r_tar_init[1]);
-        apply_point_deadband(t_f_r_middle_, safe_get(tr_ref, 2), s_r_tar_init[2]);
-        apply_point_deadband(t_f_r_ring_,   safe_get(tr_ref, 3), s_r_tar_init[3]);
-        apply_point_deadband(t_f_r_baby_,   safe_get(tr_ref, 4), s_r_tar_init[4]);
+        hand_cartesian_target_l_initialized_ = true;
+        hand_cartesian_target_r_initialized_ = true;
+
+        apply_point_deadband(t_f_l_thumb_,  readMatrixRow(x_l_hand_d_, 0), s_l_tar_init[0]);
+        apply_point_deadband(t_f_l_index_,  readMatrixRow(x_l_hand_d_, 1), s_l_tar_init[1]);
+        apply_point_deadband(t_f_l_middle_, readMatrixRow(x_l_hand_d_, 2), s_l_tar_init[2]);
+        apply_point_deadband(t_f_l_ring_,   readMatrixRow(x_l_hand_d_, 3), s_l_tar_init[3]);
+        apply_point_deadband(t_f_l_baby_,   readMatrixRow(x_l_hand_d_, 4), s_l_tar_init[4]);
+
+        apply_point_deadband(t_f_r_thumb_,  readMatrixRow(x_r_hand_d_, 0), s_r_tar_init[0]);
+        apply_point_deadband(t_f_r_index_,  readMatrixRow(x_r_hand_d_, 1), s_r_tar_init[1]);
+        apply_point_deadband(t_f_r_middle_, readMatrixRow(x_r_hand_d_, 2), s_r_tar_init[2]);
+        apply_point_deadband(t_f_r_ring_,   readMatrixRow(x_r_hand_d_, 3), s_r_tar_init[3]);
+        apply_point_deadband(t_f_r_baby_,   readMatrixRow(x_r_hand_d_, 4), s_r_tar_init[4]);
     }
-    // inverse 모드에서는 target fingertip position(t_f_*)을
-    // TargetHandPositionCallback / DeltaHandPositionCallback 이 직접 관리한다.
+    else if (current_hand_control_mode_ == "inverse") {
+        // inverse: x_d is authoritative Cartesian target set by callback
+        // if not initialized yet, keep current to avoid jumps
+        if (!hand_cartesian_target_l_initialized_) {
+            x_l_hand_d_ = x_l_hand_c_;
+            hand_cartesian_target_l_initialized_ = true;
+        }
+        if (!hand_cartesian_target_r_initialized_) {
+            x_r_hand_d_ = x_r_hand_c_;
+            hand_cartesian_target_r_initialized_ = true;
+        }
+
+        apply_point_deadband(t_f_l_thumb_,  readMatrixRow(x_l_hand_d_, 0), s_l_tar_init[0]);
+        apply_point_deadband(t_f_l_index_,  readMatrixRow(x_l_hand_d_, 1), s_l_tar_init[1]);
+        apply_point_deadband(t_f_l_middle_, readMatrixRow(x_l_hand_d_, 2), s_l_tar_init[2]);
+        apply_point_deadband(t_f_l_ring_,   readMatrixRow(x_l_hand_d_, 3), s_l_tar_init[3]);
+        apply_point_deadband(t_f_l_baby_,   readMatrixRow(x_l_hand_d_, 4), s_l_tar_init[4]);
+
+        apply_point_deadband(t_f_r_thumb_,  readMatrixRow(x_r_hand_d_, 0), s_r_tar_init[0]);
+        apply_point_deadband(t_f_r_index_,  readMatrixRow(x_r_hand_d_, 1), s_r_tar_init[1]);
+        apply_point_deadband(t_f_r_middle_, readMatrixRow(x_r_hand_d_, 2), s_r_tar_init[2]);
+        apply_point_deadband(t_f_r_ring_,   readMatrixRow(x_r_hand_d_, 3), s_r_tar_init[3]);
+        apply_point_deadband(t_f_r_baby_,   readMatrixRow(x_r_hand_d_, 4), s_r_tar_init[4]);
+    }
 }
 
 void DualArmForceControl::ControlModeCallback(
@@ -401,6 +528,44 @@ void DualArmForceControl::ControlModeCallback(
         f_r_hand_t_.setZero();
     };
 
+    auto sync_hand_targets_to_current = [&]() {
+        for (int i = 0; i < 20; ++i) {
+            q_l_h_motion_t_(i) = q_l_h_c_(i);
+            q_r_h_motion_t_(i) = q_r_h_c_(i);
+            q_l_h_t_(i) = q_l_h_c_(i);
+            q_r_h_t_(i) = q_r_h_c_(i);
+        }
+
+        x_l_hand_d_   = x_l_hand_c_;
+        x_r_hand_d_   = x_r_hand_c_;
+        x_l_hand_ref_ = x_l_hand_c_;
+        x_r_hand_ref_ = x_r_hand_c_;
+        x_l_hand_cmd_ = x_l_hand_c_;
+        x_r_hand_cmd_ = x_r_hand_c_;
+
+        k_l_hand_eff_.setZero();
+        k_r_hand_eff_.setZero();
+
+        updatePointSetFromMatrix(
+            x_l_hand_d_,
+            t_f_l_thumb_, t_f_l_index_, t_f_l_middle_, t_f_l_ring_, t_f_l_baby_);
+
+        updatePointSetFromMatrix(
+            x_r_hand_d_,
+            t_f_r_thumb_, t_f_r_index_, t_f_r_middle_, t_f_r_ring_, t_f_r_baby_);
+
+        updatePointSetFromMatrix(
+            x_l_hand_cmd_,
+            c_f_l_thumb_, c_f_l_index_, c_f_l_middle_, c_f_l_ring_, c_f_l_baby_);
+
+        updatePointSetFromMatrix(
+            x_r_hand_cmd_,
+            c_f_r_thumb_, c_f_r_index_, c_f_r_middle_, c_f_r_ring_, c_f_r_baby_);
+
+        hand_cartesian_target_l_initialized_ = true;
+        hand_cartesian_target_r_initialized_ = true;
+    };
+
     // ------------------------------------------------------------------------
     // ARM mode handling
     // ------------------------------------------------------------------------
@@ -424,32 +589,13 @@ void DualArmForceControl::ControlModeCallback(
     // ------------------------------------------------------------------------
     hand_idle_synced_ = false;
 
-    if (current_hand_control_mode_ == "idle" ||
-        current_hand_control_mode_ == "forward" ||
-        current_hand_control_mode_ == "inverse") {
-        for (int i = 0; i < 20; ++i) {
-            q_l_h_motion_t_(i) = q_l_h_c_(i);
-            q_r_h_motion_t_(i) = q_r_h_c_(i);
-            q_l_h_t_(i) = q_l_h_c_(i);
-            q_r_h_t_(i) = q_r_h_c_(i);
-        }
-
-        t_f_l_thumb_  = f_l_thumb_;
-        t_f_l_index_  = f_l_index_;
-        t_f_l_middle_ = f_l_middle_;
-        t_f_l_ring_   = f_l_ring_;
-        t_f_l_baby_   = f_l_baby_;
-
-        t_f_r_thumb_  = f_r_thumb_;
-        t_f_r_index_  = f_r_index_;
-        t_f_r_middle_ = f_r_middle_;
-        t_f_r_ring_   = f_r_ring_;
-        t_f_r_baby_   = f_r_baby_;
-    }
-
     if (prev_hand_mode != current_hand_control_mode_) {
         clear_hand_force_cmd();
         reset_all_hand_adm();
+        sync_hand_targets_to_current();
+    } else if (current_hand_control_mode_ == "idle") {
+        // keep idle tightly synced to current
+        sync_hand_targets_to_current();
     }
 
     res->success = true;
@@ -487,35 +633,16 @@ void DualArmForceControl::HandContactForceCallback(
         return;
     }
 
-    auto compress20to15 = [](const Eigen::VectorXd& qh) -> std::vector<double> {
-        std::vector<double> h15(15, 0.0);
-
-        if (qh.size() >= 20) {
-            for (int f = 0; f < 5; ++f) {
-                const int b20 = f * 4;
-                const int b15 = f * 3;
-                h15[b15 + 0] = qh(b20 + 0);
-                h15[b15 + 1] = qh(b20 + 1);
-                h15[b15 + 2] = qh(b20 + 2);
-            }
-            return h15;
-        }
-
-        const int n = std::min<int>(qh.size(), 15);
-        for (int i = 0; i < n; ++i) h15[i] = qh(i);
-        return h15;
-    };
-
     const std::vector<double> hl15 = compress20to15(q_l_h_c_);
     const std::vector<double> hr15 = compress20to15(q_r_h_c_);
 
     const std::vector<Eigen::Matrix3d> Rl_base_tip = hand_fk_l_->computeTipRotationsBase(hl15);
     const std::vector<Eigen::Matrix3d> Rr_base_tip = hand_fk_r_->computeTipRotationsBase(hr15);
 
-    auto safeR = [](const std::vector<Eigen::Matrix3d>& Rs, int idx) -> Eigen::Matrix3d {
-        if (idx < 0 || idx >= static_cast<int>(Rs.size())) return Eigen::Matrix3d::Identity();
-        return Rs[idx];
-    };
+    for (int i = 0; i < 5; ++i) {
+        R_l_base_tip_c_[static_cast<std::size_t>(i)] = safeGetRot(Rl_base_tip, i);
+        R_r_base_tip_c_[static_cast<std::size_t>(i)] = safeGetRot(Rr_base_tip, i);
+    }
 
     const Eigen::Matrix3d R_tip_sensor = Eigen::Matrix3d::Identity();
 
@@ -524,20 +651,17 @@ void DualArmForceControl::HandContactForceCallback(
                              0.0, 1.0, 0.0,
                             -1.0, 0.0, 0.0;
 
+    // incoming observed order was [BABY, RING, MIDL, INDX, THMB]
+    // internal canonical row order is [THMB, INDX, MIDL, RING, BABY]
     const std::array<int,5> msg_to_row = {4, 3, 2, 1, 0};
-    const std::array<const char*,5> finger_name = {{"THMB","INDX","MIDL","RING","BABY"}};
 
     auto assign_one_hand = [&](Eigen::Matrix<double,5,1>& raw_contact_mat,
                                Eigen::Matrix<double,5,3>& F_sensor_mat,
                                Eigen::Matrix<double,5,3>& F_wrist_mat,
                                Eigen::Matrix<double,5,3>& F_hand_cur,
                                const std::vector<Eigen::Matrix3d>& R_base_tip_all,
-                               int msg_offset,
-                               const char* hand_tag)
+                               int msg_offset)
     {
-        static int dbg_decim = 0;
-        const bool do_dbg = ((dbg_decim++ % 20) == 0);
-
         for (int k = 0; k < 5; ++k) {
             const int row = msg_to_row[k];
             const double s = static_cast<double>(msg->data[msg_offset + k]);
@@ -548,7 +672,7 @@ void DualArmForceControl::HandContactForceCallback(
             F_sensor_mat.row(row) = f_sensor.transpose();
 
             const Eigen::Vector3d f_tip = R_tip_sensor * f_sensor;
-            const Eigen::Matrix3d R_base_tip = safeR(R_base_tip_all, row);
+            const Eigen::Matrix3d R_base_tip = safeGetRot(R_base_tip_all, row);
             const Eigen::Vector3d f_wrist_raw = R_base_tip * f_tip;
             Eigen::Vector3d f_wrist = R_wrist_output_calib * f_wrist_raw;
 
@@ -558,10 +682,6 @@ void DualArmForceControl::HandContactForceCallback(
 
             F_wrist_mat.row(row) = f_wrist.transpose();
             F_hand_cur.row(row)  = f_wrist.transpose();
-
-            (void)do_dbg;
-            (void)finger_name;
-            (void)hand_tag;
         }
     };
 
@@ -570,16 +690,14 @@ void DualArmForceControl::HandContactForceCallback(
                     f_l_hand_wrist_c_,
                     f_l_hand_c_,
                     Rl_base_tip,
-                    0,
-                    "L");
+                    0);
 
     assign_one_hand(raw_r_hand_contact_,
                     f_r_hand_sensor_c_,
                     f_r_hand_wrist_c_,
                     f_r_hand_c_,
                     Rr_base_tip,
-                    5,
-                    "R");
+                    5);
 }
 
 void DualArmForceControl::PublishHandForceMonitor()
@@ -616,7 +734,8 @@ void DualArmForceControl::PublishHandForceMonitor()
 // ============================================================================
 // PrintDualArmStates
 // ============================================================================
-void DualArmForceControl::PrintDualArmStates() {
+void DualArmForceControl::PrintDualArmStates()
+{
     if (!is_initialized_) return;
 
     constexpr const char* C_RESET   = "\033[0m";
@@ -682,7 +801,7 @@ void DualArmForceControl::PrintDualArmStates() {
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v24 | Arm:[%s%s%s] Hand:[%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v25 | Arm:[%s%s%s] Hand:[%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
            C_MODE, current_arm_control_mode_.c_str(), C_RESET,
            C_MODE, current_hand_control_mode_.c_str(), C_RESET,
