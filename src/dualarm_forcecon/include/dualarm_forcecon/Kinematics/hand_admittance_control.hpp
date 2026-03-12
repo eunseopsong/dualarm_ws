@@ -30,6 +30,7 @@ public:
         BABY   = 4
     };
 
+    
     struct Config {
         // MDK parameters (x,y,z in HAND BASE frame)
         std::array<double,3> mass;
