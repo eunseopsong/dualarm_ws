@@ -12,6 +12,21 @@ dualarm_kinematics
 = reusable FK/IK, robot kinematics YAML profile, joint/link mapping
 ```
 
+The recommended default operation mode for the current v27 workflow is:
+
+```text
+arm_mode  = inverse
+hand_mode = forward
+```
+
+In this mode:
+
+```text
+arm  : controlled by Cartesian target pose
+hand : controlled by forward joint target
+force: optional selected-finger desired force command
+```
+
 ---
 
 # Quick Start Example Commands
@@ -44,82 +59,29 @@ ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
 
 ---
 
-## Set control mode
+## Default mode: arm inverse + hand forward
 
-### Idle
-
-```bash
-ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'idle', hand_mode: 'idle'}"
-```
-
-### Arm forward mode
+This is the recommended default mode for v27 experiments.
 
 ```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'forward', hand_mode: 'idle'}"
-```
-
-### Arm inverse mode
-
-```bash
-ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'inverse', hand_mode: 'idle'}"
-```
-
-### Hand forward mode
-
-```bash
-ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'idle', hand_mode: 'forward'}"
-```
-
-### Arm + hand forward mode
-
-```bash
-ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'forward', hand_mode: 'forward'}"
+"{arm_mode: 'inverse', hand_mode: 'forward'}"
 ```
 
 ---
 
-## Arm forward command example
+## Move arm in default mode
 
-For the existing 6-DOF left arm + 6-DOF right arm configuration:
+Topic:
 
-```bash
-ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
-"{data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-         0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}"
+```text
+/target_arm_cartesian_pose
 ```
 
-For a 7-DOF left arm + 7-DOF right arm robot such as an RBY1-style profile:
+Type:
 
-```bash
-ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
-"{data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}"
-```
-
-The expected command length is automatically determined from the selected kinematics YAML profile.
-
----
-
-## Arm inverse command example
-
-First, switch to arm inverse mode:
-
-```bash
-ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'inverse', hand_mode: 'idle'}"
-```
-
-Then publish the target Cartesian pose:
-
-```bash
-ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.30,  0.20, 0.40, 0.0, 0.0, 0.0,
-         0.30, -0.20, 0.40, 0.0, 0.0, 0.0]}"
+```text
+std_msgs/msg/Float64MultiArray
 ```
 
 Format:
@@ -128,20 +90,362 @@ Format:
 [L x y z roll pitch yaw, R x y z roll pitch yaw]
 ```
 
-Default unit convention:
+Unit:
 
 ```text
 position    : meter
 orientation : radian
 ```
 
----
-
-## Check output command
+### Arm command 1: nominal symmetric pose
 
 ```bash
-ros2 topic info /isaac_joint_command
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.30,  0.20, 0.40, 0.0, 0.0, 0.0,
+         0.30, -0.20, 0.40, 0.0, 0.0, 0.0]}"
+```
+
+### Arm command 2: move both hands slightly forward
+
+```bash
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.35,  0.20, 0.40, 0.0, 0.0, 0.0,
+         0.35, -0.20, 0.40, 0.0, 0.0, 0.0]}"
+```
+
+### Arm command 3: move both hands upward
+
+```bash
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.30,  0.20, 0.48, 0.0, 0.0, 0.0,
+         0.30, -0.20, 0.48, 0.0, 0.0, 0.0]}"
+```
+
+### Arm command 4: move left and right arms outward
+
+```bash
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.30,  0.30, 0.42, 0.0, 0.0, 0.0,
+         0.30, -0.30, 0.42, 0.0, 0.0, 0.0]}"
+```
+
+### Arm command 5: asymmetric left/right pose
+
+```bash
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.34,  0.24, 0.46, 0.0, 0.0, 0.2,
+         0.28, -0.24, 0.38, 0.0, 0.0, -0.2]}"
+```
+
+---
+
+## Move hand in default mode
+
+In default mode, the hand is controlled using:
+
+```text
+/forward_hand_joint_targets
+```
+
+Type:
+
+```text
+std_msgs/msg/Float64MultiArray
+```
+
+Recommended v27 format for the current hand pipeline:
+
+```text
+40 values = left hand 20 + right hand 20
+```
+
+Per hand:
+
+```text
+5 fingers × 4 joints = 20 values
+```
+
+Canonical finger order:
+
+```text
+thumb, index, middle, ring, baby
+```
+
+Per finger:
+
+```text
+[joint1, joint2, joint3, joint4]
+```
+
+So the 40-dimensional command is:
+
+```text
+[
+  L_thumb_1, L_thumb_2, L_thumb_3, L_thumb_4,
+  L_index_1, L_index_2, L_index_3, L_index_4,
+  L_middle_1, L_middle_2, L_middle_3, L_middle_4,
+  L_ring_1, L_ring_2, L_ring_3, L_ring_4,
+  L_baby_1, L_baby_2, L_baby_3, L_baby_4,
+
+  R_thumb_1, R_thumb_2, R_thumb_3, R_thumb_4,
+  R_index_1, R_index_2, R_index_3, R_index_4,
+  R_middle_1, R_middle_2, R_middle_3, R_middle_4,
+  R_ring_1, R_ring_2, R_ring_3, R_ring_4,
+  R_baby_1, R_baby_2, R_baby_3, R_baby_4
+]
+```
+
+### Hand command 1: open both hands
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+### Hand command 2: close both index fingers slightly
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.3, 0.3, 0.3,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.3, 0.3, 0.3,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+### Hand command 3: close both hands moderately
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5
+]}"
+```
+
+### Hand command 4: left hand close, right hand open
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+### Hand command 5: selected-finger contact-ready pose
+
+This command keeps most fingers open and bends only the ring fingers.
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.4, 0.4, 0.4,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.4, 0.4, 0.4,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+## Send target hand force in default mode
+
+The desired hand force topic is:
+
+```text
+/target_hand_force
+```
+
+Type:
+
+```text
+std_msgs/msg/Float64MultiArray
+```
+
+Recommended compact format:
+
+```text
+[hand_id, finger_id, fx, fy, fz]
+```
+
+where:
+
+```text
+hand_id   : 0 = left, 1 = right
+finger_id : 0 = thumb, 1 = index, 2 = middle, 3 = ring, 4 = baby
+```
+
+Current force-control behavior:
+
+```text
+motion target comes from /forward_hand_joint_targets
+desired force comes from /target_hand_force
+selected finger receives admittance correction
+non-selected fingers keep following the motion target
+```
+
+### Target force command 1: left index, +3 N along z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 1, 0.0, 0.0, 3.0]}"
+```
+
+### Target force command 2: left index, +5 N along z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 1, 0.0, 0.0, 5.0]}"
+```
+
+### Target force command 3: right index, +5 N along z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [1, 1, 0.0, 0.0, 5.0]}"
+```
+
+### Target force command 4: left ring, +4 N along z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 3, 0.0, 0.0, 4.0]}"
+```
+
+### Target force command 5: right ring, +4 N along z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [1, 3, 0.0, 0.0, 4.0]}"
+```
+
+### Target force command 6: release selected force target to zero
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 1, 0.0, 0.0, 0.0]}"
+```
+
+If the force direction is opposite in Isaac or hardware, change the sign of `fz`:
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 1, 0.0, 0.0, -5.0]}"
+```
+
+---
+
+## Combined example sequence: arm inverse + hand forward + target force
+
+Terminal 1:
+
+```bash
+source ~/dualarm_ws/install/setup.bash
+
+ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
+  -p forcecon_cfg_yaml:=/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml
+```
+
+Terminal 2:
+
+```bash
+source ~/dualarm_ws/install/setup.bash
+
+ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
+"{arm_mode: 'inverse', hand_mode: 'forward'}"
+```
+
+Send arm target:
+
+```bash
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.30,  0.20, 0.42, 0.0, 0.0, 0.0,
+         0.30, -0.20, 0.42, 0.0, 0.0, 0.0]}"
+```
+
+Send hand motion target:
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.3, 0.3, 0.3,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.3, 0.3, 0.3,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+Send desired force to left index:
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 1, 0.0, 0.0, 5.0]}"
+```
+
+Check output:
+
+```bash
 ros2 topic echo /isaac_joint_command
+```
+
+Check force monitor:
+
+```bash
+ros2 topic echo /hand_force_current_monitor
+ros2 topic echo /hand_force_target_monitor
 ```
 
 ---
@@ -324,7 +628,34 @@ dualarm_kinematics/config/generic_dualarm_kinematics.yaml
 
 ---
 
-## 1.4 Existing Doosan / AIDIN dualarm usage
+## 1.4 Default v27 operation mode
+
+The recommended default mode is:
+
+```text
+arm_mode  = inverse
+hand_mode = forward
+```
+
+Command:
+
+```bash
+ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
+"{arm_mode: 'inverse', hand_mode: 'forward'}"
+```
+
+In this mode:
+
+```text
+arm target  : /target_arm_cartesian_pose
+hand target : /forward_hand_joint_targets
+force target: /target_hand_force
+output      : /isaac_joint_command
+```
+
+---
+
+## 1.5 Existing Doosan / AIDIN dualarm usage
 
 For the current existing dualarm setup, use:
 
@@ -341,24 +672,50 @@ ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
   -p forcecon_cfg_yaml:=/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml
 ```
 
-Switch to arm forward mode:
+Switch to the default mode:
 
 ```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'forward', hand_mode: 'idle'}"
+"{arm_mode: 'inverse', hand_mode: 'forward'}"
 ```
 
-Send a 12-dimensional command:
+Send a Cartesian arm command:
 
 ```bash
-ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
-"{data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-         0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}"
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.30,  0.20, 0.40, 0.0, 0.0, 0.0,
+         0.30, -0.20, 0.40, 0.0, 0.0, 0.0]}"
+```
+
+Send a hand forward command:
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.3, 0.3, 0.3,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.3, 0.3, 0.3,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+Send target force to the left index finger:
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 1, 0.0, 0.0, 5.0]}"
 ```
 
 ---
 
-## 1.5 RBY1-style arm-only usage
+## 1.6 RBY1-style arm-only usage
 
 For RBY1, first update:
 
@@ -419,6 +776,11 @@ kinematics:
 For 7-DOF + 7-DOF arm forward control, send a 14-dimensional command:
 
 ```bash
+ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
+"{arm_mode: 'forward', hand_mode: 'idle'}"
+```
+
+```bash
 ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
 "{data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}"
@@ -426,7 +788,7 @@ ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray 
 
 ---
 
-## 1.6 Control mode service
+## 1.7 Control mode service
 
 Service:
 
@@ -474,7 +836,7 @@ There is no separate hand `forcecon` mode in v27.
 
 ---
 
-## 1.7 Main ROS topics
+## 1.8 Main ROS topics
 
 ### State input
 
@@ -608,6 +970,12 @@ For the existing hand pipeline, common supported lengths are:
 40 = left20 + right20
 42 = legacy-compatible
 52 = legacy-compatible
+```
+
+Recommended current format:
+
+```text
+40 = left20 + right20
 ```
 
 ---
@@ -901,6 +1269,7 @@ Major changes:
 6. Updated dualarm_forcecon to depend on dualarm_kinematics
 7. Added robot-specific kinematics YAML profiles
 8. Preserved existing ROS topic/service control flow
+9. Recommended default mode is arm inverse + hand forward
 ```
 
 ---
@@ -1194,14 +1563,6 @@ x y z roll pitch yaw
 Default target frame is controlled by:
 
 ```yaml
-ik_targets_frame
-ik_euler_conv
-ik_angle_unit
-```
-
-Typical values:
-
-```yaml
 ik_targets_frame: base
 ik_euler_conv: rpy
 ik_angle_unit: rad
@@ -1375,7 +1736,7 @@ Check control mode:
 
 ```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'forward', hand_mode: 'idle'}"
+"{arm_mode: 'inverse', hand_mode: 'forward'}"
 ```
 
 ---
@@ -1384,8 +1745,8 @@ ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetContro
 
 ```bash
 git add .
-git commit -m "Refactor kinematics into reusable dualarm_kinematics package" \
-  -m "Move arm and hand FK/IK headers into a new include-only dualarm_kinematics package. Update dualarm_forcecon to depend on the external kinematics backend while preserving the v27 controller structure and YAML-based robot configuration."
+git commit -m "Document v27 kinematics split and default command workflow" \
+  -m "Update README with dependency notes, default arm inverse and hand forward usage, hand command examples, target hand force examples, and v27 package structure."
 ```
 
 Optional tag:
@@ -1417,6 +1778,31 @@ dualarm_kinematics
 
 dualarm_forcecon
 = ROS 2 force/admittance controller package
+```
+
+Recommended default operation:
+
+```text
+arm_mode  = inverse
+hand_mode = forward
+```
+
+Default command flow:
+
+```text
+/target_arm_cartesian_pose
+    -> arm IK
+    -> arm joint command
+
+/forward_hand_joint_targets
+    -> hand motion target
+    -> optional selected-finger force correction
+
+/target_hand_force
+    -> selected-finger desired force reference
+
+/isaac_joint_command
+    -> final combined command
 ```
 
 This makes it easier to add:
