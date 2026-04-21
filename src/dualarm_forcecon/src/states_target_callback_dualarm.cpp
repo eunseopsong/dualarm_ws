@@ -161,8 +161,59 @@ void DualArmForceControl::TargetArmPositionCallback(
     bool r_ok = arm_ik_r_->solveIK(
         qr, r_xyz_ik, r_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rr);
 
+    // ----------------------------------------------------------------------
+    // RBY1-safe fallback:
+    // KDL full-pose IK can fail for 7-DOF RBY1 even for very small Cartesian
+    // deltas because it tries to satisfy position and orientation strictly.
+    // If strict IK fails, use position-only numerical DLS IK. This preserves
+    // the current orientation approximately through the seed while only forcing
+    // the requested translation.
+    // ----------------------------------------------------------------------
+    constexpr int    kDlsMaxIters       = 120;
+    constexpr double kDlsPosTolM        = 5.0e-4;
+    constexpr double kDlsLambda         = 3.0e-2;
+    constexpr double kDlsAlpha          = 0.7;
+    constexpr double kDlsMaxJointStep   = 3.0e-2;
+    constexpr double kDlsNumericalEps   = 1.0e-5;
+
+    bool l_used_dls = false;
+    bool r_used_dls = false;
+
+    if (!(l_ok && static_cast<int>(rl.size()) >= n_l)) {
+        std::vector<double> rl_dls;
+        const bool l_dls_ok = arm_ik_l_->solveIKPositionOnlyDLS(
+            ql, l_xyz_ik, ik_targets_frame_, rl_dls,
+            kDlsMaxIters, kDlsPosTolM, kDlsLambda, kDlsAlpha,
+            kDlsMaxJointStep, kDlsNumericalEps);
+
+        if (l_dls_ok && static_cast<int>(rl_dls.size()) >= n_l) {
+            rl = rl_dls;
+            l_ok = true;
+            l_used_dls = true;
+        }
+    }
+
+    if (!(r_ok && static_cast<int>(rr.size()) >= n_r)) {
+        std::vector<double> rr_dls;
+        const bool r_dls_ok = arm_ik_r_->solveIKPositionOnlyDLS(
+            qr, r_xyz_ik, ik_targets_frame_, rr_dls,
+            kDlsMaxIters, kDlsPosTolM, kDlsLambda, kDlsAlpha,
+            kDlsMaxJointStep, kDlsNumericalEps);
+
+        if (r_dls_ok && static_cast<int>(rr_dls.size()) >= n_r) {
+            rr = rr_dls;
+            r_ok = true;
+            r_used_dls = true;
+        }
+    }
+
     if (l_ok && static_cast<int>(rl.size()) >= n_l) {
         for (int i = 0; i < n_l; ++i) q_l_t_(i) = rl[static_cast<std::size_t>(i)];
+        if (l_used_dls) {
+            RCLCPP_INFO_THROTTLE(
+                logger, *node_->get_clock(), 1000,
+                "[IK][L] strict full-pose IK failed; position-only DLS fallback succeeded.");
+        }
     } else {
         RCLCPP_WARN(logger,
                     "[IK][L] solveIK failed or invalid output size. ok=%d size=%zu expected=%d",
@@ -171,6 +222,11 @@ void DualArmForceControl::TargetArmPositionCallback(
 
     if (r_ok && static_cast<int>(rr.size()) >= n_r) {
         for (int i = 0; i < n_r; ++i) q_r_t_(i) = rr[static_cast<std::size_t>(i)];
+        if (r_used_dls) {
+            RCLCPP_INFO_THROTTLE(
+                logger, *node_->get_clock(), 1000,
+                "[IK][R] strict full-pose IK failed; position-only DLS fallback succeeded.");
+        }
     } else {
         RCLCPP_WARN(logger,
                     "[IK][R] solveIK failed or invalid output size. ok=%d size=%zu expected=%d",

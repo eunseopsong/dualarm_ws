@@ -1,5 +1,5 @@
-#ifndef DUALARM_KINEMATICS_ARM_INVERSE_KINEMATICS_HPP_
-#define DUALARM_KINEMATICS_ARM_INVERSE_KINEMATICS_HPP_
+#ifndef DUALARM_FORCECON_KINEMATICS_ARM_INVERSE_KINEMATICS_HPP_
+#define DUALARM_FORCECON_KINEMATICS_ARM_INVERSE_KINEMATICS_HPP_
 
 #include <kdl/chain.hpp>
 #include <kdl/chainfksolverpos_recursive.hpp>
@@ -44,39 +44,11 @@ public:
         fk_solver_  = std::make_shared<KDL::ChainFkSolverPos_recursive>(chain_);
         vel_solver_ = std::make_shared<KDL::ChainIkSolverVel_pinv>(chain_);
 
-        // Joint limits from URDF when available.
-        // - revolute/prismatic: use URDF lower/upper
-        // - continuous or missing limits: fallback to [-pi, pi]
-        urdf::Model robot_model;
-        const bool urdf_ok = robot_model.initFile(urdf_path);
-
-        chain_joint_names_.clear();
-        chain_joint_names_.reserve(num_joints_);
-        for (unsigned int si = 0; si < chain_.getNrOfSegments(); ++si) {
-            const KDL::Joint& j = chain_.getSegment(si).getJoint();
-            if (j.getType() == KDL::Joint::None) continue;
-            chain_joint_names_.push_back(j.getName());
-        }
-
+        // Joint limits (기본 [-pi, pi], 필요하면 URDF limit 파싱으로 확장)
         KDL::JntArray q_min(num_joints_), q_max(num_joints_);
         for (unsigned int i = 0; i < num_joints_; ++i) {
             q_min(i) = -M_PI;
             q_max(i) =  M_PI;
-
-            if (!urdf_ok || i >= chain_joint_names_.size()) continue;
-
-            auto uj = robot_model.getJoint(chain_joint_names_[i]);
-            if (!uj) continue;
-
-            if (uj->type == urdf::Joint::REVOLUTE || uj->type == urdf::Joint::PRISMATIC) {
-                if (uj->limits) {
-                    q_min(i) = uj->limits->lower;
-                    q_max(i) = uj->limits->upper;
-                }
-            } else if (uj->type == urdf::Joint::CONTINUOUS) {
-                q_min(i) = -M_PI;
-                q_max(i) =  M_PI;
-            }
         }
 
         ik_solver_ = std::make_shared<KDL::ChainIkSolverPos_NR_JL>(
@@ -226,6 +198,136 @@ public:
         return true;
     }
 
+
+    // ==========================
+    // Position-only DLS IK fallback
+    // - Uses only translational error (3xN numerical Jacobian)
+    // - Useful for redundant/mobile-manipulator arms where strict full-pose KDL IK
+    //   can fail even for small Cartesian deltas.
+    // ==========================
+    bool solveIKPositionOnlyDLS(const std::vector<double>& current_q,
+                                const std::array<double,3>& target_xyz,
+                                const std::string& targets_frame,
+                                std::vector<double>& result_q,
+                                int max_iters = 100,
+                                double pos_tol_m = 5e-4,
+                                double lambda = 3e-2,
+                                double alpha = 0.7,
+                                double max_joint_step_rad = 3e-2,
+                                double numerical_eps = 1e-5) const
+    {
+        if (!ok_ || !fk_solver_) return false;
+        if (current_q.size() < num_joints_) return false;
+        if (num_joints_ == 0) return false;
+
+        auto frame_s = toLower_(targets_frame);
+        if (frame_s.empty()) frame_s = "base";
+
+        Eigen::Vector3d p_target(target_xyz[0], target_xyz[1], target_xyz[2]);
+        if (!std::isfinite(p_target.x()) || !std::isfinite(p_target.y()) || !std::isfinite(p_target.z())) {
+            return false;
+        }
+
+        if (frame_s == "world" || frame_s == "global") {
+            p_target = world_T_base_.inverse() * p_target;
+        } else if (!(frame_s == "base" || frame_s == "robot_base" || frame_s == "local")) {
+            std::cerr << "[IK Warn] Unknown targets_frame='" << targets_frame
+                      << "'. Position-only DLS treats it as 'base'." << std::endl;
+        }
+
+        if (max_iters <= 0) max_iters = 100;
+        if (pos_tol_m <= 0.0) pos_tol_m = 5e-4;
+        if (lambda <= 0.0) lambda = 3e-2;
+        if (alpha <= 0.0) alpha = 0.7;
+        if (max_joint_step_rad <= 0.0) max_joint_step_rad = 3e-2;
+        if (numerical_eps <= 0.0) numerical_eps = 1e-5;
+
+        std::vector<double> q(num_joints_, 0.0);
+        for (unsigned int i = 0; i < num_joints_; ++i) {
+            q[i] = current_q[i];
+            if (!std::isfinite(q[i])) q[i] = 0.0;
+        }
+
+        auto fk_pos = [&](const std::vector<double>& q_in, Eigen::Vector3d& p_out)->bool {
+            if (q_in.size() < num_joints_) return false;
+            KDL::JntArray q_kdl(num_joints_);
+            for (unsigned int i = 0; i < num_joints_; ++i) q_kdl(i) = q_in[i];
+            KDL::Frame T;
+            if (fk_solver_->JntToCart(q_kdl, T) < 0) return false;
+            p_out = Eigen::Vector3d(T.p.x(), T.p.y(), T.p.z());
+            return std::isfinite(p_out.x()) && std::isfinite(p_out.y()) && std::isfinite(p_out.z());
+        };
+
+        Eigen::Vector3d p_cur = Eigen::Vector3d::Zero();
+        if (!fk_pos(q, p_cur)) return false;
+
+        double best_err = (p_target - p_cur).norm();
+        std::vector<double> best_q = q;
+
+        for (int iter = 0; iter < max_iters; ++iter) {
+            if (!fk_pos(q, p_cur)) return false;
+
+            const Eigen::Vector3d e = p_target - p_cur;
+            const double err = e.norm();
+
+            if (err < best_err) {
+                best_err = err;
+                best_q = q;
+            }
+            if (err <= pos_tol_m) {
+                result_q = q;
+                return true;
+            }
+
+            Eigen::MatrixXd J(3, num_joints_);
+            J.setZero();
+
+            for (unsigned int j = 0; j < num_joints_; ++j) {
+                std::vector<double> q_plus = q;
+                std::vector<double> q_minus = q;
+                q_plus[j] += numerical_eps;
+                q_minus[j] -= numerical_eps;
+
+                Eigen::Vector3d p_plus, p_minus;
+                if (!fk_pos(q_plus, p_plus) || !fk_pos(q_minus, p_minus)) {
+                    return false;
+                }
+                J.col(j) = (p_plus - p_minus) / (2.0 * numerical_eps);
+            }
+
+            const Eigen::Matrix3d A = J * J.transpose()
+                                      + (lambda * lambda) * Eigen::Matrix3d::Identity();
+            Eigen::VectorXd dq = J.transpose() * A.ldlt().solve(e);
+
+            if (dq.size() != static_cast<int>(num_joints_)) return false;
+            for (int i = 0; i < dq.size(); ++i) {
+                if (!std::isfinite(dq(i))) return false;
+            }
+
+            const double max_abs_dq = dq.cwiseAbs().maxCoeff();
+            if (max_abs_dq > max_joint_step_rad) {
+                dq *= (max_joint_step_rad / max_abs_dq);
+            }
+
+            // Keep the update conservative around the best known state.
+            q = best_q;
+            for (unsigned int i = 0; i < num_joints_; ++i) {
+                q[i] += alpha * dq(static_cast<int>(i));
+                q[i] = std::clamp(q[i], -M_PI, M_PI);
+            }
+        }
+
+        // Accept a near solution only if it is reasonably close. This prevents
+        // sending arbitrary joint jumps when the target is unreachable.
+        if (best_err <= std::max(5.0 * pos_tol_m, 0.003)) {
+            result_q = best_q;
+            return true;
+        }
+
+        result_q.clear();
+        return false;
+    }
+
     // ==========================
     // 기존(4 args) 코드 호환 overload
     // ==========================
@@ -243,7 +345,6 @@ private:
     bool ok_;
     KDL::Chain chain_;
     unsigned int num_joints_;
-    std::vector<std::string> chain_joint_names_;
 
     std::shared_ptr<KDL::ChainFkSolverPos_recursive> fk_solver_;
     std::shared_ptr<KDL::ChainIkSolverVel_pinv> vel_solver_;
