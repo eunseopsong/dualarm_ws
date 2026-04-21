@@ -1,36 +1,42 @@
 # ============================================================================
-# RBY1 arm-only kinematics profile template
+# RBY1 kinematics config for dualarm_forcecon v27
 #
-# IMPORTANT:
-#   Replace every link/joint name below with the exact names from your RBY1 URDF.
-#   This file is a safe template, not yet verified against your local RBY1 model.
+# Arm-only KDL chain:
+#   link_torso_5 -> ee_left
+#   link_torso_5 -> ee_right
+#
+# If base_link is set to "base", KDL chain includes torso_0~5 + arm_0~6,
+# so FK/IK expects 13 joints. For arm-only control, use link_torso_5.
 # ============================================================================
+
 robot_kinematics:
   profile: rby1_arm_only
-  urdf_path: /absolute/path/to/rby1.urdf
+
+  urdf_path: /home/eunseop/dualarm_ws/src/dualarm_kinematics/urdf/rby1a_kdl.urdf
 
   arm:
-    base_link: base_link
-    left_tip_link: left_ee_link
-    right_tip_link: right_ee_link
+    base_link: link_torso_5
+
+    left_tip_link: ee_left
+    right_tip_link: ee_right
 
     left_joint_names:
-      - left_arm_joint_1
-      - left_arm_joint_2
-      - left_arm_joint_3
-      - left_arm_joint_4
-      - left_arm_joint_5
-      - left_arm_joint_6
-      - left_arm_joint_7
+      - left_arm_0
+      - left_arm_1
+      - left_arm_2
+      - left_arm_3
+      - left_arm_4
+      - left_arm_5
+      - left_arm_6
 
     right_joint_names:
-      - right_arm_joint_1
-      - right_arm_joint_2
-      - right_arm_joint_3
-      - right_arm_joint_4
-      - right_arm_joint_5
-      - right_arm_joint_6
-      - right_arm_joint_7
+      - right_arm_0
+      - right_arm_1
+      - right_arm_2
+      - right_arm_3
+      - right_arm_4
+      - right_arm_5
+      - right_arm_6
 
   hand:
     enabled: false

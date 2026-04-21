@@ -175,6 +175,150 @@ void applyYamlToHandCfg(const YAML::Node& n, dualarm_forcecon::HandAdmittanceCon
     readScalar<int>(n, "debug_decimation", cfg.debug_decimation);
 }
 
+
+inline std::string resolveKinematicsConfigYaml(
+    const YAML::Node& root,
+    const std::shared_ptr<rclcpp::Node>& node,
+    const std::string& default_yaml)
+{
+    auto logger = node ? node->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+
+    // ----------------------------------------------------------------------
+    // Priority 1: explicit kinematics YAML override from ROS parameter
+    //
+    // Example:
+    //   -p kinematics_cfg_yaml:=/absolute/path/to/rby1_kinematics.yaml
+    // ----------------------------------------------------------------------
+    const std::string override_yaml =
+        node->declare_parameter<std::string>("kinematics_cfg_yaml", "");
+
+    if (!override_yaml.empty()) {
+        RCLCPP_INFO(
+            logger,
+            "[KinematicsConfig] using ROS parameter override kinematics_cfg_yaml=%s",
+            override_yaml.c_str());
+        return override_yaml;
+    }
+
+    const YAML::Node kin_node = root ? root["kinematics"] : YAML::Node();
+
+    if (!kin_node) {
+        RCLCPP_WARN(
+            logger,
+            "[KinematicsConfig] forcecon yaml has no 'kinematics' node. Use default yaml=%s",
+            default_yaml.c_str());
+        return default_yaml;
+    }
+
+    // ----------------------------------------------------------------------
+    // Priority 2: robot_profile_id from ROS parameter
+    //
+    // Example:
+    //   -p robot_profile_id:=1
+    // ----------------------------------------------------------------------
+    const int robot_profile_id_param =
+        node->declare_parameter<int>("robot_profile_id", -1);
+
+    int selected_id = robot_profile_id_param;
+
+    // ----------------------------------------------------------------------
+    // Priority 3: active_robot_id from forcecon_cfg.yaml
+    // ----------------------------------------------------------------------
+    try {
+        if (selected_id < 0 && kin_node["active_robot_id"]) {
+            selected_id = kin_node["active_robot_id"].as<int>();
+        }
+    } catch (const std::exception& e) {
+        RCLCPP_WARN(
+            logger,
+            "[KinematicsConfig] failed to read kinematics.active_robot_id (%s).",
+            e.what());
+    }
+
+    // ----------------------------------------------------------------------
+    // New v27+ profile-list style:
+    //
+    // kinematics:
+    //   active_robot_id: 0
+    //   profiles:
+    //     - id: 0
+    //       name: doosan_dualarm
+    //       config_yaml: /path/to/doosan_dualarm_kinematics.yaml
+    //     - id: 1
+    //       name: rby1
+    //       config_yaml: /path/to/rby1_kinematics.yaml
+    // ----------------------------------------------------------------------
+    if (selected_id >= 0 && kin_node["profiles"] && kin_node["profiles"].IsSequence()) {
+        try {
+            for (const auto& profile : kin_node["profiles"]) {
+                if (!profile["id"] || !profile["config_yaml"]) {
+                    continue;
+                }
+
+                const int id = profile["id"].as<int>();
+                if (id != selected_id) {
+                    continue;
+                }
+
+                const std::string name =
+                    profile["name"] ? profile["name"].as<std::string>() : "unnamed";
+
+                const std::string config_yaml =
+                    profile["config_yaml"].as<std::string>();
+
+                RCLCPP_INFO(
+                    logger,
+                    "[KinematicsConfig] selected robot id=%d name=%s yaml=%s",
+                    id,
+                    name.c_str(),
+                    config_yaml.c_str());
+
+                return config_yaml;
+            }
+
+            RCLCPP_WARN(
+                logger,
+                "[KinematicsConfig] active robot id=%d was not found in kinematics.profiles.",
+                selected_id);
+        } catch (const std::exception& e) {
+            RCLCPP_WARN(
+                logger,
+                "[KinematicsConfig] failed while parsing kinematics.profiles (%s).",
+                e.what());
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Backward-compatible fallback:
+    //
+    // kinematics:
+    //   config_yaml: /path/to/doosan_dualarm_kinematics.yaml
+    // ----------------------------------------------------------------------
+    try {
+        if (kin_node["config_yaml"]) {
+            const std::string config_yaml = kin_node["config_yaml"].as<std::string>();
+            RCLCPP_INFO(
+                logger,
+                "[KinematicsConfig] fallback to kinematics.config_yaml=%s",
+                config_yaml.c_str());
+            return config_yaml;
+        }
+    } catch (const std::exception& e) {
+        RCLCPP_WARN(
+            logger,
+            "[KinematicsConfig] failed to read kinematics.config_yaml (%s).",
+            e.what());
+    }
+
+    RCLCPP_WARN(
+        logger,
+        "[KinematicsConfig] no valid profile selected. Use default yaml=%s",
+        default_yaml.c_str());
+
+    return default_yaml;
+}
+
+
 } // namespace
 
 DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
@@ -212,23 +356,30 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml"
     );
 
-    std::string kinematics_cfg_yaml_path = node_->declare_parameter<std::string>(
-        "kinematics_cfg_yaml",
-        "/home/eunseop/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml"
-    );
+    const std::string default_kinematics_cfg_yaml_path =
+        "/home/eunseop/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml";
 
     // -------------------------
     // Load YAML cfg early
-    //   - forcecon_cfg_yaml    : force/admittance/control parameters
-    //   - kinematics_cfg_yaml : URDF/link/joint mapping for selected robot
+    //   - forcecon_cfg_yaml : force/admittance/control parameters
+    //   - selected robot kinematics profile is resolved from:
     //
-    // Backward compatibility:
-    //   If kinematics_cfg_yaml cannot be loaded, the node falls back to
-    //   robot_kinematics/kinematics block inside forcecon_cfg_yaml.
+    //       1) ROS parameter:
+    //            -p kinematics_cfg_yaml:=/absolute/path/to/robot_kinematics.yaml
+    //
+    //       2) ROS parameter:
+    //            -p robot_profile_id:=1
+    //
+    //       3) forcecon_cfg.yaml:
+    //            kinematics.active_robot_id
+    //
+    //       4) backward-compatible:
+    //            kinematics.config_yaml
     // -------------------------
     YAML::Node root;
     try {
         root = YAML::LoadFile(cfg_yaml_path);
+        RCLCPP_INFO(node_->get_logger(), "[forcecon_cfg] loaded: %s", cfg_yaml_path.c_str());
     } catch (const std::exception& e) {
         RCLCPP_WARN(node_->get_logger(),
                     "[forcecon_cfg] failed to load %s (%s). Use defaults.",
@@ -236,15 +387,8 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         root = YAML::Node();
     }
 
-    try {
-        if (root && root["kinematics"] && root["kinematics"]["config_yaml"]) {
-            kinematics_cfg_yaml_path = root["kinematics"]["config_yaml"].as<std::string>();
-        }
-    } catch (const std::exception& e) {
-        RCLCPP_WARN(node_->get_logger(),
-                    "[kinematics_cfg] failed to read kinematics.config_yaml from %s (%s). Use parameter/default.",
-                    cfg_yaml_path.c_str(), e.what());
-    }
+    const std::string kinematics_cfg_yaml_path =
+        resolveKinematicsConfigYaml(root, node_, default_kinematics_cfg_yaml_path);
 
     YAML::Node kin_root;
     bool kin_yaml_loaded = false;

@@ -7,8 +7,39 @@
 # This file keeps force/admittance/control parameters only.
 # ============================================================================
 kinematics:
-  # Select robot kinematics profile here, or override with ROS parameter:
-  #   -p kinematics_cfg_yaml:=/path/to/rby1_kinematics.yaml
+  # --------------------------------------------------------------------------
+  # Robot profile selector
+  #
+  #   0 = Doosan/AIDIN dualarm
+  #   1 = RBY1
+  #
+  # Runtime override examples:
+  #
+  #   Select by ID:
+  #     -p robot_profile_id:=1
+  #
+  #   Select by direct YAML path:
+  #     -p kinematics_cfg_yaml:=/absolute/path/to/robot_kinematics.yaml
+  #
+  # Selection priority in C++:
+  #   1) ROS parameter kinematics_cfg_yaml
+  #   2) ROS parameter robot_profile_id
+  #   3) this YAML kinematics.active_robot_id
+  #   4) backward-compatible kinematics.config_yaml, if provided
+  # --------------------------------------------------------------------------
+  active_robot_id: 1
+
+  profiles:
+    - id: 0
+      name: doosan_dualarm
+      config_yaml: /home/eunseop/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml
+
+    - id: 1
+      name: rby1
+      config_yaml: /home/eunseop/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml
+
+  # Backward-compatible fallback.
+  # Normally not used when active_robot_id/profiles are valid.
   config_yaml: /home/eunseop/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml
 
 hand_admittance:
