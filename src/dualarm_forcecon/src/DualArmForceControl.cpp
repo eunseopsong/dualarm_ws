@@ -2,6 +2,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <yaml-cpp/yaml.h>
 
 using namespace std::chrono_literals;
@@ -319,6 +320,37 @@ inline std::string resolveKinematicsConfigYaml(
 }
 
 
+inline std::string toLowerAscii(std::string s)
+{
+    for (char& c : s) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s;
+}
+
+inline void slewLimitVector(Eigen::VectorXd& q_cmd,
+                            const Eigen::VectorXd& q_target,
+                            double max_step_rad)
+{
+    if (q_cmd.size() != q_target.size()) {
+        q_cmd = q_target;
+        return;
+    }
+
+    if (!std::isfinite(max_step_rad) || max_step_rad <= 0.0) {
+        q_cmd = q_target;
+        return;
+    }
+
+    for (int i = 0; i < q_cmd.size(); ++i) {
+        double dq = q_target(i) - q_cmd(i);
+        if (!std::isfinite(dq)) dq = 0.0;
+        dq = std::max(-max_step_rad, std::min(max_step_rad, dq));
+        q_cmd(i) += dq;
+    }
+}
+
+
 } // namespace
 
 DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
@@ -415,6 +447,61 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
                 kin_cfg_.left_arm_tip_link.c_str(), kin_cfg_.right_arm_tip_link.c_str(),
                 kin_cfg_.leftArmDof(), kin_cfg_.rightArmDof(), static_cast<int>(kin_cfg_.hand_enabled));
 
+
+    // -------------------------
+    // Command publish policy
+    // -------------------------
+    // full     : publish the original JointState name list and hold unknown joints at their last state.
+    // arm_only : publish only the selected robot arm joints from the kinematics config.
+    //
+    // RBY1 arm-only tests should use arm_only. Otherwise torso/wheel/head joints can be
+    // unintentionally driven by this controller and cause base/torso vibration.
+    const YAML::Node command_pub_node = root["command_publish"];
+    if (command_pub_node) {
+        readScalar<std::string>(command_pub_node, "mode", command_publish_mode_);
+        readScalar<double>(command_pub_node, "publish_rate_hz", command_publish_rate_hz_);
+        readScalar<bool>(command_pub_node, "arm_command_filter_enabled", arm_command_filter_enabled_);
+        readScalar<double>(command_pub_node, "arm_command_max_step_rad", arm_command_max_step_rad_);
+    }
+
+    command_publish_mode_ = toLowerAscii(command_publish_mode_);
+    if (command_publish_mode_ != "full" && command_publish_mode_ != "arm_only") {
+        RCLCPP_WARN(node_->get_logger(),
+                    "[CommandPublish] unknown mode='%s'. Fallback to 'full'.",
+                    command_publish_mode_.c_str());
+        command_publish_mode_ = "full";
+    }
+
+    if (!std::isfinite(command_publish_rate_hz_) || command_publish_rate_hz_ <= 0.0) {
+        command_publish_rate_hz_ = 100.0;
+    }
+    command_publish_rate_hz_ = std::max(1.0, std::min(500.0, command_publish_rate_hz_));
+
+    if (!std::isfinite(arm_command_max_step_rad_) || arm_command_max_step_rad_ < 0.0) {
+        arm_command_max_step_rad_ = 0.0;
+    }
+
+    command_publish_mode_ = node_->declare_parameter<std::string>(
+        "command_publish_mode", command_publish_mode_);
+    arm_command_filter_enabled_ = node_->declare_parameter<bool>(
+        "arm_command_filter_enabled", arm_command_filter_enabled_);
+    arm_command_max_step_rad_ = node_->declare_parameter<double>(
+        "arm_command_max_step_rad", arm_command_max_step_rad_);
+    command_publish_rate_hz_ = node_->declare_parameter<double>(
+        "command_publish_rate_hz", command_publish_rate_hz_);
+
+    command_publish_mode_ = toLowerAscii(command_publish_mode_);
+    if (command_publish_mode_ != "full" && command_publish_mode_ != "arm_only") {
+        command_publish_mode_ = "full";
+    }
+
+    RCLCPP_INFO(node_->get_logger(),
+                "[CommandPublish] mode=%s rate=%.1fHz arm_filter=%d max_step=%.6f rad/step",
+                command_publish_mode_.c_str(),
+                command_publish_rate_hz_,
+                static_cast<int>(arm_command_filter_enabled_),
+                arm_command_max_step_rad_);
+
     // -------------------------
     // ROS IF
     // -------------------------
@@ -480,6 +567,8 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     q_r_c_.setZero(kin_cfg_.rightArmDof());
     q_l_t_.setZero(kin_cfg_.leftArmDof());
     q_r_t_.setZero(kin_cfg_.rightArmDof());
+    q_l_pub_.setZero(kin_cfg_.leftArmDof());
+    q_r_pub_.setZero(kin_cfg_.rightArmDof());
 
     q_l_h_c_.setZero(20); q_r_h_c_.setZero(20);
     q_l_h_t_.setZero(20); q_r_h_t_.setZero(20);
@@ -524,6 +613,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     arm_idle_synced_ = false;
     hand_idle_synced_ = false;
+    arm_pub_initialized_ = false;
 
     delta_arm_base_pose_initialized_ = false;
 
@@ -591,8 +681,11 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     // Timers
     // -------------------------
+    const auto control_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(1.0 / command_publish_rate_hz_));
+
     print_timer_   = node_->create_wall_timer(500ms, std::bind(&DualArmForceControl::PrintDualArmStates, this));
-    control_timer_ = node_->create_wall_timer(10ms,  std::bind(&DualArmForceControl::ControlLoop, this));
+    control_timer_ = node_->create_wall_timer(control_period, std::bind(&DualArmForceControl::ControlLoop, this));
 }
 
 DualArmForceControl::~DualArmForceControl() {}
@@ -610,6 +703,23 @@ void DualArmForceControl::ControlLoop()
         arm_idle_synced_ = true;
     } else if (current_arm_control_mode_ != "idle") {
         arm_idle_synced_ = false;
+    }
+
+    // ------------------------------------------------------------------------
+    // ARM command output filter / slew-rate limiter
+    // ------------------------------------------------------------------------
+    if (!arm_pub_initialized_ || q_l_pub_.size() != q_l_t_.size() || q_r_pub_.size() != q_r_t_.size()) {
+        q_l_pub_ = q_l_c_;
+        q_r_pub_ = q_r_c_;
+        arm_pub_initialized_ = true;
+    }
+
+    if (arm_command_filter_enabled_) {
+        slewLimitVector(q_l_pub_, q_l_t_, arm_command_max_step_rad_);
+        slewLimitVector(q_r_pub_, q_r_t_, arm_command_max_step_rad_);
+    } else {
+        q_l_pub_ = q_l_t_;
+        q_r_pub_ = q_r_t_;
     }
 
     // ------------------------------------------------------------------------
@@ -750,36 +860,60 @@ void DualArmForceControl::ControlLoop()
     // ------------------------------------------------------------------------
     sensor_msgs::msg::JointState cmd;
     cmd.header.stamp = node_->now();
-    cmd.name = joint_names_;
-    cmd.position.reserve(joint_names_.size());
 
-    for (const auto& n : joint_names_) {
-        const int li = kin_cfg_.findLeftArmJointIndex(n);
-        const int ri = kin_cfg_.findRightArmJointIndex(n);
+    if (command_publish_mode_ == "arm_only") {
+        // RBY1 arm-only mode:
+        //   Publish only left/right arm joints so torso/wheel/head/hand joints are not
+        //   unintentionally position-driven by this controller.
+        const int nl = std::min<int>(kin_cfg_.left_arm_joint_names.size(), q_l_pub_.size());
+        const int nr = std::min<int>(kin_cfg_.right_arm_joint_names.size(), q_r_pub_.size());
 
-        if (li >= 0 && li < q_l_t_.size()) {
-            cmd.position.push_back(q_l_t_(li));
-            continue;
+        cmd.name.reserve(static_cast<std::size_t>(nl + nr));
+        cmd.position.reserve(static_cast<std::size_t>(nl + nr));
+
+        for (int i = 0; i < nl; ++i) {
+            cmd.name.push_back(kin_cfg_.left_arm_joint_names[static_cast<std::size_t>(i)]);
+            cmd.position.push_back(q_l_pub_(i));
         }
-        if (ri >= 0 && ri < q_r_t_.size()) {
-            cmd.position.push_back(q_r_t_(ri));
-            continue;
+        for (int i = 0; i < nr; ++i) {
+            cmd.name.push_back(kin_cfg_.right_arm_joint_names[static_cast<std::size_t>(i)]);
+            cmd.position.push_back(q_r_pub_(i));
         }
+    } else {
+        // Backward-compatible full mode:
+        //   Preserve the original incoming JointState name order. Unknown/non-controlled joints
+        //   are held at their latest observed positions instead of being forced to zero.
+        cmd.name = joint_names_;
+        cmd.position.reserve(joint_names_.size());
 
-        if (kin_cfg_.hand_enabled) {
-            auto hj = dualarm_forcecon::kin::parseHandJointName(n);
-            if (hj.ok) {
-                const int idx = hj.finger_id * 4 + hj.joint_id;
-                if (idx >= 0 && idx < 20) {
-                    if (hj.is_left) cmd.position.push_back(q_l_h_t_(idx));
-                    else            cmd.position.push_back(q_r_h_t_(idx));
-                    continue;
+        for (const auto& n : joint_names_) {
+            const int li = kin_cfg_.findLeftArmJointIndex(n);
+            const int ri = kin_cfg_.findRightArmJointIndex(n);
+
+            if (li >= 0 && li < q_l_pub_.size()) {
+                cmd.position.push_back(q_l_pub_(li));
+                continue;
+            }
+            if (ri >= 0 && ri < q_r_pub_.size()) {
+                cmd.position.push_back(q_r_pub_(ri));
+                continue;
+            }
+
+            if (kin_cfg_.hand_enabled) {
+                auto hj = dualarm_forcecon::kin::parseHandJointName(n);
+                if (hj.ok) {
+                    const int idx = hj.finger_id * 4 + hj.joint_id;
+                    if (idx >= 0 && idx < 20) {
+                        if (hj.is_left) cmd.position.push_back(q_l_h_t_(idx));
+                        else            cmd.position.push_back(q_r_h_t_(idx));
+                        continue;
+                    }
                 }
             }
-        }
 
-        const auto it = last_joint_position_.find(n);
-        cmd.position.push_back(it != last_joint_position_.end() ? it->second : 0.0);
+            const auto it = last_joint_position_.find(n);
+            cmd.position.push_back(it != last_joint_position_.end() ? it->second : 0.0);
+        }
     }
 
     PublishHandForceMonitor();

@@ -143,6 +143,19 @@ private:
     std::unordered_map<std::string, double> last_joint_position_;
 
     // ------------------------------------------------------------------------
+    // Command publish policy
+    // ------------------------------------------------------------------------
+    // full     : publish all JointState names and hold non-controlled joints
+    // arm_only : publish only configured left/right arm joints
+    std::string command_publish_mode_{"full"};
+    double command_publish_rate_hz_{100.0};
+
+    bool arm_command_filter_enabled_{false};
+    double arm_command_max_step_rad_{0.0};
+    bool arm_pub_initialized_{false};
+    Eigen::VectorXd q_l_pub_, q_r_pub_;
+
+    // ------------------------------------------------------------------------
     // Mode / init
     // ------------------------------------------------------------------------
     std::string current_arm_control_mode_  = "idle";   // idle / forward / inverse
