@@ -22,9 +22,27 @@ hand_mode = forward
 In this mode:
 
 ```text
-arm  : controlled by Cartesian target pose
+arm  : mainly controlled by delta Cartesian pose command
 hand : controlled by forward joint target
 force: optional selected-finger desired force command
+```
+
+The main practical command flow is:
+
+```text
+/delta_arm_cartesian_pose
+    -> arm IK
+    -> arm joint command
+
+/forward_hand_joint_targets
+    -> hand motion target
+    -> optional selected-finger force correction
+
+/target_hand_force
+    -> selected-finger desired force reference
+
+/isaac_joint_command
+    -> final combined arm + hand command
 ```
 
 ---
@@ -70,12 +88,24 @@ ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetContro
 
 ---
 
-## Move arm in default mode
+## Move arm using delta Cartesian command
+
+In the current workflow, the arm is usually controlled by:
+
+```text
+/delta_arm_cartesian_pose
+```
+
+not:
+
+```text
+/target_arm_cartesian_pose
+```
 
 Topic:
 
 ```text
-/target_arm_cartesian_pose
+/delta_arm_cartesian_pose
 ```
 
 Type:
@@ -87,54 +117,122 @@ std_msgs/msg/Float64MultiArray
 Format:
 
 ```text
-[L x y z roll pitch yaw, R x y z roll pitch yaw]
+[L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]
 ```
 
 Unit:
 
 ```text
-position    : meter
-orientation : radian
+position delta    : meter
+orientation delta : radian
 ```
 
-### Arm command 1: nominal symmetric pose
+Important behavior:
 
-```bash
-ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.30,  0.20, 0.40, 0.0, 0.0, 0.0,
-         0.30, -0.20, 0.40, 0.0, 0.0, 0.0]}"
+```text
+Delta command is interpreted relative to the latched initial base pose.
 ```
 
-### Arm command 2: move both hands slightly forward
+This means the first valid current pose after initialization becomes the reference pose, and every delta command is applied relative to that latched pose.
+
+---
+
+### Arm delta command 1: no motion
 
 ```bash
-ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.35,  0.20, 0.40, 0.0, 0.0, 0.0,
-         0.35, -0.20, 0.40, 0.0, 0.0, 0.0]}"
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}"
 ```
 
-### Arm command 3: move both hands upward
+---
+
+### Arm delta command 2: move both arms slightly forward
 
 ```bash
-ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.30,  0.20, 0.48, 0.0, 0.0, 0.0,
-         0.30, -0.20, 0.48, 0.0, 0.0, 0.0]}"
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.03, 0.00, 0.00, 0.0, 0.0, 0.0,
+         0.03, 0.00, 0.00, 0.0, 0.0, 0.0]}"
 ```
 
-### Arm command 4: move left and right arms outward
+---
+
+### Arm delta command 3: move both arms slightly backward
 
 ```bash
-ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.30,  0.30, 0.42, 0.0, 0.0, 0.0,
-         0.30, -0.30, 0.42, 0.0, 0.0, 0.0]}"
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [-0.03, 0.00, 0.00, 0.0, 0.0, 0.0,
+         -0.03, 0.00, 0.00, 0.0, 0.0, 0.0]}"
 ```
 
-### Arm command 5: asymmetric left/right pose
+---
+
+### Arm delta command 4: move both arms upward
 
 ```bash
-ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.34,  0.24, 0.46, 0.0, 0.0, 0.2,
-         0.28, -0.24, 0.38, 0.0, 0.0, -0.2]}"
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.00, 0.00, 0.04, 0.0, 0.0, 0.0,
+         0.00, 0.00, 0.04, 0.0, 0.0, 0.0]}"
+```
+
+---
+
+### Arm delta command 5: move both arms downward
+
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.00, 0.00, -0.04, 0.0, 0.0, 0.0,
+         0.00, 0.00, -0.04, 0.0, 0.0, 0.0]}"
+```
+
+---
+
+### Arm delta command 6: move left and right arms outward
+
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.00,  0.04, 0.00, 0.0, 0.0, 0.0,
+         0.00, -0.04, 0.00, 0.0, 0.0, 0.0]}"
+```
+
+---
+
+### Arm delta command 7: move left and right arms inward
+
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.00, -0.04, 0.00, 0.0, 0.0, 0.0,
+         0.00,  0.04, 0.00, 0.0, 0.0, 0.0]}"
+```
+
+---
+
+### Arm delta command 8: left arm only small upward motion
+
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.00, 0.00, 0.04, 0.0, 0.0, 0.0,
+         0.00, 0.00, 0.00, 0.0, 0.0, 0.0]}"
+```
+
+---
+
+### Arm delta command 9: right arm only small upward motion
+
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.00, 0.00, 0.00, 0.0, 0.0, 0.0,
+         0.00, 0.00, 0.04, 0.0, 0.0, 0.0]}"
+```
+
+---
+
+### Arm delta command 10: rotate both end-effectors around yaw
+
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.00, 0.00, 0.00, 0.0, 0.0, 0.20,
+         0.00, 0.00, 0.00, 0.0, 0.0, -0.20]}"
 ```
 
 ---
@@ -195,6 +293,8 @@ So the 40-dimensional command is:
 ]
 ```
 
+---
+
 ### Hand command 1: open both hands
 
 ```bash
@@ -213,6 +313,8 @@ ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray
   0.0, 0.0, 0.0, 0.0
 ]}"
 ```
+
+---
 
 ### Hand command 2: close both index fingers slightly
 
@@ -233,6 +335,8 @@ ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray
 ]}"
 ```
 
+---
+
 ### Hand command 3: close both hands moderately
 
 ```bash
@@ -252,6 +356,8 @@ ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray
 ]}"
 ```
 
+---
+
 ### Hand command 4: left hand close, right hand open
 
 ```bash
@@ -270,6 +376,8 @@ ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray
   0.0, 0.0, 0.0, 0.0
 ]}"
 ```
+
+---
 
 ### Hand command 5: selected-finger contact-ready pose
 
@@ -330,12 +438,16 @@ selected finger receives admittance correction
 non-selected fingers keep following the motion target
 ```
 
+---
+
 ### Target force command 1: left index, +3 N along z
 
 ```bash
 ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
 "{data: [0, 1, 0.0, 0.0, 3.0]}"
 ```
+
+---
 
 ### Target force command 2: left index, +5 N along z
 
@@ -344,12 +456,16 @@ ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
 "{data: [0, 1, 0.0, 0.0, 5.0]}"
 ```
 
+---
+
 ### Target force command 3: right index, +5 N along z
 
 ```bash
 ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
 "{data: [1, 1, 0.0, 0.0, 5.0]}"
 ```
+
+---
 
 ### Target force command 4: left ring, +4 N along z
 
@@ -358,12 +474,16 @@ ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
 "{data: [0, 3, 0.0, 0.0, 4.0]}"
 ```
 
+---
+
 ### Target force command 5: right ring, +4 N along z
 
 ```bash
 ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
 "{data: [1, 3, 0.0, 0.0, 4.0]}"
 ```
+
+---
 
 ### Target force command 6: release selected force target to zero
 
@@ -381,7 +501,7 @@ ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
 
 ---
 
-## Combined example sequence: arm inverse + hand forward + target force
+## Combined example sequence: delta arm + hand forward + target force
 
 Terminal 1:
 
@@ -401,12 +521,12 @@ ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetContro
 "{arm_mode: 'inverse', hand_mode: 'forward'}"
 ```
 
-Send arm target:
+Send small delta arm target:
 
 ```bash
-ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.30,  0.20, 0.42, 0.0, 0.0, 0.0,
-         0.30, -0.20, 0.42, 0.0, 0.0, 0.0]}"
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.03,  0.00, 0.02, 0.0, 0.0, 0.0,
+         0.03,  0.00, 0.02, 0.0, 0.0, 0.0]}"
 ```
 
 Send hand motion target:
@@ -447,6 +567,34 @@ Check force monitor:
 ros2 topic echo /hand_force_current_monitor
 ros2 topic echo /hand_force_target_monitor
 ```
+
+---
+
+## Optional absolute arm target command
+
+Absolute target pose command is still available, but it is not the primary command path in the current workflow.
+
+Topic:
+
+```text
+/target_arm_cartesian_pose
+```
+
+Format:
+
+```text
+[L x y z roll pitch yaw, R x y z roll pitch yaw]
+```
+
+Example:
+
+```bash
+ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.30,  0.20, 0.40, 0.0, 0.0, 0.0,
+         0.30, -0.20, 0.40, 0.0, 0.0, 0.0]}"
+```
+
+Use this only when an absolute Cartesian target is intended.
 
 ---
 
@@ -647,7 +795,7 @@ ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetContro
 In this mode:
 
 ```text
-arm target  : /target_arm_cartesian_pose
+arm target  : /delta_arm_cartesian_pose
 hand target : /forward_hand_joint_targets
 force target: /target_hand_force
 output      : /isaac_joint_command
@@ -679,12 +827,12 @@ ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetContro
 "{arm_mode: 'inverse', hand_mode: 'forward'}"
 ```
 
-Send a Cartesian arm command:
+Send a delta Cartesian arm command:
 
 ```bash
-ros2 topic pub --once /target_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.30,  0.20, 0.40, 0.0, 0.0, 0.0,
-         0.30, -0.20, 0.40, 0.0, 0.0, 0.0]}"
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.03, 0.00, 0.02, 0.0, 0.0, 0.0,
+         0.03, 0.00, 0.02, 0.0, 0.0, 0.0]}"
 ```
 
 Send a hand forward command:
@@ -786,6 +934,8 @@ ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray 
          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}"
 ```
 
+For RBY1 inverse mode, use `/delta_arm_cartesian_pose` after confirming the actual FK/IK link and joint names.
+
 ---
 
 ## 1.7 Control mode service
@@ -881,6 +1031,52 @@ Expected layout for current hand force pipeline:
 
 ---
 
+### Arm delta inverse command
+
+```text
+/delta_arm_cartesian_pose
+```
+
+Type:
+
+```text
+std_msgs/msg/Float64MultiArray
+```
+
+Format:
+
+```text
+[L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]
+```
+
+This is the primary arm command topic in the current v27 workflow.
+
+Delta arm command is interpreted relative to the latched initial base pose.
+
+---
+
+### Arm absolute inverse command
+
+```text
+/target_arm_cartesian_pose
+```
+
+Type:
+
+```text
+std_msgs/msg/Float64MultiArray
+```
+
+Format:
+
+```text
+[L x y z roll pitch yaw, R x y z roll pitch yaw]
+```
+
+This topic is still supported, but it is not the primary command path in the current workflow.
+
+---
+
 ### Arm forward command
 
 ```text
@@ -905,48 +1101,6 @@ Examples:
 6 + 6 = 12 for current Doosan/AIDIN dualarm profile
 7 + 7 = 14 for RBY1-style arm profile
 ```
-
----
-
-### Arm inverse command
-
-```text
-/target_arm_cartesian_pose
-```
-
-Type:
-
-```text
-std_msgs/msg/Float64MultiArray
-```
-
-Format:
-
-```text
-[L x y z roll pitch yaw, R x y z roll pitch yaw]
-```
-
----
-
-### Arm delta inverse command
-
-```text
-/delta_arm_cartesian_pose
-```
-
-Type:
-
-```text
-std_msgs/msg/Float64MultiArray
-```
-
-Format:
-
-```text
-[L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]
-```
-
-Delta arm command is interpreted relative to the latched initial base pose.
 
 ---
 
@@ -1270,6 +1424,7 @@ Major changes:
 7. Added robot-specific kinematics YAML profiles
 8. Preserved existing ROS topic/service control flow
 9. Recommended default mode is arm inverse + hand forward
+10. Primary arm inverse command topic is /delta_arm_cartesian_pose
 ```
 
 ---
@@ -1409,19 +1564,50 @@ This is determined from the selected kinematics YAML file.
 
 ---
 
-### Arm inverse mode
+### Arm inverse mode with delta command
+
+Primary path:
 
 ```text
-/target_arm_cartesian_pose
-or
 /delta_arm_cartesian_pose
+    -> DeltaArmPositionCallback()
+    -> apply delta to latched initial base pose
     -> Arm IK
     -> q_l_t_, q_r_t_
     -> ControlLoop()
     -> /isaac_joint_command
 ```
 
-The IK backend is selected through the kinematics package and the selected robot YAML profile.
+The delta command format is:
+
+```text
+[L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]
+```
+
+This is the main command mode used in the current v27 workflow.
+
+---
+
+### Arm inverse mode with absolute target command
+
+Optional path:
+
+```text
+/target_arm_cartesian_pose
+    -> TargetArmPositionCallback()
+    -> Arm IK
+    -> q_l_t_, q_r_t_
+    -> ControlLoop()
+    -> /isaac_joint_command
+```
+
+The absolute command format is:
+
+```text
+[L x y z roll pitch yaw, R x y z roll pitch yaw]
+```
+
+This path is still supported, but it is less commonly used in the current workflow.
 
 ---
 
@@ -1554,7 +1740,13 @@ orientation : radian
 force       : Newton
 ```
 
-Arm Cartesian command format:
+Delta arm Cartesian command format:
+
+```text
+dx dy dz droll dpitch dyaw
+```
+
+Absolute arm Cartesian command format:
 
 ```text
 x y z roll pitch yaw
@@ -1584,6 +1776,7 @@ world-base z offset default behavior
 PrintDualArmStates layout and ordering
 selected-finger-only hand force correction
 hand force monitor topics
+delta arm command based on latched initial base pose
 ```
 
 The main structural change is package separation, not a change in the external ROS interface.
@@ -1739,14 +1932,20 @@ ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetContro
 "{arm_mode: 'inverse', hand_mode: 'forward'}"
 ```
 
+Check whether the arm command is being sent to the expected topic:
+
+```bash
+ros2 topic echo --once /delta_arm_cartesian_pose
+```
+
 ---
 
 ## 3.12 Recommended git commit
 
 ```bash
 git add .
-git commit -m "Document v27 kinematics split and default command workflow" \
-  -m "Update README with dependency notes, default arm inverse and hand forward usage, hand command examples, target hand force examples, and v27 package structure."
+git commit -m "Update v27 README for delta arm command workflow" \
+  -m "Document the default arm inverse and hand forward operation using delta arm Cartesian commands, hand forward joint targets, and selected-finger target force examples."
 ```
 
 Optional tag:
@@ -1790,7 +1989,7 @@ hand_mode = forward
 Default command flow:
 
 ```text
-/target_arm_cartesian_pose
+/delta_arm_cartesian_pose
     -> arm IK
     -> arm joint command
 
