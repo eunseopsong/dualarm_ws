@@ -32,9 +32,8 @@ public:
                           const std::string& base_name_unused,
                           const std::vector<std::string>& tips_unused)
     {
-        (void)tips_unused;
         std::string side = InferSideFromBaseName_(base_name_unused);
-        Init(urdf_path, side);
+        Init(urdf_path, side, base_name_unused, tips_unused);
     }
 
     // 기존 코드 호환용 Init
@@ -42,13 +41,20 @@ public:
               const std::string& base_name_unused,
               const std::vector<std::string>& tips_unused)
     {
-        (void)tips_unused;
         std::string side = InferSideFromBaseName_(base_name_unused);
-        return Init(urdf_path, side);
+        return Init(urdf_path, side, base_name_unused, tips_unused);
     }
 
     // 핵심 Init: side = "left" / "right"
     bool Init(const std::string& urdf_path, const std::string& side) {
+        const std::string default_base_ref = (side == "right") ? "right_joint_6" : "left_joint_6";
+        return Init(urdf_path, side, default_base_ref, std::vector<std::string>{});
+    }
+
+    bool Init(const std::string& urdf_path,
+              const std::string& side,
+              const std::string& base_reference_name,
+              const std::vector<std::string>& tip_suffixes_or_names) {
         side_ = side;
         ok_   = false;
 
@@ -60,9 +66,11 @@ public:
             return false;
         }
 
-        // ---- base reference 강제: left_joint_6 / right_joint_6 ----
-        if      (side_ == "left")  base_joint_name_ = "left_joint_6";
-        else if (side_ == "right") base_joint_name_ = "right_joint_6";
+        // ---- base reference ----
+        // Default remains left_joint_6/right_joint_6 to preserve previous behavior,
+        // but YAML can now override it with any existing joint or frame name.
+        if      (side_ == "left")  base_joint_name_ = base_reference_name.empty() ? "left_joint_6" : base_reference_name;
+        else if (side_ == "right") base_joint_name_ = base_reference_name.empty() ? "right_joint_6" : base_reference_name;
         else {
             std::printf("[HandFK Error] side must be 'left' or 'right' (got '%s')\n", side_.c_str());
             return false;
@@ -70,11 +78,23 @@ public:
 
         ResolveBaseReference_();
 
-        // ---- tip frame 강제: link4 5개 ----
+        // ---- tip frame names ----
+        // If YAML supplies 5 values, each value may be either:
+        //   - full frame name: left_link4_thumb / right_link4_thumb
+        //   - suffix without side: link4_thumb -> left_link4_thumb or right_link4_thumb
         tip_names_.clear();
         tip_names_.reserve(5);
 
-        if (side_ == "left") {
+        auto startsWithSide = [](const std::string& v) {
+            return v.rfind("left_", 0) == 0 || v.rfind("right_", 0) == 0;
+        };
+
+        if (tip_suffixes_or_names.size() == 5) {
+            for (const auto& raw : tip_suffixes_or_names) {
+                if (startsWithSide(raw)) tip_names_.push_back(raw);
+                else                     tip_names_.push_back(side_ + "_" + raw);
+            }
+        } else if (side_ == "left") {
             tip_names_ = {
                 "left_link4_thumb",
                 "left_link4_index",
@@ -334,20 +354,28 @@ private:
             return;
         }
 
-        // 2) fallback: link6 frame
+        // 2) requested frame name
+        if (model_.existFrame(base_joint_name_)) {
+            base_is_joint_ = false;
+            base_frame_id_ = model_.getFrameId(base_joint_name_);
+            base_ref_name_ = base_joint_name_;
+            return;
+        }
+
+        // 3) fallback: link6 frame
         const std::string link6 = (side_ == "left") ? "left_link_6" : "right_link_6";
         if (model_.existFrame(link6)) {
             base_is_joint_ = false;
             base_frame_id_ = model_.getFrameId(link6);
             base_ref_name_ = link6;
-            std::printf("[HandFK Warn] base joint '%s' not found -> fallback frame '%s'\n",
+            std::printf("[HandFK Warn] base reference '%s' not found -> fallback frame '%s'\n",
                         base_joint_name_.c_str(), link6.c_str());
             return;
         }
 
-        // 3) 실패
+        // 4) fail
         base_ref_name_ = base_joint_name_;
-        std::printf("[HandFK Error] base reference not found: joint '%s' nor frame '%s'\n",
+        std::printf("[HandFK Error] base reference not found: joint/frame '%s' nor fallback frame '%s'\n",
                     base_joint_name_.c_str(),
                     ((side_ == "left") ? "left_link_6" : "right_link_6"));
     }

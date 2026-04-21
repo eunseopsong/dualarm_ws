@@ -213,6 +213,30 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     );
 
     // -------------------------
+    // Load YAML cfg early
+    //   - robot_kinematics: URDF/link/joint mapping
+    //   - hand_admittance : force/admittance parameters
+    // -------------------------
+    YAML::Node root;
+    try {
+        root = YAML::LoadFile(cfg_yaml_path);
+    } catch (const std::exception& e) {
+        RCLCPP_WARN(node_->get_logger(),
+                    "[forcecon_cfg] failed to load %s (%s). Use defaults.",
+                    cfg_yaml_path.c_str(), e.what());
+        root = YAML::Node();
+    }
+
+    kin_cfg_ = dualarm_forcecon::DualArmKinematicsConfig::fromYaml(root, urdf_path_);
+    urdf_path_ = kin_cfg_.urdf_path;
+
+    RCLCPP_INFO(node_->get_logger(),
+                "[KinematicsConfig] profile=%s urdf=%s base=%s Ltip=%s Rtip=%s Ldof=%d Rdof=%d hand_enabled=%d",
+                kin_cfg_.profile.c_str(), urdf_path_.c_str(), kin_cfg_.arm_base_link.c_str(),
+                kin_cfg_.left_arm_tip_link.c_str(), kin_cfg_.right_arm_tip_link.c_str(),
+                kin_cfg_.leftArmDof(), kin_cfg_.rightArmDof(), static_cast<int>(kin_cfg_.hand_enabled));
+
+    // -------------------------
     // ROS IF
     // -------------------------
     auto qos = rclcpp::QoS(rclcpp::KeepLast(10)).best_effort();
@@ -273,7 +297,11 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     // State init
     // -------------------------
-    q_l_c_.setZero(6); q_r_c_.setZero(6); q_l_t_.setZero(6); q_r_t_.setZero(6);
+    q_l_c_.setZero(kin_cfg_.leftArmDof());
+    q_r_c_.setZero(kin_cfg_.rightArmDof());
+    q_l_t_.setZero(kin_cfg_.leftArmDof());
+    q_r_t_.setZero(kin_cfg_.rightArmDof());
+
     q_l_h_c_.setZero(20); q_r_h_c_.setZero(20);
     q_l_h_t_.setZero(20); q_r_h_t_.setZero(20);
     q_l_h_motion_t_.setZero(20); q_r_h_motion_t_.setZero(20);
@@ -323,9 +351,12 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     // Kinematics
     // -------------------------
-    arm_fk_   = std::make_shared<ArmForwardKinematics>(urdf_path_, "base_link", "left_link_6", "right_link_6");
-    arm_ik_l_ = std::make_shared<ArmInverseKinematics>(urdf_path_, "base_link", "left_link_6");
-    arm_ik_r_ = std::make_shared<ArmInverseKinematics>(urdf_path_, "base_link", "right_link_6");
+    arm_fk_   = std::make_shared<ArmForwardKinematics>(
+        urdf_path_, kin_cfg_.arm_base_link, kin_cfg_.left_arm_tip_link, kin_cfg_.right_arm_tip_link);
+    arm_ik_l_ = std::make_shared<ArmInverseKinematics>(
+        urdf_path_, kin_cfg_.arm_base_link, kin_cfg_.left_arm_tip_link);
+    arm_ik_r_ = std::make_shared<ArmInverseKinematics>(
+        urdf_path_, kin_cfg_.arm_base_link, kin_cfg_.right_arm_tip_link);
 
     if (arm_fk_ && arm_fk_->isOk()) {
         arm_fk_->setWorldBaseTransformXYZEulerDeg(world_base_xyz_, world_base_euler_xyz_deg_);
@@ -337,26 +368,21 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         arm_ik_r_->setWorldBaseTransformXYZEulerDeg(world_base_xyz_, world_base_euler_xyz_deg_);
     }
 
-    std::vector<std::string> tips = {"link4_thumb", "link4_index", "link4_middle", "link4_ring", "link4_baby"};
+    if (kin_cfg_.hand_enabled) {
+        hand_fk_l_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(
+            urdf_path_, kin_cfg_.left_hand_base_link, kin_cfg_.hand_tip_suffixes);
+        hand_fk_r_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(
+            urdf_path_, kin_cfg_.right_hand_base_link, kin_cfg_.hand_tip_suffixes);
 
-    hand_fk_l_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(urdf_path_, "left_hand_base_link", tips);
-    hand_fk_r_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(urdf_path_, "right_hand_base_link", tips);
-
-    hand_ik_l_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(urdf_path_, "left_hand_base_link", tips);
-    hand_ik_r_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(urdf_path_, "right_hand_base_link", tips);
-
-    // -------------------------
-    // Load YAML cfg
-    // -------------------------
-    YAML::Node root;
-    try {
-        root = YAML::LoadFile(cfg_yaml_path);
-        // RCLCPP_INFO(node_->get_logger(), "[forcecon_cfg] loaded: %s", cfg_yaml_path.c_str());
-    } catch (const std::exception& e) {
-        RCLCPP_WARN(node_->get_logger(),
-                    "[forcecon_cfg] failed to load %s (%s). Use empty cfg.",
-                    cfg_yaml_path.c_str(), e.what());
-        root = YAML::Node();
+        hand_ik_l_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(
+            urdf_path_, kin_cfg_.left_hand_base_link, kin_cfg_.hand_tip_suffixes);
+        hand_ik_r_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(
+            urdf_path_, kin_cfg_.right_hand_base_link, kin_cfg_.hand_tip_suffixes);
+    } else {
+        hand_fk_l_.reset();
+        hand_fk_r_.reset();
+        hand_ik_l_.reset();
+        hand_ik_r_.reset();
     }
 
     const YAML::Node hand_node = root["hand_admittance"];
@@ -434,7 +460,7 @@ void DualArmForceControl::ControlLoop()
     // ------------------------------------------------------------------------
     // HAND unified forward / inverse admittance pipeline
     // ------------------------------------------------------------------------
-    if (current_hand_control_mode_ == "idle") {
+    if (!kin_cfg_.hand_enabled || current_hand_control_mode_ == "idle") {
         f_l_hand_t_.setZero();
         f_r_hand_t_.setZero();
     } else {
@@ -549,28 +575,32 @@ void DualArmForceControl::ControlLoop()
     cmd.position.reserve(joint_names_.size());
 
     for (const auto& n : joint_names_) {
-        if      (n == "left_joint_1")  cmd.position.push_back(q_l_t_(0));
-        else if (n == "left_joint_2")  cmd.position.push_back(q_l_t_(1));
-        else if (n == "left_joint_3")  cmd.position.push_back(q_l_t_(2));
-        else if (n == "left_joint_4")  cmd.position.push_back(q_l_t_(3));
-        else if (n == "left_joint_5")  cmd.position.push_back(q_l_t_(4));
-        else if (n == "left_joint_6")  cmd.position.push_back(q_l_t_(5));
-        else if (n == "right_joint_1") cmd.position.push_back(q_r_t_(0));
-        else if (n == "right_joint_2") cmd.position.push_back(q_r_t_(1));
-        else if (n == "right_joint_3") cmd.position.push_back(q_r_t_(2));
-        else if (n == "right_joint_4") cmd.position.push_back(q_r_t_(3));
-        else if (n == "right_joint_5") cmd.position.push_back(q_r_t_(4));
-        else if (n == "right_joint_6") cmd.position.push_back(q_r_t_(5));
-        else {
-            auto hj = dualarm_forcecon::kin::parseHandJointName(n);
-            if (!hj.ok) { cmd.position.push_back(0.0); continue; }
+        const int li = kin_cfg_.findLeftArmJointIndex(n);
+        const int ri = kin_cfg_.findRightArmJointIndex(n);
 
-            const int idx = hj.finger_id * 4 + hj.joint_id;
-            if (idx < 0 || idx >= 20) { cmd.position.push_back(0.0); continue; }
-
-            if (hj.is_left) cmd.position.push_back(q_l_h_t_(idx));
-            else            cmd.position.push_back(q_r_h_t_(idx));
+        if (li >= 0 && li < q_l_t_.size()) {
+            cmd.position.push_back(q_l_t_(li));
+            continue;
         }
+        if (ri >= 0 && ri < q_r_t_.size()) {
+            cmd.position.push_back(q_r_t_(ri));
+            continue;
+        }
+
+        if (kin_cfg_.hand_enabled) {
+            auto hj = dualarm_forcecon::kin::parseHandJointName(n);
+            if (hj.ok) {
+                const int idx = hj.finger_id * 4 + hj.joint_id;
+                if (idx >= 0 && idx < 20) {
+                    if (hj.is_left) cmd.position.push_back(q_l_h_t_(idx));
+                    else            cmd.position.push_back(q_r_h_t_(idx));
+                    continue;
+                }
+            }
+        }
+
+        const auto it = last_joint_position_.find(n);
+        cmd.position.push_back(it != last_joint_position_.end() ? it->second : 0.0);
     }
 
     PublishHandForceMonitor();

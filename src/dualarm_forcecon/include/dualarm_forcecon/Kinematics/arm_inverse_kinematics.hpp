@@ -44,11 +44,39 @@ public:
         fk_solver_  = std::make_shared<KDL::ChainFkSolverPos_recursive>(chain_);
         vel_solver_ = std::make_shared<KDL::ChainIkSolverVel_pinv>(chain_);
 
-        // Joint limits (기본 [-pi, pi], 필요하면 URDF limit 파싱으로 확장)
+        // Joint limits from URDF when available.
+        // - revolute/prismatic: use URDF lower/upper
+        // - continuous or missing limits: fallback to [-pi, pi]
+        urdf::Model robot_model;
+        const bool urdf_ok = robot_model.initFile(urdf_path);
+
+        chain_joint_names_.clear();
+        chain_joint_names_.reserve(num_joints_);
+        for (unsigned int si = 0; si < chain_.getNrOfSegments(); ++si) {
+            const KDL::Joint& j = chain_.getSegment(si).getJoint();
+            if (j.getType() == KDL::Joint::None) continue;
+            chain_joint_names_.push_back(j.getName());
+        }
+
         KDL::JntArray q_min(num_joints_), q_max(num_joints_);
         for (unsigned int i = 0; i < num_joints_; ++i) {
             q_min(i) = -M_PI;
             q_max(i) =  M_PI;
+
+            if (!urdf_ok || i >= chain_joint_names_.size()) continue;
+
+            auto uj = robot_model.getJoint(chain_joint_names_[i]);
+            if (!uj) continue;
+
+            if (uj->type == urdf::Joint::REVOLUTE || uj->type == urdf::Joint::PRISMATIC) {
+                if (uj->limits) {
+                    q_min(i) = uj->limits->lower;
+                    q_max(i) = uj->limits->upper;
+                }
+            } else if (uj->type == urdf::Joint::CONTINUOUS) {
+                q_min(i) = -M_PI;
+                q_max(i) =  M_PI;
+            }
         }
 
         ik_solver_ = std::make_shared<KDL::ChainIkSolverPos_NR_JL>(
@@ -215,6 +243,7 @@ private:
     bool ok_;
     KDL::Chain chain_;
     unsigned int num_joints_;
+    std::vector<std::string> chain_joint_names_;
 
     std::shared_ptr<KDL::ChainFkSolverPos_recursive> fk_solver_;
     std::shared_ptr<KDL::ChainIkSolverVel_pinv> vel_solver_;

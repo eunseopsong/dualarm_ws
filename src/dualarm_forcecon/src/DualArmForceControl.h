@@ -17,6 +17,7 @@
 #include <memory>
 #include <array>
 #include <cstdint>
+#include <unordered_map>
 
 // include/ kinematics
 #include "dualarm_forcecon/Kinematics/arm_forward_kinematics.hpp"
@@ -25,6 +26,7 @@
 #include "dualarm_forcecon/Kinematics/hand_inverse_kinematics.hpp"
 #include "dualarm_forcecon/Kinematics/hand_admittance_control.hpp"
 #include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"
+#include "dualarm_forcecon/Kinematics/kinematics_config.hpp"
 
 class DualArmForceControl : public std::enable_shared_from_this<DualArmForceControl> {
 public:
@@ -132,6 +134,13 @@ private:
     std::string ik_targets_frame_ = "base";
     std::string ik_euler_conv_    = "rpy";
     std::string ik_angle_unit_    = "rad";
+
+    // YAML-selectable robot kinematics profile/link/joint mapping
+    dualarm_forcecon::DualArmKinematicsConfig kin_cfg_;
+
+    // Latest observed JointState values. Unknown/non-controlled joints are
+    // republished as hold-current instead of being forced to zero.
+    std::unordered_map<std::string, double> last_joint_position_;
 
     // ------------------------------------------------------------------------
     // Mode / init

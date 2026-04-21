@@ -101,6 +101,13 @@ inline std::vector<double> compress20to15(const Eigen::VectorXd& qh)
     return h15;
 }
 
+inline std::vector<double> eigenToStdVec(const Eigen::VectorXd& q)
+{
+    std::vector<double> out(static_cast<std::size_t>(q.size()), 0.0);
+    for (int i = 0; i < q.size(); ++i) out[static_cast<std::size_t>(i)] = q(i);
+    return out;
+}
+
 } // namespace
 
 // --------------------
@@ -108,40 +115,40 @@ inline std::vector<double> compress20to15(const Eigen::VectorXd& qh)
 // --------------------
 void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
 {
+    if (!msg) return;
     if (joint_names_.empty()) {
         joint_names_ = msg->name;
         is_initialized_ = true;
     }
 
-    for (size_t i = 0; i < msg->name.size(); ++i) {
+    const size_t n_pos = std::min(msg->name.size(), msg->position.size());
+    for (size_t i = 0; i < n_pos; ++i) {
         const std::string& n = msg->name[i];
         const double p = msg->position[i];
+        last_joint_position_[n] = p;
 
-        // arms
-        if      (n == "left_joint_1")  q_l_c_(0) = p;
-        else if (n == "left_joint_2")  q_l_c_(1) = p;
-        else if (n == "left_joint_3")  q_l_c_(2) = p;
-        else if (n == "left_joint_4")  q_l_c_(3) = p;
-        else if (n == "left_joint_5")  q_l_c_(4) = p;
-        else if (n == "left_joint_6")  q_l_c_(5) = p;
+        const int li = kin_cfg_.findLeftArmJointIndex(n);
+        const int ri = kin_cfg_.findRightArmJointIndex(n);
 
-        else if (n == "right_joint_1") q_r_c_(0) = p;
-        else if (n == "right_joint_2") q_r_c_(1) = p;
-        else if (n == "right_joint_3") q_r_c_(2) = p;
-        else if (n == "right_joint_4") q_r_c_(3) = p;
-        else if (n == "right_joint_5") q_r_c_(4) = p;
-        else if (n == "right_joint_6") q_r_c_(5) = p;
-
-        else {
-            auto hj = dualarm_forcecon::kin::parseHandJointName(n);
-            if (!hj.ok) continue;
-
-            const int idx = hj.finger_id * 4 + hj.joint_id;  // 0..19
-            if (idx < 0 || idx >= 20) continue;
-
-            if (hj.is_left) q_l_h_c_(idx) = p;
-            else            q_r_h_c_(idx) = p;
+        if (li >= 0 && li < q_l_c_.size()) {
+            q_l_c_(li) = p;
+            continue;
         }
+        if (ri >= 0 && ri < q_r_c_.size()) {
+            q_r_c_(ri) = p;
+            continue;
+        }
+
+        if (!kin_cfg_.hand_enabled) continue;
+
+        auto hj = dualarm_forcecon::kin::parseHandJointName(n);
+        if (!hj.ok) continue;
+
+        const int idx = hj.finger_id * 4 + hj.joint_id;  // 0..19
+        if (idx < 0 || idx >= 20) continue;
+
+        if (hj.is_left) q_l_h_c_(idx) = p;
+        else            q_r_h_c_(idx) = p;
     }
 }
 
@@ -244,11 +251,8 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
     static bool s_tar_l_init = false;
     static bool s_tar_r_init = false;
 
-    std::vector<double> jl(6), jr(6);
-    for (int i = 0; i < 6; ++i) {
-        jl[i] = q_l_c_(i);
-        jr[i] = q_r_c_(i);
-    }
+    const std::vector<double> jl = eigenToStdVec(q_l_c_);
+    const std::vector<double> jr = eigenToStdVec(q_r_c_);
 
     geometry_msgs::msg::Pose cur_l_fk = arm_fk_->getLeftFK(jl);
     geometry_msgs::msg::Pose cur_r_fk = arm_fk_->getRightFK(jr);
@@ -281,11 +285,8 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
         s_tar_r_init = true;
     }
     else if (current_arm_control_mode_ == "forward") {
-        std::vector<double> jl_t(6), jr_t(6);
-        for (int i = 0; i < 6; ++i) {
-            jl_t[i] = q_l_t_(i);
-            jr_t[i] = q_r_t_(i);
-        }
+        const std::vector<double> jl_t = eigenToStdVec(q_l_t_);
+        const std::vector<double> jr_t = eigenToStdVec(q_r_t_);
 
         geometry_msgs::msg::Pose tar_l_fk = arm_fk_->getLeftFK(jl_t);
         geometry_msgs::msg::Pose tar_r_fk = arm_fk_->getRightFK(jr_t);
@@ -306,6 +307,7 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
 {
     (void)msg;
     if (!is_initialized_) return;
+    if (!kin_cfg_.hand_enabled) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
 
     constexpr double kFingerPosDeadbandM = 1e-6;
@@ -484,7 +486,13 @@ void DualArmForceControl::ControlModeCallback(
     const std::string prev_hand_mode = current_hand_control_mode_;
 
     const std::string new_arm_mode  = to_lower(req->arm_mode);
-    const std::string new_hand_mode = to_lower(req->hand_mode);
+    std::string new_hand_mode = to_lower(req->hand_mode);
+    if (!kin_cfg_.hand_enabled && new_hand_mode != "idle") {
+        RCLCPP_WARN(node_->get_logger(),
+                    "[ControlMode] hand.enabled=false in YAML. Forcing requested hand_mode='%s' to 'idle'.",
+                    req->hand_mode.c_str());
+        new_hand_mode = "idle";
+    }
 
     auto valid_arm_mode = [](const std::string& m) -> bool {
         return (m == "idle" || m == "forward" || m == "inverse");
@@ -572,10 +580,8 @@ void DualArmForceControl::ControlModeCallback(
     arm_idle_synced_ = false;
 
     if (current_arm_control_mode_ == "inverse") {
-        for (int i = 0; i < 6; ++i) {
-            q_l_t_(i) = q_l_c_(i);
-            q_r_t_(i) = q_r_c_(i);
-        }
+        q_l_t_ = q_l_c_;
+        q_r_t_ = q_r_c_;
 
         target_pose_l_ = current_pose_l_;
         target_pose_r_ = current_pose_r_;
