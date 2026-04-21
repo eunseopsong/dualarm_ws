@@ -142,11 +142,19 @@ private:
     // republished as hold-current instead of being forced to zero.
     std::unordered_map<std::string, double> last_joint_position_;
 
+    // Latched non-arm hold snapshot for mobile manipulators such as RBY1.
+    // In full_hold_non_arm mode, wheel/torso/head/hand joints are published in the
+    // original Isaac joint order using these latched positions, while only arm joints
+    // are updated by the controller.
+    std::unordered_map<std::string, double> hold_joint_position_;
+    bool non_arm_hold_initialized_{false};
+
     // ------------------------------------------------------------------------
     // Command publish policy
     // ------------------------------------------------------------------------
-    // full     : publish all JointState names and hold non-controlled joints
-    // arm_only : publish only configured left/right arm joints
+    // full              : publish all JointState names and hold non-controlled joints at latest observed positions
+    // arm_only          : publish only configured left/right arm joints
+    // full_hold_non_arm : publish full JointState in original order, but freeze non-arm joints at initial snapshot
     std::string command_publish_mode_{"full"};
     double command_publish_rate_hz_{100.0};
 

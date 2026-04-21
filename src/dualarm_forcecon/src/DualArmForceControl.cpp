@@ -451,11 +451,13 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     // Command publish policy
     // -------------------------
-    // full     : publish the original JointState name list and hold unknown joints at their last state.
-    // arm_only : publish only the selected robot arm joints from the kinematics config.
+    // full              : publish the original JointState name list and hold unknown joints at their last state.
+    // arm_only          : publish only the selected robot arm joints from the kinematics config.
+    // full_hold_non_arm : publish the original full JointState order, update only arm joints,
+    //                     and freeze all non-arm joints at the first observed snapshot.
     //
-    // RBY1 arm-only tests should use arm_only. Otherwise torso/wheel/head joints can be
-    // unintentionally driven by this controller and cause base/torso vibration.
+    // RBY1 arm tests should prefer full_hold_non_arm because Isaac Action Graph often expects
+    // the full articulation joint order, while torso/wheel/head should remain fixed.
     const YAML::Node command_pub_node = root["command_publish"];
     if (command_pub_node) {
         readScalar<std::string>(command_pub_node, "mode", command_publish_mode_);
@@ -465,7 +467,8 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     }
 
     command_publish_mode_ = toLowerAscii(command_publish_mode_);
-    if (command_publish_mode_ != "full" && command_publish_mode_ != "arm_only") {
+    if (command_publish_mode_ != "full" && command_publish_mode_ != "arm_only" &&
+        command_publish_mode_ != "full_hold_non_arm") {
         RCLCPP_WARN(node_->get_logger(),
                     "[CommandPublish] unknown mode='%s'. Fallback to 'full'.",
                     command_publish_mode_.c_str());
@@ -491,7 +494,8 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "command_publish_rate_hz", command_publish_rate_hz_);
 
     command_publish_mode_ = toLowerAscii(command_publish_mode_);
-    if (command_publish_mode_ != "full" && command_publish_mode_ != "arm_only") {
+    if (command_publish_mode_ != "full" && command_publish_mode_ != "arm_only" &&
+        command_publish_mode_ != "full_hold_non_arm") {
         command_publish_mode_ = "full";
     }
 
@@ -862,9 +866,9 @@ void DualArmForceControl::ControlLoop()
     cmd.header.stamp = node_->now();
 
     if (command_publish_mode_ == "arm_only") {
-        // RBY1 arm-only mode:
-        //   Publish only left/right arm joints so torso/wheel/head/hand joints are not
-        //   unintentionally position-driven by this controller.
+        // Partial arm-only mode:
+        //   Publish only left/right arm joints. This is clean ROS-wise, but some Isaac
+        //   Action Graph articulation setups do not apply partial JointState commands.
         const int nl = std::min<int>(kin_cfg_.left_arm_joint_names.size(), q_l_pub_.size());
         const int nr = std::min<int>(kin_cfg_.right_arm_joint_names.size(), q_r_pub_.size());
 
@@ -880,9 +884,32 @@ void DualArmForceControl::ControlLoop()
             cmd.position.push_back(q_r_pub_(i));
         }
     } else {
-        // Backward-compatible full mode:
-        //   Preserve the original incoming JointState name order. Unknown/non-controlled joints
-        //   are held at their latest observed positions instead of being forced to zero.
+        // Full-order modes:
+        //   Preserve the exact incoming Isaac JointState name order. This keeps the Isaac
+        //   Action Graph behavior identical to the original full-command setup.
+        //
+        //   full:
+        //     non-controlled joints follow latest observed state.
+        //
+        //   full_hold_non_arm:
+        //     non-arm joints are frozen at the first observed snapshot. This is preferred
+        //     for RBY1 arm-only tests because torso/wheel/head stay fixed while arms move.
+        if (command_publish_mode_ == "full_hold_non_arm" && !non_arm_hold_initialized_ && !joint_names_.empty()) {
+            hold_joint_position_.clear();
+            for (const auto& n : joint_names_) {
+                const auto it = last_joint_position_.find(n);
+                if (it != last_joint_position_.end()) {
+                    hold_joint_position_[n] = it->second;
+                } else {
+                    hold_joint_position_[n] = 0.0;
+                }
+            }
+            non_arm_hold_initialized_ = true;
+            RCLCPP_INFO(node_->get_logger(),
+                        "[CommandPublish] latched non-arm hold snapshot for %zu joints.",
+                        hold_joint_position_.size());
+        }
+
         cmd.name = joint_names_;
         cmd.position.reserve(joint_names_.size());
 
@@ -899,7 +926,7 @@ void DualArmForceControl::ControlLoop()
                 continue;
             }
 
-            if (kin_cfg_.hand_enabled) {
+            if (command_publish_mode_ != "full_hold_non_arm" && kin_cfg_.hand_enabled) {
                 auto hj = dualarm_forcecon::kin::parseHandJointName(n);
                 if (hj.ok) {
                     const int idx = hj.finger_id * 4 + hj.joint_id;
@@ -908,6 +935,14 @@ void DualArmForceControl::ControlLoop()
                         else            cmd.position.push_back(q_r_h_t_(idx));
                         continue;
                     }
+                }
+            }
+
+            if (command_publish_mode_ == "full_hold_non_arm") {
+                const auto it_hold = hold_joint_position_.find(n);
+                if (it_hold != hold_joint_position_.end()) {
+                    cmd.position.push_back(it_hold->second);
+                    continue;
                 }
             }
 

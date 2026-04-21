@@ -55,14 +55,14 @@ kinematics:
 #
 # For RBY1:
 #   active_robot_id: 1
-#   command_publish.mode: arm_only
+#   command_publish.mode: full_hold_non_arm
 #
 # For Doosan/AIDIN:
 #   active_robot_id: 0
 #   command_publish.mode: full
 # ============================================================================
 command_publish:
-  mode: arm_only
+  mode: full_hold_non_arm
   publish_rate_hz: 60.0
 
   # Joint-space slew-rate limiter for arm commands.
