@@ -20,13 +20,13 @@
 #include <unordered_map>
 
 // include/ kinematics
-#include "dualarm_forcecon/Kinematics/arm_forward_kinematics.hpp"
-#include "dualarm_forcecon/Kinematics/arm_inverse_kinematics.hpp"
-#include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"
-#include "dualarm_forcecon/Kinematics/hand_inverse_kinematics.hpp"
-#include "dualarm_forcecon/Kinematics/hand_admittance_control.hpp"
-#include "dualarm_forcecon/Kinematics/kinematics_utils.hpp"
-#include "dualarm_forcecon/Kinematics/kinematics_config.hpp"
+#include "dualarm_kinematics/arm/arm_forward_kinematics.hpp"
+#include "dualarm_kinematics/arm/arm_inverse_kinematics.hpp"
+#include "dualarm_kinematics/hand/hand_forward_kinematics.hpp"
+#include "dualarm_kinematics/hand/hand_inverse_kinematics.hpp"
+#include "dualarm_forcecon/control/hand_admittance_control.hpp"
+#include "dualarm_kinematics/core/kinematics_utils.hpp"
+#include "dualarm_kinematics/core/kinematics_config.hpp"
 
 class DualArmForceControl : public std::enable_shared_from_this<DualArmForceControl> {
 public:

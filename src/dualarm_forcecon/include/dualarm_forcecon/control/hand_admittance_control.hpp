@@ -1,5 +1,5 @@
-#ifndef DUALARM_FORCECON_KINEMATICS_HAND_ADMITTANCE_CONTROL_HPP_
-#define DUALARM_FORCECON_KINEMATICS_HAND_ADMITTANCE_CONTROL_HPP_
+#ifndef DUALARM_FORCECON_CONTROL_HAND_ADMITTANCE_CONTROL_HPP_
+#define DUALARM_FORCECON_CONTROL_HAND_ADMITTANCE_CONTROL_HPP_
 
 #pragma once
 
@@ -15,8 +15,8 @@
 #include <Eigen/Dense>
 #include <rclcpp/rclcpp.hpp>
 
-#include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"
-#include "dualarm_forcecon/Kinematics/hand_inverse_kinematics.hpp"
+#include "dualarm_kinematics/hand/hand_forward_kinematics.hpp"
+#include "dualarm_kinematics/hand/hand_inverse_kinematics.hpp"
 
 namespace dualarm_forcecon {
 
@@ -1012,4 +1012,4 @@ private:
 
 } // namespace dualarm_forcecon
 
-#endif // DUALARM_FORCECON_KINEMATICS_HAND_ADMITTANCE_CONTROL_HPP_
+#endif // DUALARM_FORCECON_CONTROL_HAND_ADMITTANCE_CONTROL_HPP_

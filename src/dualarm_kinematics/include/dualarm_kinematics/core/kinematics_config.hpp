@@ -1,5 +1,5 @@
-#ifndef DUALARM_FORCECON_KINEMATICS_CONFIG_HPP_
-#define DUALARM_FORCECON_KINEMATICS_CONFIG_HPP_
+#ifndef DUALARM_KINEMATICS_CONFIG_HPP_
+#define DUALARM_KINEMATICS_CONFIG_HPP_
 
 #include <algorithm>
 #include <cstddef>
@@ -147,4 +147,4 @@ private:
 
 } // namespace dualarm_forcecon
 
-#endif // DUALARM_FORCECON_KINEMATICS_CONFIG_HPP_
+#endif // DUALARM_KINEMATICS_CONFIG_HPP_

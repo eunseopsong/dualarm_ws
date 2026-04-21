@@ -1,0 +1,23 @@
+# ============================================================================
+# Generic dual-arm robot kinematics profile template
+# ============================================================================
+robot_kinematics:
+  profile: generic_dualarm
+  urdf_path: /absolute/path/to/robot.urdf
+
+  arm:
+    base_link: base_link
+    left_tip_link: left_tool0
+    right_tip_link: right_tool0
+
+    left_joint_names:  [left_joint_1, left_joint_2, left_joint_3, left_joint_4, left_joint_5, left_joint_6]
+    right_joint_names: [right_joint_1, right_joint_2, right_joint_3, right_joint_4, right_joint_5, right_joint_6]
+
+    # Alternative compact style:
+    # left_joint_prefix: left_joint_
+    # left_dof: 6
+    # right_joint_prefix: right_joint_
+    # right_dof: 6
+
+  hand:
+    enabled: false

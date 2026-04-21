@@ -2,33 +2,28 @@
 <package format="3">
   <name>dualarm_forcecon</name>
   <version>0.0.0</version>
-  <description>Dual Arm Force Control - Inverse Kinematics version</description>
-  <maintainer email="eunseop@todo.todo">eunseop</maintainer>
-  <license>Apache License 2.0</license>
+  <description>Dual-arm force control package with external dualarm_kinematics backend.</description>
+
+  <maintainer email="eunseop@example.com">eunseop</maintainer>
+  <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <buildtool_depend>rosidl_default_generators</buildtool_depend>
-
-  <!-- Eigen (ROS2 style) -->
-  <build_depend>eigen3_cmake_module</build_depend>
-  <depend>eigen</depend>
 
   <depend>rclcpp</depend>
-  <depend>sensor_msgs</depend>
+
   <depend>std_msgs</depend>
-  <depend>std_srvs</depend>
+  <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
-  <depend>nav_msgs</depend>
-
-  <depend>kdl_parser</depend>
-  <depend>orocos_kdl</depend>
-  <depend>urdf</depend>
-  <depend>tf2_kdl</depend>
-  <depend>yaml-cpp</depend>
-
-  <exec_depend>rosidl_default_runtime</exec_depend>
 
   <depend>dualarm_forcecon_interfaces</depend>
+  <depend>dualarm_kinematics</depend>
+
+  <depend>eigen</depend>
+  <depend>yaml-cpp</depend>
+  <depend>pinocchio</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

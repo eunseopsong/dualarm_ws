@@ -1,5 +1,5 @@
-#ifndef DUALARM_FORCECON_KINEMATICS_HAND_INVERSE_KINEMATICS_HPP_
-#define DUALARM_FORCECON_KINEMATICS_HAND_INVERSE_KINEMATICS_HPP_
+#ifndef DUALARM_KINEMATICS_HAND_INVERSE_KINEMATICS_HPP_
+#define DUALARM_KINEMATICS_HAND_INVERSE_KINEMATICS_HPP_
 
 #include <Eigen/Dense>
 
@@ -12,7 +12,7 @@
 #include <limits>
 #include <cstdio>
 
-#include "dualarm_forcecon/Kinematics/hand_forward_kinematics.hpp"
+#include "dualarm_kinematics/hand/hand_forward_kinematics.hpp"
 
 namespace dualarm_forcecon {
 
@@ -447,4 +447,4 @@ private:
 
 } // namespace dualarm_forcecon
 
-#endif // DUALARM_FORCECON_KINEMATICS_HAND_INVERSE_KINEMATICS_HPP_
+#endif // DUALARM_KINEMATICS_HAND_INVERSE_KINEMATICS_HPP_

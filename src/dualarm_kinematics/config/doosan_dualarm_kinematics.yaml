@@ -1,0 +1,33 @@
+# ============================================================================
+# Doosan/AIDIN dual-arm kinematics profile
+# ============================================================================
+robot_kinematics:
+  profile: doosan_aidin
+  urdf_path: /home/eunseop/isaac/isaac_save/dualarm/dualarm_description/urdf/aidin_dsr_dualarm.urdf
+
+  arm:
+    base_link: base_link
+    left_tip_link: left_link_6
+    right_tip_link: right_link_6
+
+    left_joint_names:
+      - left_joint_1
+      - left_joint_2
+      - left_joint_3
+      - left_joint_4
+      - left_joint_5
+      - left_joint_6
+
+    right_joint_names:
+      - right_joint_1
+      - right_joint_2
+      - right_joint_3
+      - right_joint_4
+      - right_joint_5
+      - right_joint_6
+
+  hand:
+    enabled: true
+    left_base_link: left_joint_6
+    right_base_link: right_joint_6
+    tip_suffixes: [link4_thumb, link4_index, link4_middle, link4_ring, link4_baby]

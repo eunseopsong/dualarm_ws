@@ -1,65 +1,15 @@
 # ============================================================================
-# v26 robot kinematics selector
+# dualarm_forcecon runtime/control config (v27 split package)
 #
-# Purpose:
-#   Select the URDF, arm base/tip links, and JointState names from YAML.
-#   This lets the same dualarm_forcecon node run on the existing Doosan/AIDIN
-#   dual-arm setup, RBY1-like dual arms, or another custom dual-arm robot.
+# Robot-specific FK/IK/link/joint-name settings live in:
+#   dualarm_kinematics/config/*.yaml
 #
-# Notes:
-#   - /target_arm_cartesian_pose stays 12D:
-#       [L x y z r p y, R x y z r p y]
-#   - /forward_arm_joint_targets becomes variable length:
-#       [left arm joints..., right arm joints...]
-#     so 6+6=12 for current Doosan/AIDIN, 7+7=14 for a 7-DOF dual-arm, etc.
-#   - For robots without the existing 20-DOF hand model, set hand.enabled=false.
+# This file keeps force/admittance/control parameters only.
 # ============================================================================
-robot_kinematics:
-  profile: doosan_aidin
-  urdf_path: /home/eunseop/isaac/isaac_save/dualarm/dualarm_description/urdf/aidin_dsr_dualarm.urdf
-
-  arm:
-    base_link: base_link
-    left_tip_link: left_link_6
-    right_tip_link: right_link_6
-
-    left_joint_names:
-      - left_joint_1
-      - left_joint_2
-      - left_joint_3
-      - left_joint_4
-      - left_joint_5
-      - left_joint_6
-
-    right_joint_names:
-      - right_joint_1
-      - right_joint_2
-      - right_joint_3
-      - right_joint_4
-      - right_joint_5
-      - right_joint_6
-
-  hand:
-    enabled: true
-    left_base_link: left_joint_6
-    right_base_link: right_joint_6
-    tip_suffixes: [link4_thumb, link4_index, link4_middle, link4_ring, link4_baby]
-
-# Example for an arm-only robot / RBY1-like robot.
-# Replace the link and joint names with the exact names from your URDF,
-# then either switch the block above or copy these values into it.
-#
-# robot_kinematics:
-#   profile: rby1_arm_only
-#   urdf_path: /absolute/path/to/rby1.urdf
-#   arm:
-#     base_link: base_link
-#     left_tip_link: left_ee_link
-#     right_tip_link: right_ee_link
-#     left_joint_names:  [left_arm_joint_1, left_arm_joint_2, left_arm_joint_3, left_arm_joint_4, left_arm_joint_5, left_arm_joint_6, left_arm_joint_7]
-#     right_joint_names: [right_arm_joint_1, right_arm_joint_2, right_arm_joint_3, right_arm_joint_4, right_arm_joint_5, right_arm_joint_6, right_arm_joint_7]
-#   hand:
-#     enabled: false
+kinematics:
+  # Select robot kinematics profile here, or override with ROS parameter:
+  #   -p kinematics_cfg_yaml:=/path/to/rby1_kinematics.yaml
+  config_yaml: /home/eunseop/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml
 
 hand_admittance:
   # --------------------------------------------------------------------------

@@ -212,10 +212,19 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml"
     );
 
+    std::string kinematics_cfg_yaml_path = node_->declare_parameter<std::string>(
+        "kinematics_cfg_yaml",
+        "/home/eunseop/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml"
+    );
+
     // -------------------------
     // Load YAML cfg early
-    //   - robot_kinematics: URDF/link/joint mapping
-    //   - hand_admittance : force/admittance parameters
+    //   - forcecon_cfg_yaml    : force/admittance/control parameters
+    //   - kinematics_cfg_yaml : URDF/link/joint mapping for selected robot
+    //
+    // Backward compatibility:
+    //   If kinematics_cfg_yaml cannot be loaded, the node falls back to
+    //   robot_kinematics/kinematics block inside forcecon_cfg_yaml.
     // -------------------------
     YAML::Node root;
     try {
@@ -227,8 +236,34 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         root = YAML::Node();
     }
 
-    kin_cfg_ = dualarm_forcecon::DualArmKinematicsConfig::fromYaml(root, urdf_path_);
+    try {
+        if (root && root["kinematics"] && root["kinematics"]["config_yaml"]) {
+            kinematics_cfg_yaml_path = root["kinematics"]["config_yaml"].as<std::string>();
+        }
+    } catch (const std::exception& e) {
+        RCLCPP_WARN(node_->get_logger(),
+                    "[kinematics_cfg] failed to read kinematics.config_yaml from %s (%s). Use parameter/default.",
+                    cfg_yaml_path.c_str(), e.what());
+    }
+
+    YAML::Node kin_root;
+    bool kin_yaml_loaded = false;
+    try {
+        kin_root = YAML::LoadFile(kinematics_cfg_yaml_path);
+        kin_yaml_loaded = true;
+    } catch (const std::exception& e) {
+        RCLCPP_WARN(node_->get_logger(),
+                    "[kinematics_cfg] failed to load %s (%s). Fall back to forcecon_cfg_yaml robot_kinematics block.",
+                    kinematics_cfg_yaml_path.c_str(), e.what());
+        kin_root = root;
+    }
+
+    kin_cfg_ = dualarm_forcecon::DualArmKinematicsConfig::fromYaml(kin_root, urdf_path_);
     urdf_path_ = kin_cfg_.urdf_path;
+
+    RCLCPP_INFO(node_->get_logger(),
+                "[KinematicsConfig] source=%s",
+                kin_yaml_loaded ? kinematics_cfg_yaml_path.c_str() : "forcecon_cfg_yaml fallback");
 
     RCLCPP_INFO(node_->get_logger(),
                 "[KinematicsConfig] profile=%s urdf=%s base=%s Ltip=%s Rtip=%s Ldof=%d Rdof=%d hand_enabled=%d",
