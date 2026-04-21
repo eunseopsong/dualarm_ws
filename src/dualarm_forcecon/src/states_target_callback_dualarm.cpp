@@ -72,13 +72,6 @@ inline std::vector<double> compress20to15(const Eigen::VectorXd& qh)
     return h15;
 }
 
-inline std::vector<double> eigenToStdVec(const Eigen::VectorXd& q)
-{
-    std::vector<double> out(static_cast<std::size_t>(q.size()), 0.0);
-    for (int i = 0; i < q.size(); ++i) out[static_cast<std::size_t>(i)] = q(i);
-    return out;
-}
-
 inline void updatePointSetFromMatrix(const Eigen::Matrix<double,5,3>& M,
                                      geometry_msgs::msg::Point& thumb,
                                      geometry_msgs::msg::Point& index,
@@ -147,8 +140,19 @@ void DualArmForceControl::TargetArmPositionCallback(
         r_offset_applied = true;
     }
 
-    const std::vector<double> ql = eigenToStdVec(q_l_c_);
-    const std::vector<double> qr = eigenToStdVec(q_r_c_);
+    const int n_l = static_cast<int>(q_l_c_.size());
+    const int n_r = static_cast<int>(q_r_c_.size());
+
+    if (n_l <= 0 || n_r <= 0) {
+        RCLCPP_WARN(logger, "[TargetArmPositionCallback] invalid arm state size. L=%d R=%d", n_l, n_r);
+        return;
+    }
+
+    std::vector<double> ql(static_cast<std::size_t>(n_l), 0.0);
+    std::vector<double> qr(static_cast<std::size_t>(n_r), 0.0);
+
+    for (int i = 0; i < n_l; ++i) ql[static_cast<std::size_t>(i)] = q_l_c_(i);
+    for (int i = 0; i < n_r; ++i) qr[static_cast<std::size_t>(i)] = q_r_c_(i);
 
     std::vector<double> rl, rr;
     bool l_ok = arm_ik_l_->solveIK(
@@ -157,18 +161,20 @@ void DualArmForceControl::TargetArmPositionCallback(
     bool r_ok = arm_ik_r_->solveIK(
         qr, r_xyz_ik, r_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rr);
 
-    if (l_ok && rl.size() >= static_cast<size_t>(q_l_t_.size())) {
-        for (int i = 0; i < q_l_t_.size(); ++i) q_l_t_(i) = rl[static_cast<size_t>(i)];
+    if (l_ok && static_cast<int>(rl.size()) >= n_l) {
+        for (int i = 0; i < n_l; ++i) q_l_t_(i) = rl[static_cast<std::size_t>(i)];
     } else {
-        RCLCPP_WARN(logger, "[IK][L] solveIK failed or invalid output size. ok=%d size=%zu expected=%d",
-                    static_cast<int>(l_ok), rl.size(), static_cast<int>(q_l_t_.size()));
+        RCLCPP_WARN(logger,
+                    "[IK][L] solveIK failed or invalid output size. ok=%d size=%zu expected=%d",
+                    static_cast<int>(l_ok), rl.size(), n_l);
     }
 
-    if (r_ok && rr.size() >= static_cast<size_t>(q_r_t_.size())) {
-        for (int i = 0; i < q_r_t_.size(); ++i) q_r_t_(i) = rr[static_cast<size_t>(i)];
+    if (r_ok && static_cast<int>(rr.size()) >= n_r) {
+        for (int i = 0; i < n_r; ++i) q_r_t_(i) = rr[static_cast<std::size_t>(i)];
     } else {
-        RCLCPP_WARN(logger, "[IK][R] solveIK failed or invalid output size. ok=%d size=%zu expected=%d",
-                    static_cast<int>(r_ok), rr.size(), static_cast<int>(q_r_t_.size()));
+        RCLCPP_WARN(logger,
+                    "[IK][R] solveIK failed or invalid output size. ok=%d size=%zu expected=%d",
+                    static_cast<int>(r_ok), rr.size(), n_r);
     }
 
     target_pose_l_.position.x = l_xyz_raw[0];
@@ -257,7 +263,6 @@ void DualArmForceControl::TargetArmPositionCallback(
 
 void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (!kin_cfg_.hand_enabled) return;
     if (current_hand_control_mode_ != "inverse") return;
     if (!msg) return;
     if (msg->data.size() < 30) return;
@@ -440,7 +445,6 @@ void DualArmForceControl::DeltaArmPositionCallback(
 void DualArmForceControl::DeltaHandPositionCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (!kin_cfg_.hand_enabled) return;
     if (current_hand_control_mode_ != "inverse") return;
     if (!msg || msg->data.size() < 5) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
@@ -542,21 +546,29 @@ void DualArmForceControl::TargetArmJointsCallback(
     if (current_arm_control_mode_ != "forward") return;
     if (!msg) return;
 
-    const size_t l_dof = static_cast<size_t>(q_l_t_.size());
-    const size_t r_dof = static_cast<size_t>(q_r_t_.size());
-    if (msg->data.size() < l_dof + r_dof) {
+    const int n_l = static_cast<int>(q_l_t_.size());
+    const int n_r = static_cast<int>(q_r_t_.size());
+    const std::size_t required = static_cast<std::size_t>(std::max(0, n_l) + std::max(0, n_r));
+
+    if (n_l <= 0 || n_r <= 0) {
         auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
-        RCLCPP_WARN(logger,
-                    "[TargetArmJointsCallback] expected %zu values (=L%zu+R%zu), got %zu",
-                    l_dof + r_dof, l_dof, r_dof, msg->data.size());
+        RCLCPP_WARN(logger, "[TargetArmJointsCallback] invalid arm target size. L=%d R=%d", n_l, n_r);
         return;
     }
 
-    for (int i = 0; i < q_l_t_.size(); ++i) {
-        q_l_t_(i) = msg->data[static_cast<size_t>(i)];
+    if (msg->data.size() < required) {
+        auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+        RCLCPP_WARN(logger,
+                    "[TargetArmJointsCallback] invalid command length. got=%zu expected>=%zu (L=%d R=%d)",
+                    msg->data.size(), required, n_l, n_r);
+        return;
     }
-    for (int i = 0; i < q_r_t_.size(); ++i) {
-        q_r_t_(i) = msg->data[l_dof + static_cast<size_t>(i)];
+
+    for (int i = 0; i < n_l; ++i) {
+        q_l_t_(i) = msg->data[static_cast<std::size_t>(i)];
+    }
+    for (int i = 0; i < n_r; ++i) {
+        q_r_t_(i) = msg->data[static_cast<std::size_t>(n_l + i)];
     }
 }
 
@@ -570,7 +582,6 @@ void DualArmForceControl::TargetArmJointsCallback(
 void DualArmForceControl::TargetHandJointsCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (!kin_cfg_.hand_enabled) return;
     if (current_hand_control_mode_ != "forward") return;
     if (!msg) return;
 
@@ -662,7 +673,6 @@ void DualArmForceControl::TargetHandJointsCallback(
 // ============================================================================
 void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (!kin_cfg_.hand_enabled) return;
     if (current_hand_control_mode_ == "idle") return;
     if (!msg) return;
     if (msg->data.size() < 5) return;
