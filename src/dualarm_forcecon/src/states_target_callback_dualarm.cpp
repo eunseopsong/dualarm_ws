@@ -163,28 +163,33 @@ void DualArmForceControl::TargetArmPositionCallback(
 
     // ----------------------------------------------------------------------
     // RBY1-safe fallback:
-    // KDL full-pose IK can fail for 7-DOF RBY1 even for very small Cartesian
-    // deltas because it tries to satisfy position and orientation strictly.
-    // If strict IK fails, use position-only numerical DLS IK. This preserves
-    // the current orientation approximately through the seed while only forcing
-    // the requested translation.
+    // If strict full-pose KDL IK fails, use weighted 6D DLS fallback.
+    // Translation is tracked strongly while the requested orientation is held
+    // softly around the startup/delta-derived target orientation.
     // ----------------------------------------------------------------------
-    constexpr int    kDlsMaxIters       = 120;
+    constexpr int    kDlsMaxIters       = 320;
     constexpr double kDlsPosTolM        = 5.0e-4;
-    constexpr double kDlsLambda         = 3.0e-2;
-    constexpr double kDlsAlpha          = 0.7;
-    constexpr double kDlsMaxJointStep   = 3.0e-2;
+    constexpr double kDlsRotTolRad      = 1.0e-2;
+    constexpr double kDlsLambda         = 2.0e-2;
+    constexpr double kDlsAlpha          = 0.30;
+    constexpr double kDlsMaxJointStep   = 1.5e-2;
     constexpr double kDlsNumericalEps   = 1.0e-5;
+    constexpr double kDlsPosWeight      = 1.0;
+    constexpr double kDlsRotWeight      = 3.0;
+    constexpr double kDlsPostureGain    = 0.08;
+    constexpr double kDlsMaxCartStepM   = 0.002;
+    constexpr double kDlsMaxRotStepRad  = 0.03;
 
     bool l_used_dls = false;
     bool r_used_dls = false;
 
     if (!(l_ok && static_cast<int>(rl.size()) >= n_l)) {
         std::vector<double> rl_dls;
-        const bool l_dls_ok = arm_ik_l_->solveIKPositionOnlyDLS(
-            ql, l_xyz_ik, ik_targets_frame_, rl_dls,
-            kDlsMaxIters, kDlsPosTolM, kDlsLambda, kDlsAlpha,
-            kDlsMaxJointStep, kDlsNumericalEps);
+        const bool l_dls_ok = arm_ik_l_->solveIKOrientationHoldDLS(
+            ql, l_xyz_ik, l_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rl_dls,
+            kDlsMaxIters, kDlsPosTolM, kDlsRotTolRad, kDlsLambda, kDlsAlpha,
+            kDlsMaxJointStep, kDlsNumericalEps, kDlsPosWeight, kDlsRotWeight,
+            ql, kDlsPostureGain, kDlsMaxCartStepM, kDlsMaxRotStepRad);
 
         if (l_dls_ok && static_cast<int>(rl_dls.size()) >= n_l) {
             rl = rl_dls;
@@ -195,10 +200,11 @@ void DualArmForceControl::TargetArmPositionCallback(
 
     if (!(r_ok && static_cast<int>(rr.size()) >= n_r)) {
         std::vector<double> rr_dls;
-        const bool r_dls_ok = arm_ik_r_->solveIKPositionOnlyDLS(
-            qr, r_xyz_ik, ik_targets_frame_, rr_dls,
-            kDlsMaxIters, kDlsPosTolM, kDlsLambda, kDlsAlpha,
-            kDlsMaxJointStep, kDlsNumericalEps);
+        const bool r_dls_ok = arm_ik_r_->solveIKOrientationHoldDLS(
+            qr, r_xyz_ik, r_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rr_dls,
+            kDlsMaxIters, kDlsPosTolM, kDlsRotTolRad, kDlsLambda, kDlsAlpha,
+            kDlsMaxJointStep, kDlsNumericalEps, kDlsPosWeight, kDlsRotWeight,
+            qr, kDlsPostureGain, kDlsMaxCartStepM, kDlsMaxRotStepRad);
 
         if (r_dls_ok && static_cast<int>(rr_dls.size()) >= n_r) {
             rr = rr_dls;
@@ -212,7 +218,7 @@ void DualArmForceControl::TargetArmPositionCallback(
         if (l_used_dls) {
             RCLCPP_INFO_THROTTLE(
                 logger, *node_->get_clock(), 1000,
-                "[IK][L] strict full-pose IK failed; position-only DLS fallback succeeded.");
+                "[IK][L] strict full-pose IK failed; substep orientation-hold DLS fallback succeeded.");
         }
     } else {
         RCLCPP_WARN(logger,
@@ -225,7 +231,7 @@ void DualArmForceControl::TargetArmPositionCallback(
         if (r_used_dls) {
             RCLCPP_INFO_THROTTLE(
                 logger, *node_->get_clock(), 1000,
-                "[IK][R] strict full-pose IK failed; position-only DLS fallback succeeded.");
+                "[IK][R] strict full-pose IK failed; substep orientation-hold DLS fallback succeeded.");
         }
     } else {
         RCLCPP_WARN(logger,
