@@ -539,6 +539,21 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     startup_fixed_hand_hold_latched_  = false;
     startup_arm_home_hold_latched_    = false;
 
+    // RBY1 command safety parameters. Defaults are intentionally conservative.
+    // A small Cartesian delta must not create a large absolute joint command jump.
+    rby1_arm_max_cmd_step_rad_ = node_->declare_parameter<double>(
+        "rby1_arm_max_cmd_step_rad", 0.006);
+    rby1_arm_servo_max_cart_step_m_ = node_->declare_parameter<double>(
+        "rby1_arm_servo_max_cart_step_m", 0.0008);
+
+    if (rby1_arm_max_cmd_step_rad_ <= 0.0 || !std::isfinite(rby1_arm_max_cmd_step_rad_)) {
+        rby1_arm_max_cmd_step_rad_ = 0.006;
+    }
+    if (rby1_arm_servo_max_cart_step_m_ <= 0.0 || !std::isfinite(rby1_arm_servo_max_cart_step_m_)) {
+        rby1_arm_servo_max_cart_step_m_ = 0.0008;
+    }
+    rby1_arm_cmd_slew_initialized_ = false;
+
     // -------------------------
     // Kinematics
     // -------------------------
@@ -608,11 +623,13 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     RCLCPP_INFO(
         node_->get_logger(),
-        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d profile=%s",
+        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m",
         static_cast<int>(startup_fixed_joint_hold_enabled_),
         static_cast<int>(startup_fixed_hand_hold_enabled_),
         static_cast<int>(startup_arm_home_hold_enabled_),
-        kin_cfg_.profile.c_str());
+        kin_cfg_.profile.c_str(),
+        rby1_arm_max_cmd_step_rad_,
+        rby1_arm_servo_max_cart_step_m_);
 }
 
 DualArmForceControl::~DualArmForceControl() {}
@@ -638,6 +655,45 @@ void DualArmForceControl::ControlLoop()
     // ------------------------------------------------------------------------
     const bool is_rby1_profile = (kin_cfg_.profile.find("rby1") != std::string::npos);
     if (is_rby1_profile && current_arm_control_mode_ == "inverse") {
+        auto init_rby1_cmd_slew_if_needed = [&]() {
+            if (rby1_arm_cmd_slew_initialized_) return;
+
+            if (startup_arm_home_hold_enabled_ && startup_arm_home_hold_latched_) {
+                q_l_arm_cmd_prev_ = q_l_arm_home_hold_;
+                q_r_arm_cmd_prev_ = q_r_arm_home_hold_;
+            } else {
+                q_l_arm_cmd_prev_ = q_l_c_;
+                q_r_arm_cmd_prev_ = q_r_c_;
+            }
+
+            rby1_arm_cmd_slew_initialized_ = true;
+        };
+
+        auto apply_rby1_arm_cmd_slew = [&](bool is_left, const Eigen::VectorXd& q_des) -> Eigen::VectorXd {
+            init_rby1_cmd_slew_if_needed();
+
+            Eigen::VectorXd& q_prev = is_left ? q_l_arm_cmd_prev_ : q_r_arm_cmd_prev_;
+            const Eigen::VectorXd& q_cur = is_left ? q_l_c_ : q_r_c_;
+
+            if (q_prev.size() != q_des.size()) {
+                q_prev = (q_cur.size() == q_des.size()) ? q_cur : q_des;
+            }
+
+            Eigen::VectorXd q_cmd = q_prev;
+            const int n = std::min<int>(q_cmd.size(), q_des.size());
+            const double step_lim = std::max(1e-5, rby1_arm_max_cmd_step_rad_);
+
+            for (int i = 0; i < n; ++i) {
+                double dq = q_des(i) - q_prev(i);
+                if (!std::isfinite(dq)) dq = 0.0;
+                dq = std::clamp(dq, -step_lim, step_lim);
+                q_cmd(i) = q_prev(i) + dq;
+            }
+
+            q_prev = q_cmd;
+            return q_cmd;
+        };
+
         if (!rby1_arm_target_active_) {
             // Important: do NOT follow q_c_ here.
             // q_t_=q_c_ makes the command follow the falling arm, so gravity
@@ -646,6 +702,9 @@ void DualArmForceControl::ControlLoop()
             if (startup_arm_home_hold_enabled_ && startup_arm_home_hold_latched_) {
                 q_l_t_ = q_l_arm_home_hold_;
                 q_r_t_ = q_r_arm_home_hold_;
+                q_l_arm_cmd_prev_ = q_l_t_;
+                q_r_arm_cmd_prev_ = q_r_t_;
+                rby1_arm_cmd_slew_initialized_ = true;
 
                 if (delta_arm_base_pose_initialized_) {
                     target_pose_l_ = delta_arm_base_pose_l_;
@@ -659,6 +718,9 @@ void DualArmForceControl::ControlLoop()
                 // complete JointState has been latched.
                 q_l_t_ = q_l_c_;
                 q_r_t_ = q_r_c_;
+                q_l_arm_cmd_prev_ = q_l_t_;
+                q_r_arm_cmd_prev_ = q_r_t_;
+                rby1_arm_cmd_slew_initialized_ = true;
                 target_pose_l_ = current_pose_l_;
                 target_pose_r_ = current_pose_r_;
             }
@@ -700,24 +762,18 @@ void DualArmForceControl::ControlLoop()
                     return;
                 }
 
-                Eigen::Vector3d dp = p_des - p_cur;
-                const double dist = dp.norm();
+                const Eigen::Vector3d dp_to_target = p_des - p_cur;
+                const double dist = dp_to_target.norm();
                 const double rot_err = quat_angle_error(cur_p.orientation, des_p.orientation);
 
-                // Stop only when BOTH position and orientation are close.
-                // Previous position-only RBY1 servo stopped as soon as xyz matched,
-                // which allowed orientation drift to remain.
+                // This stop condition only prevents unnecessary computation.
+                // q_t is intentionally NOT overwritten with q_cur, because q_cur may
+                // contain gravity drift. The previous command remains published.
                 if (dist < 5e-4 && rot_err < 2e-3) {
-                    // Keep the previous command. Do not assign q_t=q_cur,
-                    // because q_cur may already include small gravity drift.
                     return;
                 }
 
-                const double max_step = 0.002; // 2 mm per tick
-                if (dist > max_step) dp *= (max_step / dist);
-                Eigen::Vector3d p_step = p_cur + dp;
-
-                std::array<double,3> xyz_step{p_step.x(), p_step.y(), p_step.z()};
+                std::array<double,3> xyz_des{p_des.x(), p_des.y(), p_des.z()};
                 std::array<double,4> q_des_xyzw{
                     des_p.orientation.x,
                     des_p.orientation.y,
@@ -725,44 +781,50 @@ void DualArmForceControl::ControlLoop()
                     des_p.orientation.w
                 };
 
-                std::vector<double> q_seed(q_cur.size(), 0.0);
-                for (int i = 0; i < q_cur.size(); ++i) q_seed[static_cast<size_t>(i)] = q_cur(i);
+                init_rby1_cmd_slew_if_needed();
+                const Eigen::VectorXd& q_seed_eig = is_left ? q_l_arm_cmd_prev_ : q_r_arm_cmd_prev_;
+                std::vector<double> q_seed(q_seed_eig.size(), 0.0);
+                for (int i = 0; i < q_seed_eig.size(); ++i) {
+                    q_seed[static_cast<size_t>(i)] = q_seed_eig(i);
+                }
 
                 std::vector<double> q_sol;
 
-                // RBY1 v32:
-                // Use 6D pose DLS instead of position-only DLS.
-                // - xyz target is still incrementally stepped for smooth motion.
-                // - orientation target is fixed to target_pose_*.
-                //   For /delta_arm_cartesian_pose with zero droll/dpitch/dyaw,
-                //   target_pose_* orientation equals the latched home orientation.
-                // This removes null-space orientation drift during xyz-only commands.
-                const bool ok = ik->solveIKPoseDLS(
-                    q_seed, xyz_step, q_des_xyzw, "base", q_sol,
-                    160,     // max_iters
-                    5e-4,    // pos_tol_m
-                    2e-3,    // rot_tol_rad
-                    1.0,     // pos_weight
-                    0.85,    // rot_weight
-                    6e-2,    // lambda
-                    0.55,    // alpha
-                    2e-2,    // max_joint_step_rad
-                    1e-5);   // numerical_eps
+                // RBY1 v35:
+                // Do NOT run a strict full iterative pose IK here.
+                // The previous version could fail every tick, so q_t stayed at the
+                // home hold command even though TAR changed. Instead, use one-step
+                // resolved-rate pose DLS from the previous published command.
+                // This always produces a small continuous joint update toward
+                // target_pose while keeping the home orientation when orientation
+                // delta is zero.
+                const bool ok = ik->stepTowardPoseDLS(
+                    q_seed, xyz_des, q_des_xyzw, "base", q_sol,
+                    std::max(1e-5, rby1_arm_servo_max_cart_step_m_), // cart_step_limit_m
+                    6e-3,                                           // rot_step_limit_rad
+                    1.0,                                            // pos_weight
+                    0.35,                                           // rot_weight
+                    8e-2,                                           // lambda
+                    1.0,                                            // alpha
+                    std::max(1e-5, rby1_arm_max_cmd_step_rad_),      // max_joint_step_rad
+                    1e-5);                                          // numerical_eps
 
                 if (ok && q_sol.size() >= static_cast<size_t>(q_t.size())) {
-                    for (int i = 0; i < q_t.size(); ++i) q_t(i) = q_sol[static_cast<size_t>(i)];
+                    Eigen::VectorXd q_des(q_t.size());
+                    for (int i = 0; i < q_t.size(); ++i) {
+                        q_des(i) = q_sol[static_cast<size_t>(i)];
+                    }
+                    q_t = apply_rby1_arm_cmd_slew(is_left, q_des);
                 } else {
-                    // Do NOT fall back to position-only IK here, and do not
-                    // overwrite q_t with q_cur. Keep the previous command so
-                    // the arm does not sag when one IK iteration fails.
+                    // Keep the previous command. Do not fall back to q_cur.
                     RCLCPP_WARN_THROTTLE(
                         node_->get_logger(), *node_->get_clock(), 1000,
-                        "[IK][%s][RBY1-servo-pose] pose DLS failed. Hold current. "
-                        "step=(%.4f %.4f %.4f) cur=(%.4f %.4f %.4f) des=(%.4f %.4f %.4f) rot_err=%.4f rad",
+                        "[IK][%s][RBY1-servo-step] resolved-rate pose step failed. Hold previous command. "
+                        "cur=(%.4f %.4f %.4f) des=(%.4f %.4f %.4f) dist=%.4f rot_err=%.4f rad",
                         is_left ? "L" : "R",
-                        p_step.x(), p_step.y(), p_step.z(),
                         p_cur.x(), p_cur.y(), p_cur.z(),
                         p_des.x(), p_des.y(), p_des.z(),
+                        dist,
                         rot_err);
                 }
             };

@@ -160,6 +160,15 @@ private:
     bool startup_arm_home_hold_latched_ = false;
     Eigen::VectorXd q_l_arm_home_hold_, q_r_arm_home_hold_;
 
+    // RBY1 arm command safety. The RBY1 arm is redundant, so pose IK can
+    // occasionally return a far-away but mathematically valid joint solution.
+    // Isaac receives absolute joint-position commands, therefore final arm
+    // commands are slew-limited before publishing.
+    bool rby1_arm_cmd_slew_initialized_ = false;
+    Eigen::VectorXd q_l_arm_cmd_prev_, q_r_arm_cmd_prev_;
+    double rby1_arm_max_cmd_step_rad_ = 0.006;
+    double rby1_arm_servo_max_cart_step_m_ = 0.0008;
+
     // ------------------------------------------------------------------------
     // Mode / init
     // ------------------------------------------------------------------------

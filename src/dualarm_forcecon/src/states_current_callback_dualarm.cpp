@@ -667,9 +667,15 @@ void DualArmForceControl::ControlModeCallback(
         if (is_rby1 && startup_arm_home_hold_enabled_ && startup_arm_home_hold_latched_) {
             q_l_t_ = q_l_arm_home_hold_;
             q_r_t_ = q_r_arm_home_hold_;
+            q_l_arm_cmd_prev_ = q_l_t_;
+            q_r_arm_cmd_prev_ = q_r_t_;
+            rby1_arm_cmd_slew_initialized_ = true;
         } else {
             q_l_t_ = q_l_c_;
             q_r_t_ = q_r_c_;
+            q_l_arm_cmd_prev_ = q_l_t_;
+            q_r_arm_cmd_prev_ = q_r_t_;
+            rby1_arm_cmd_slew_initialized_ = true;
         }
 
         if (is_rby1 && delta_arm_base_pose_initialized_) {
@@ -683,6 +689,7 @@ void DualArmForceControl::ControlModeCallback(
         rby1_arm_target_active_ = false;  // armed only when an explicit arm target arrives
     } else {
         rby1_arm_target_active_ = false;
+        rby1_arm_cmd_slew_initialized_ = false;
     }
 
     f_l_t_.setZero();
