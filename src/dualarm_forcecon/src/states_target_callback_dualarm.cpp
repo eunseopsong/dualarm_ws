@@ -107,6 +107,39 @@ void DualArmForceControl::TargetArmPositionCallback(
     if (!arm_ik_l_ || !arm_ik_r_) return;
 
     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+    const bool is_rby1 = (kin_cfg_.profile.find("rby1") != std::string::npos);
+
+    if (is_rby1) {
+        auto finite3 = [](const std::array<double,3>& v) {
+            return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+        };
+
+        std::array<double,3> l_xyz_raw{msg->data[0], msg->data[1], msg->data[2]};
+        std::array<double,3> l_eul    {msg->data[3], msg->data[4], msg->data[5]};
+        std::array<double,3> r_xyz_raw{msg->data[6], msg->data[7], msg->data[8]};
+        std::array<double,3> r_eul    {msg->data[9], msg->data[10], msg->data[11]};
+
+        if (!finite3(l_xyz_raw) || !finite3(l_eul) || !finite3(r_xyz_raw) || !finite3(r_eul)) {
+            RCLCPP_WARN(logger, "[TargetArmPositionCallback][RBY1] Non-finite input detected. Ignore.");
+            return;
+        }
+
+        target_pose_l_.position.x = l_xyz_raw[0];
+        target_pose_l_.position.y = l_xyz_raw[1];
+        target_pose_l_.position.z = l_xyz_raw[2];
+
+        target_pose_r_.position.x = r_xyz_raw[0];
+        target_pose_r_.position.y = r_xyz_raw[1];
+        target_pose_r_.position.z = r_xyz_raw[2];
+
+        // RBY1 v30: translation-first. Keep current orientation to avoid full-pose
+        // IK failures for tiny Cartesian delta steps.
+        target_pose_l_.orientation = current_pose_l_.orientation;
+        target_pose_r_.orientation = current_pose_r_.orientation;
+
+        rby1_arm_target_active_ = true;
+        return;
+    }
 
     std::array<double,3> l_xyz_raw{msg->data[0], msg->data[1], msg->data[2]};
     std::array<double,3> l_eul    {msg->data[3], msg->data[4], msg->data[5]};
@@ -321,6 +354,39 @@ void DualArmForceControl::DeltaArmPositionCallback(
     if (!arm_ik_l_ || !arm_ik_r_) return;
 
     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+    const bool is_rby1 = (kin_cfg_.profile.find("rby1") != std::string::npos);
+
+    if (is_rby1) {
+        auto finite3 = [](const std::array<double,3>& v) {
+            return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+        };
+
+        std::array<double,3> l_xyz_raw{msg->data[0], msg->data[1], msg->data[2]};
+        std::array<double,3> l_eul    {msg->data[3], msg->data[4], msg->data[5]};
+        std::array<double,3> r_xyz_raw{msg->data[6], msg->data[7], msg->data[8]};
+        std::array<double,3> r_eul    {msg->data[9], msg->data[10], msg->data[11]};
+
+        if (!finite3(l_xyz_raw) || !finite3(l_eul) || !finite3(r_xyz_raw) || !finite3(r_eul)) {
+            RCLCPP_WARN(logger, "[TargetArmPositionCallback][RBY1] Non-finite input detected. Ignore.");
+            return;
+        }
+
+        target_pose_l_.position.x = l_xyz_raw[0];
+        target_pose_l_.position.y = l_xyz_raw[1];
+        target_pose_l_.position.z = l_xyz_raw[2];
+
+        target_pose_r_.position.x = r_xyz_raw[0];
+        target_pose_r_.position.y = r_xyz_raw[1];
+        target_pose_r_.position.z = r_xyz_raw[2];
+
+        // RBY1 v30: translation-first. Keep current orientation to avoid full-pose
+        // IK failures for tiny Cartesian delta steps.
+        target_pose_l_.orientation = current_pose_l_.orientation;
+        target_pose_r_.orientation = current_pose_r_.orientation;
+
+        rby1_arm_target_active_ = true;
+        return;
+    }
 
     auto finite3 = [](const std::array<double,3>& v) {
         return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);

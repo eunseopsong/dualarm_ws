@@ -327,7 +327,14 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
         apply_pose_deadband(target_pose_l_, tar_l_fk, s_tar_l_init);
         apply_pose_deadband(target_pose_r_, tar_r_fk, s_tar_r_init);
     }
-    // arm inverse 모드에서는 target_pose_* 를 TargetArmPositionCallback / DeltaArmPositionCallback 이 관리
+    else if (current_arm_control_mode_ == "inverse") {
+        const bool is_rby1 = (kin_cfg_.profile.find("rby1") != std::string::npos);
+        if (is_rby1 && !rby1_arm_target_active_) {
+            target_pose_l_ = current_pose_l_;
+            target_pose_r_ = current_pose_r_;
+        }
+        // Doosan inverse keeps target_pose_* managed by callbacks as before.
+    }
 }
 
 // --------------------
@@ -618,6 +625,9 @@ void DualArmForceControl::ControlModeCallback(
 
         target_pose_l_ = current_pose_l_;
         target_pose_r_ = current_pose_r_;
+        rby1_arm_target_active_ = false;  // armed only when an explicit arm target arrives
+    } else {
+        rby1_arm_target_active_ = false;
     }
 
     f_l_t_.setZero();

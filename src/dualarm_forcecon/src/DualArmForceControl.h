@@ -164,6 +164,10 @@ private:
     bool arm_idle_synced_  = false;
     bool hand_idle_synced_ = false;
 
+    // RBY1 arm inverse servo: target pose is stored by callbacks and
+    // incrementally tracked in ControlLoop() using position-only DLS.
+    bool rby1_arm_target_active_ = false;
+
     // ------------------------------------------------------------------------
     // Joint states
     // ------------------------------------------------------------------------

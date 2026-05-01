@@ -626,6 +626,73 @@ void DualArmForceControl::ControlLoop()
         arm_idle_synced_ = false;
     }
 
+
+    // ------------------------------------------------------------------------
+    // RBY1 arm inverse: translation-only incremental servo in ControlLoop
+    // ------------------------------------------------------------------------
+    const bool is_rby1_profile = (kin_cfg_.profile.find("rby1") != std::string::npos);
+    if (is_rby1_profile && current_arm_control_mode_ == "inverse") {
+        if (!rby1_arm_target_active_) {
+            q_l_t_ = q_l_c_;
+            q_r_t_ = q_r_c_;
+            target_pose_l_ = current_pose_l_;
+            target_pose_r_ = current_pose_r_;
+        } else {
+            auto run_one_arm = [&](bool is_left) {
+                auto ik = is_left ? arm_ik_l_ : arm_ik_r_;
+                auto& q_cur = is_left ? q_l_c_ : q_r_c_;
+                auto& q_t   = is_left ? q_l_t_ : q_r_t_;
+                auto& cur_p = is_left ? current_pose_l_ : current_pose_r_;
+                auto& des_p = is_left ? target_pose_l_ : target_pose_r_;
+
+                if (!ik || !ik->isOk()) return;
+
+                Eigen::Vector3d p_cur(cur_p.position.x, cur_p.position.y, cur_p.position.z);
+                Eigen::Vector3d p_des(des_p.position.x, des_p.position.y, des_p.position.z);
+
+                if (!std::isfinite(p_cur.x()) || !std::isfinite(p_cur.y()) || !std::isfinite(p_cur.z()) ||
+                    !std::isfinite(p_des.x()) || !std::isfinite(p_des.y()) || !std::isfinite(p_des.z())) {
+                    return;
+                }
+
+                Eigen::Vector3d dp = p_des - p_cur;
+                const double dist = dp.norm();
+                if (dist < 5e-4) {
+                    q_t = q_cur;
+                    return;
+                }
+
+                const double max_step = 0.002; // 2 mm per tick
+                if (dist > max_step) dp *= (max_step / dist);
+                Eigen::Vector3d p_step = p_cur + dp;
+
+                std::array<double,3> xyz_step{p_step.x(), p_step.y(), p_step.z()};
+                std::vector<double> q_seed(q_cur.size(), 0.0);
+                for (int i = 0; i < q_cur.size(); ++i) q_seed[static_cast<size_t>(i)] = q_cur(i);
+
+                std::vector<double> q_sol;
+                const bool ok = ik->solveIKPositionOnlyDLS(
+                    q_seed, xyz_step, "world", q_sol,
+                    120, 5e-4, 3e-2, 0.7, 3e-2, 1e-5);
+
+                if (ok && q_sol.size() >= static_cast<size_t>(q_t.size())) {
+                    for (int i = 0; i < q_t.size(); ++i) q_t(i) = q_sol[static_cast<size_t>(i)];
+                } else {
+                    RCLCPP_WARN_THROTTLE(
+                        node_->get_logger(), *node_->get_clock(), 1000,
+                        "[IK][%s][RBY1-servo-pos] incremental position-only solve failed. step=(%.4f %.4f %.4f) cur=(%.4f %.4f %.4f) des=(%.4f %.4f %.4f)",
+                        is_left ? "L" : "R",
+                        p_step.x(), p_step.y(), p_step.z(),
+                        p_cur.x(), p_cur.y(), p_cur.z(),
+                        p_des.x(), p_des.y(), p_des.z());
+                }
+            };
+
+            run_one_arm(true);
+            run_one_arm(false);
+        }
+    }
+
     // ------------------------------------------------------------------------
     // HAND idle sync
     // ------------------------------------------------------------------------
