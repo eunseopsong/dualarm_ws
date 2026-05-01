@@ -671,8 +671,12 @@ void DualArmForceControl::ControlLoop()
                 for (int i = 0; i < q_cur.size(); ++i) q_seed[static_cast<size_t>(i)] = q_cur(i);
 
                 std::vector<double> q_sol;
+                // current_pose_* and target_pose_* are produced by ArmForwardKinematics
+                // in BASE frame by default. Therefore p_step is also BASE-frame.
+                // Passing "world" here incorrectly subtracts world_base_xyz again
+                // and makes a small delta target look unreachable for RBY1.
                 const bool ok = ik->solveIKPositionOnlyDLS(
-                    q_seed, xyz_step, "world", q_sol,
+                    q_seed, xyz_step, "base", q_sol,
                     120, 5e-4, 3e-2, 0.7, 3e-2, 1e-5);
 
                 if (ok && q_sol.size() >= static_cast<size_t>(q_t.size())) {

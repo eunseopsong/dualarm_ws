@@ -361,30 +361,66 @@ void DualArmForceControl::DeltaArmPositionCallback(
             return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
         };
 
-        std::array<double,3> l_xyz_raw{msg->data[0], msg->data[1], msg->data[2]};
-        std::array<double,3> l_eul    {msg->data[3], msg->data[4], msg->data[5]};
-        std::array<double,3> r_xyz_raw{msg->data[6], msg->data[7], msg->data[8]};
-        std::array<double,3> r_eul    {msg->data[9], msg->data[10], msg->data[11]};
+        // RBY1 delta command must be interpreted as:
+        //   target = latched_home_pose + delta
+        // not as an absolute Cartesian target.
+        std::array<double,3> l_dxyz{msg->data[0],  msg->data[1],  msg->data[2]};
+        std::array<double,3> l_deul{msg->data[3],  msg->data[4],  msg->data[5]};
+        std::array<double,3> r_dxyz{msg->data[6],  msg->data[7],  msg->data[8]};
+        std::array<double,3> r_deul{msg->data[9],  msg->data[10], msg->data[11]};
 
-        if (!finite3(l_xyz_raw) || !finite3(l_eul) || !finite3(r_xyz_raw) || !finite3(r_eul)) {
-            RCLCPP_WARN(logger, "[TargetArmPositionCallback][RBY1] Non-finite input detected. Ignore.");
+        if (!finite3(l_dxyz) || !finite3(l_deul) || !finite3(r_dxyz) || !finite3(r_deul)) {
+            RCLCPP_WARN(logger, "[DeltaArmPositionCallback][RBY1] Non-finite delta input detected. Ignore.");
             return;
         }
 
-        target_pose_l_.position.x = l_xyz_raw[0];
-        target_pose_l_.position.y = l_xyz_raw[1];
-        target_pose_l_.position.z = l_xyz_raw[2];
+        if (!delta_arm_base_pose_initialized_) {
+            RCLCPP_WARN(logger, "[DeltaArmPositionCallback][RBY1] latched home/base pose is not initialized yet.");
+            return;
+        }
 
-        target_pose_r_.position.x = r_xyz_raw[0];
-        target_pose_r_.position.y = r_xyz_raw[1];
-        target_pose_r_.position.z = r_xyz_raw[2];
+        target_pose_l_ = delta_arm_base_pose_l_;
+        target_pose_r_ = delta_arm_base_pose_r_;
 
-        // RBY1 v30: translation-first. Keep current orientation to avoid full-pose
-        // IK failures for tiny Cartesian delta steps.
-        target_pose_l_.orientation = current_pose_l_.orientation;
-        target_pose_r_.orientation = current_pose_r_.orientation;
+        target_pose_l_.position.x = delta_arm_base_pose_l_.position.x + l_dxyz[0];
+        target_pose_l_.position.y = delta_arm_base_pose_l_.position.y + l_dxyz[1];
+        target_pose_l_.position.z = delta_arm_base_pose_l_.position.z + l_dxyz[2];
+
+        target_pose_r_.position.x = delta_arm_base_pose_r_.position.x + r_dxyz[0];
+        target_pose_r_.position.y = delta_arm_base_pose_r_.position.y + r_dxyz[1];
+        target_pose_r_.position.z = delta_arm_base_pose_r_.position.z + r_dxyz[2];
+
+        // Current RBY1 inverse path is translation-only DLS in ControlLoop().
+        // Keep the latched home orientation for monitor consistency and ignore
+        // orientation deltas here to avoid reintroducing full-pose IK failures.
+        target_pose_l_.orientation = delta_arm_base_pose_l_.orientation;
+        target_pose_r_.orientation = delta_arm_base_pose_r_.orientation;
 
         rby1_arm_target_active_ = true;
+
+        static int rby1_delta_dbg_decim = 0;
+        if ((rby1_delta_dbg_decim++ % 20) == 0) {
+            RCLCPP_INFO(
+                logger,
+                "[DeltaArmPositionCallback][RBY1] home+delta target | "
+                "L home=(%.4f %.4f %.4f) d=(%.4f %.4f %.4f) tgt=(%.4f %.4f %.4f) | "
+                "R home=(%.4f %.4f %.4f) d=(%.4f %.4f %.4f) tgt=(%.4f %.4f %.4f)",
+                delta_arm_base_pose_l_.position.x,
+                delta_arm_base_pose_l_.position.y,
+                delta_arm_base_pose_l_.position.z,
+                l_dxyz[0], l_dxyz[1], l_dxyz[2],
+                target_pose_l_.position.x,
+                target_pose_l_.position.y,
+                target_pose_l_.position.z,
+                delta_arm_base_pose_r_.position.x,
+                delta_arm_base_pose_r_.position.y,
+                delta_arm_base_pose_r_.position.z,
+                r_dxyz[0], r_dxyz[1], r_dxyz[2],
+                target_pose_r_.position.x,
+                target_pose_r_.position.y,
+                target_pose_r_.position.z);
+        }
+
         return;
     }
 
