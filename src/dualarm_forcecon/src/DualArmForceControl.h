@@ -145,6 +145,12 @@ private:
     // RBY1 startup hold:
     // lock wheel / torso / head / finger joints to the first observed JointState.
     bool startup_fixed_joint_hold_enabled_ = false;
+
+    // Hand runtime can be enabled even when the selected robot YAML has
+    // hand.enabled=false. This is needed for RBY1 + external hand teleop, where
+    // the arm kinematics profile is arm-only but the old v25 hand admittance
+    // pipeline should still run for hand forward/inverse modes.
+    bool hand_runtime_enabled_ = false;
     bool startup_fixed_joint_hold_latched_ = false;
     std::unordered_map<std::string, double> startup_fixed_joint_position_;
 

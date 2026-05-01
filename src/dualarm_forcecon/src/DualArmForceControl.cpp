@@ -576,16 +576,78 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         arm_ik_r_->setWorldBaseTransformXYZEulerDeg(world_base_xyz_, world_base_euler_xyz_deg_);
     }
 
-    if (kin_cfg_.hand_enabled) {
+    // ----------------------------------------------------------------------
+    // Hand FK/IK runtime
+    // ----------------------------------------------------------------------
+    // v31 rollback patch:
+    // In v25/v27 Doosan-only behavior, hand forward/inverse modes always used
+    // the unified hand admittance pipeline:
+    //     q_h_motion_t_ -> FK/IK/admittance -> q_h_t_
+    //
+    // The earlier RBY1 fast teleop patch bypassed this when hand.enabled=false
+    // and directly copied q_h_motion_t_ to q_h_t_. That made the hand move, but
+    // removed the selected-finger admittance correction.  Here we allow the hand
+    // runtime to be created even for arm-only robot profiles.
+    const bool enable_hand_runtime_when_yaml_disabled =
+        node_->declare_parameter<bool>("enable_hand_runtime_when_yaml_disabled", true);
+
+    const std::string fallback_left_hand_base_link =
+        node_->declare_parameter<std::string>("fallback_left_hand_base_link", "left_joint_6");
+    const std::string fallback_right_hand_base_link =
+        node_->declare_parameter<std::string>("fallback_right_hand_base_link", "right_joint_6");
+
+    const std::vector<std::string> fallback_hand_tip_suffixes =
+        node_->declare_parameter<std::vector<std::string>>(
+            "fallback_hand_tip_suffixes",
+            std::vector<std::string>{
+                "link4_thumb", "link4_index", "link4_middle", "link4_ring", "link4_baby"
+            });
+
+    const bool request_hand_runtime =
+        kin_cfg_.hand_enabled || enable_hand_runtime_when_yaml_disabled;
+
+    std::string hand_left_base_link = kin_cfg_.left_hand_base_link;
+    std::string hand_right_base_link = kin_cfg_.right_hand_base_link;
+    std::vector<std::string> hand_tip_suffixes = kin_cfg_.hand_tip_suffixes;
+
+    if (hand_left_base_link.empty())  hand_left_base_link  = fallback_left_hand_base_link;
+    if (hand_right_base_link.empty()) hand_right_base_link = fallback_right_hand_base_link;
+    if (hand_tip_suffixes.empty())    hand_tip_suffixes    = fallback_hand_tip_suffixes;
+
+    hand_runtime_enabled_ = false;
+
+    if (request_hand_runtime) {
         hand_fk_l_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(
-            urdf_path_, kin_cfg_.left_hand_base_link, kin_cfg_.hand_tip_suffixes);
+            urdf_path_, hand_left_base_link, hand_tip_suffixes);
         hand_fk_r_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(
-            urdf_path_, kin_cfg_.right_hand_base_link, kin_cfg_.hand_tip_suffixes);
+            urdf_path_, hand_right_base_link, hand_tip_suffixes);
 
         hand_ik_l_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(
-            urdf_path_, kin_cfg_.left_hand_base_link, kin_cfg_.hand_tip_suffixes);
+            urdf_path_, hand_left_base_link, hand_tip_suffixes);
         hand_ik_r_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(
-            urdf_path_, kin_cfg_.right_hand_base_link, kin_cfg_.hand_tip_suffixes);
+            urdf_path_, hand_right_base_link, hand_tip_suffixes);
+
+        const bool hand_fk_ok =
+            hand_fk_l_ && hand_fk_r_ && hand_fk_l_->ok() && hand_fk_r_->ok();
+        const bool hand_ik_ok =
+            hand_ik_l_ && hand_ik_r_ && hand_ik_l_->ok() && hand_ik_r_->ok();
+
+        hand_runtime_enabled_ = hand_fk_ok && hand_ik_ok;
+
+        if (!hand_runtime_enabled_) {
+            RCLCPP_WARN(
+                node_->get_logger(),
+                "[HandRuntime] requested but FK/IK is not fully OK. "
+                "Hand forward will fall back to joint pass-through; hand inverse/admittance will be disabled. "
+                "urdf=%s Lbase=%s Rbase=%s",
+                urdf_path_.c_str(), hand_left_base_link.c_str(), hand_right_base_link.c_str());
+        } else {
+            RCLCPP_INFO(
+                node_->get_logger(),
+                "[HandRuntime] enabled. YAML hand.enabled=%d Lbase=%s Rbase=%s",
+                static_cast<int>(kin_cfg_.hand_enabled),
+                hand_left_base_link.c_str(), hand_right_base_link.c_str());
+        }
     } else {
         hand_fk_l_.reset();
         hand_fk_r_.reset();
@@ -636,10 +698,11 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     RCLCPP_INFO(
         node_->get_logger(),
-        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms",
+        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d hand_runtime_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms",
         static_cast<int>(startup_fixed_joint_hold_enabled_),
         static_cast<int>(startup_fixed_hand_hold_enabled_),
         static_cast<int>(startup_arm_home_hold_enabled_),
+        static_cast<int>(hand_runtime_enabled_),
         kin_cfg_.profile.c_str(),
         rby1_arm_max_cmd_step_rad_,
         rby1_arm_servo_max_cart_step_m_,
@@ -882,12 +945,11 @@ void DualArmForceControl::ControlLoop()
     // ------------------------------------------------------------------------
     // HAND unified forward / inverse admittance pipeline
     // ------------------------------------------------------------------------
-    if (!kin_cfg_.hand_enabled) {
-        // v30 fast hand-forward patch:
-        // Some robot profiles, especially RBY1, use hand.enabled=false to disable
-        // Cartesian fingertip FK/IK/admittance because the hand model is not part
-        // of the reusable hand kinematics profile yet. However, joint-space hand
-        // forward control from Manus glove must still pass through.
+    if (!hand_runtime_enabled_) {
+        // No valid hand FK/IK runtime is available. Keep only safe joint-space
+        // pass-through for forward mode. In this fallback mode, force/admittance
+        // correction and hand inverse are intentionally disabled because they need
+        // fingertip FK/IK.
         f_l_hand_t_.setZero();
         f_r_hand_t_.setZero();
 
@@ -1031,7 +1093,9 @@ void DualArmForceControl::ControlLoop()
             if (hj.ok) {
                 const int idx = hj.finger_id * 4 + hj.joint_id;
                 if (idx >= 0 && idx < 20) {
-                    if (kin_cfg_.hand_enabled || current_hand_control_mode_ == "forward") {
+                    if (hand_runtime_enabled_ ||
+                        current_hand_control_mode_ == "forward" ||
+                        current_hand_control_mode_ == "inverse") {
                         if (hj.is_left) cmd.position.push_back(q_l_h_t_(idx));
                         else            cmd.position.push_back(q_r_h_t_(idx));
                         continue;

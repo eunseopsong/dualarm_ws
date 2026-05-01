@@ -389,7 +389,7 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
 {
     (void)msg;
     if (!is_initialized_) return;
-    if (!kin_cfg_.hand_enabled) return;
+    if (!hand_runtime_enabled_) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
 
     constexpr double kFingerPosDeadbandM = 1e-6;
