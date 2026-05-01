@@ -93,6 +93,93 @@ inline void updatePointSetFromMatrix(const Eigen::Matrix<double,5,3>& M,
     matrixRowToPoint(M, 4, baby);
 }
 
+
+inline std::string toLowerCopy(std::string s)
+{
+    for (auto &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+inline double angleToRadForIK(double a, const std::string& angle_unit)
+{
+    const std::string unit = toLowerCopy(angle_unit);
+    if (unit == "deg") return a * M_PI / 180.0;
+    if (unit == "auto" && std::fabs(a) > 3.5) return a * M_PI / 180.0;
+    return a;
+}
+
+inline geometry_msgs::msg::Quaternion eigenQuatToMsg(Eigen::Quaterniond q)
+{
+    geometry_msgs::msg::Quaternion out;
+    if (!std::isfinite(q.w()) || !std::isfinite(q.x()) ||
+        !std::isfinite(q.y()) || !std::isfinite(q.z()) ||
+        q.norm() < 1e-12) {
+        out.x = 0.0;
+        out.y = 0.0;
+        out.z = 0.0;
+        out.w = 1.0;
+        return out;
+    }
+
+    q.normalize();
+    out.x = q.x();
+    out.y = q.y();
+    out.z = q.z();
+    out.w = q.w();
+    return out;
+}
+
+inline Eigen::Quaterniond msgQuatToEigen(const geometry_msgs::msg::Quaternion& qmsg)
+{
+    Eigen::Quaterniond q(qmsg.w, qmsg.x, qmsg.y, qmsg.z);
+    if (!std::isfinite(q.w()) || !std::isfinite(q.x()) ||
+        !std::isfinite(q.y()) || !std::isfinite(q.z()) ||
+        q.norm() < 1e-12) {
+        return Eigen::Quaterniond::Identity();
+    }
+    q.normalize();
+    return q;
+}
+
+inline geometry_msgs::msg::Quaternion eulerToQuatMsg(double ex,
+                                                     double ey,
+                                                     double ez,
+                                                     const std::string& euler_conv,
+                                                     const std::string& angle_unit)
+{
+    const double a0 = angleToRadForIK(ex, angle_unit);
+    const double a1 = angleToRadForIK(ey, angle_unit);
+    const double a2 = angleToRadForIK(ez, angle_unit);
+
+    Eigen::AngleAxisd Rx(a0, Eigen::Vector3d::UnitX());
+    Eigen::AngleAxisd Ry(a1, Eigen::Vector3d::UnitY());
+    Eigen::AngleAxisd Rz(a2, Eigen::Vector3d::UnitZ());
+
+    Eigen::Quaterniond q;
+    const std::string conv = toLowerCopy(euler_conv);
+    if (conv == "zyx" || conv == "rzyx") q = Rz * Ry * Rx;
+    else                                 q = Rx * Ry * Rz;  // existing project convention
+
+    return eigenQuatToMsg(q);
+}
+
+inline geometry_msgs::msg::Quaternion composeDeltaOrientation(
+    const geometry_msgs::msg::Quaternion& base_q_msg,
+    const std::array<double,3>& delta_eul,
+    const std::string& euler_conv,
+    const std::string& angle_unit)
+{
+    const Eigen::Quaterniond q_base = msgQuatToEigen(base_q_msg);
+
+    const geometry_msgs::msg::Quaternion dq_msg =
+        eulerToQuatMsg(delta_eul[0], delta_eul[1], delta_eul[2], euler_conv, angle_unit);
+    const Eigen::Quaterniond q_delta = msgQuatToEigen(dq_msg);
+
+    // Local delta convention: target orientation = home orientation * delta.
+    // If delta is zero, this exactly preserves the latched home orientation.
+    return eigenQuatToMsg(q_base * q_delta);
+}
+
 } // namespace
 
 // ============================================================================
@@ -132,10 +219,13 @@ void DualArmForceControl::TargetArmPositionCallback(
         target_pose_r_.position.y = r_xyz_raw[1];
         target_pose_r_.position.z = r_xyz_raw[2];
 
-        // RBY1 v30: translation-first. Keep current orientation to avoid full-pose
-        // IK failures for tiny Cartesian delta steps.
-        target_pose_l_.orientation = current_pose_l_.orientation;
-        target_pose_r_.orientation = current_pose_r_.orientation;
+        // RBY1 v32: absolute Cartesian target keeps the requested orientation.
+        // The ControlLoop now uses pose-constrained DLS, so orientation no longer
+        // has to be ignored to avoid the previous strict KDL full-pose failures.
+        target_pose_l_.orientation = eulerToQuatMsg(
+            l_eul[0], l_eul[1], l_eul[2], ik_euler_conv_, ik_angle_unit_);
+        target_pose_r_.orientation = eulerToQuatMsg(
+            r_eul[0], r_eul[1], r_eul[2], ik_euler_conv_, ik_angle_unit_);
 
         rby1_arm_target_active_ = true;
         return;
@@ -390,11 +480,15 @@ void DualArmForceControl::DeltaArmPositionCallback(
         target_pose_r_.position.y = delta_arm_base_pose_r_.position.y + r_dxyz[1];
         target_pose_r_.position.z = delta_arm_base_pose_r_.position.z + r_dxyz[2];
 
-        // Current RBY1 inverse path is translation-only DLS in ControlLoop().
-        // Keep the latched home orientation for monitor consistency and ignore
-        // orientation deltas here to avoid reintroducing full-pose IK failures.
-        target_pose_l_.orientation = delta_arm_base_pose_l_.orientation;
-        target_pose_r_.orientation = delta_arm_base_pose_r_.orientation;
+        // RBY1 v32:
+        // Preserve latched home orientation when droll/dpitch/dyaw are zero.
+        // If orientation delta is nonzero, apply it relative to the home pose.
+        // This means xyz-only delta commands move position without letting
+        // the end-effector orientation drift in the redundant 7-DOF null-space.
+        target_pose_l_.orientation = composeDeltaOrientation(
+            delta_arm_base_pose_l_.orientation, l_deul, ik_euler_conv_, ik_angle_unit_);
+        target_pose_r_.orientation = composeDeltaOrientation(
+            delta_arm_base_pose_r_.orientation, r_deul, ik_euler_conv_, ik_angle_unit_);
 
         rby1_arm_target_active_ = true;
 
@@ -402,9 +496,9 @@ void DualArmForceControl::DeltaArmPositionCallback(
         if ((rby1_delta_dbg_decim++ % 20) == 0) {
             RCLCPP_INFO(
                 logger,
-                "[DeltaArmPositionCallback][RBY1] home+delta target | "
-                "L home=(%.4f %.4f %.4f) d=(%.4f %.4f %.4f) tgt=(%.4f %.4f %.4f) | "
-                "R home=(%.4f %.4f %.4f) d=(%.4f %.4f %.4f) tgt=(%.4f %.4f %.4f)",
+                "[DeltaArmPositionCallback][RBY1] home+delta pose target | "
+                "L home=(%.4f %.4f %.4f) d=(%.4f %.4f %.4f) tgt=(%.4f %.4f %.4f) deul=(%.3f %.3f %.3f) | "
+                "R home=(%.4f %.4f %.4f) d=(%.4f %.4f %.4f) tgt=(%.4f %.4f %.4f) deul=(%.3f %.3f %.3f)",
                 delta_arm_base_pose_l_.position.x,
                 delta_arm_base_pose_l_.position.y,
                 delta_arm_base_pose_l_.position.z,
@@ -412,13 +506,15 @@ void DualArmForceControl::DeltaArmPositionCallback(
                 target_pose_l_.position.x,
                 target_pose_l_.position.y,
                 target_pose_l_.position.z,
+                l_deul[0], l_deul[1], l_deul[2],
                 delta_arm_base_pose_r_.position.x,
                 delta_arm_base_pose_r_.position.y,
                 delta_arm_base_pose_r_.position.z,
                 r_dxyz[0], r_dxyz[1], r_dxyz[2],
                 target_pose_r_.position.x,
                 target_pose_r_.position.y,
-                target_pose_r_.position.z);
+                target_pose_r_.position.z,
+                r_deul[0], r_deul[1], r_deul[2]);
         }
 
         return;

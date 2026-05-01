@@ -628,7 +628,7 @@ void DualArmForceControl::ControlLoop()
 
 
     // ------------------------------------------------------------------------
-    // RBY1 arm inverse: translation-only incremental servo in ControlLoop
+    // RBY1 arm inverse: pose-constrained incremental servo in ControlLoop
     // ------------------------------------------------------------------------
     const bool is_rby1_profile = (kin_cfg_.profile.find("rby1") != std::string::npos);
     if (is_rby1_profile && current_arm_control_mode_ == "inverse") {
@@ -647,6 +647,26 @@ void DualArmForceControl::ControlLoop()
 
                 if (!ik || !ik->isOk()) return;
 
+                auto quat_msg_to_eigen = [](const geometry_msgs::msg::Quaternion& qm) {
+                    Eigen::Quaterniond q(qm.w, qm.x, qm.y, qm.z);
+                    if (!std::isfinite(q.w()) || !std::isfinite(q.x()) ||
+                        !std::isfinite(q.y()) || !std::isfinite(q.z()) ||
+                        q.norm() < 1e-12) {
+                        return Eigen::Quaterniond::Identity();
+                    }
+                    q.normalize();
+                    return q;
+                };
+
+                auto quat_angle_error = [&](const geometry_msgs::msg::Quaternion& q_cur_msg,
+                                            const geometry_msgs::msg::Quaternion& q_des_msg) {
+                    Eigen::Quaterniond qc = quat_msg_to_eigen(q_cur_msg);
+                    Eigen::Quaterniond qd = quat_msg_to_eigen(q_des_msg);
+                    const double dot_abs = std::abs(qc.dot(qd));
+                    const double dot_clamped = std::clamp(dot_abs, 0.0, 1.0);
+                    return 2.0 * std::acos(dot_clamped);
+                };
+
                 Eigen::Vector3d p_cur(cur_p.position.x, cur_p.position.y, cur_p.position.z);
                 Eigen::Vector3d p_des(des_p.position.x, des_p.position.y, des_p.position.z);
 
@@ -657,7 +677,12 @@ void DualArmForceControl::ControlLoop()
 
                 Eigen::Vector3d dp = p_des - p_cur;
                 const double dist = dp.norm();
-                if (dist < 5e-4) {
+                const double rot_err = quat_angle_error(cur_p.orientation, des_p.orientation);
+
+                // Stop only when BOTH position and orientation are close.
+                // Previous position-only RBY1 servo stopped as soon as xyz matched,
+                // which allowed orientation drift to remain.
+                if (dist < 5e-4 && rot_err < 2e-3) {
                     q_t = q_cur;
                     return;
                 }
@@ -667,28 +692,53 @@ void DualArmForceControl::ControlLoop()
                 Eigen::Vector3d p_step = p_cur + dp;
 
                 std::array<double,3> xyz_step{p_step.x(), p_step.y(), p_step.z()};
+                std::array<double,4> q_des_xyzw{
+                    des_p.orientation.x,
+                    des_p.orientation.y,
+                    des_p.orientation.z,
+                    des_p.orientation.w
+                };
+
                 std::vector<double> q_seed(q_cur.size(), 0.0);
                 for (int i = 0; i < q_cur.size(); ++i) q_seed[static_cast<size_t>(i)] = q_cur(i);
 
                 std::vector<double> q_sol;
-                // current_pose_* and target_pose_* are produced by ArmForwardKinematics
-                // in BASE frame by default. Therefore p_step is also BASE-frame.
-                // Passing "world" here incorrectly subtracts world_base_xyz again
-                // and makes a small delta target look unreachable for RBY1.
-                const bool ok = ik->solveIKPositionOnlyDLS(
-                    q_seed, xyz_step, "base", q_sol,
-                    120, 5e-4, 3e-2, 0.7, 3e-2, 1e-5);
+
+                // RBY1 v32:
+                // Use 6D pose DLS instead of position-only DLS.
+                // - xyz target is still incrementally stepped for smooth motion.
+                // - orientation target is fixed to target_pose_*.
+                //   For /delta_arm_cartesian_pose with zero droll/dpitch/dyaw,
+                //   target_pose_* orientation equals the latched home orientation.
+                // This removes null-space orientation drift during xyz-only commands.
+                const bool ok = ik->solveIKPoseDLS(
+                    q_seed, xyz_step, q_des_xyzw, "base", q_sol,
+                    160,     // max_iters
+                    5e-4,    // pos_tol_m
+                    2e-3,    // rot_tol_rad
+                    1.0,     // pos_weight
+                    0.85,    // rot_weight
+                    6e-2,    // lambda
+                    0.55,    // alpha
+                    2e-2,    // max_joint_step_rad
+                    1e-5);   // numerical_eps
 
                 if (ok && q_sol.size() >= static_cast<size_t>(q_t.size())) {
                     for (int i = 0; i < q_t.size(); ++i) q_t(i) = q_sol[static_cast<size_t>(i)];
                 } else {
+                    // Do NOT fall back to position-only IK here.
+                    // Fallback would move xyz but reintroduce the orientation drift
+                    // that this patch is meant to remove.
+                    q_t = q_cur;
                     RCLCPP_WARN_THROTTLE(
                         node_->get_logger(), *node_->get_clock(), 1000,
-                        "[IK][%s][RBY1-servo-pos] incremental position-only solve failed. step=(%.4f %.4f %.4f) cur=(%.4f %.4f %.4f) des=(%.4f %.4f %.4f)",
+                        "[IK][%s][RBY1-servo-pose] pose DLS failed. Hold current. "
+                        "step=(%.4f %.4f %.4f) cur=(%.4f %.4f %.4f) des=(%.4f %.4f %.4f) rot_err=%.4f rad",
                         is_left ? "L" : "R",
                         p_step.x(), p_step.y(), p_step.z(),
                         p_cur.x(), p_cur.y(), p_cur.z(),
-                        p_des.x(), p_des.y(), p_des.z());
+                        p_des.x(), p_des.y(), p_des.z(),
+                        rot_err);
                 }
             };
 

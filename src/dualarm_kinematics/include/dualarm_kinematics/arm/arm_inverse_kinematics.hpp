@@ -17,6 +17,7 @@
 #include <memory>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 #include <Eigen/Dense>
 
@@ -322,6 +323,213 @@ public:
         if (best_err <= std::max(5.0 * pos_tol_m, 0.003)) {
             result_q = best_q;
             return true;
+        }
+
+        result_q.clear();
+        return false;
+    }
+
+
+    // ==========================
+    // Pose DLS IK fallback
+    // - Uses translational + rotational error (6xN numerical Jacobian)
+    // - Intended for RBY1 7-DOF arm delta Cartesian control.
+    // - When the delta command has only xyz components, pass the latched home
+    //   orientation as target_xyzw to prevent free null-space orientation drift.
+    // ==========================
+    bool solveIKPoseDLS(const std::vector<double>& current_q,
+                        const std::array<double,3>& target_xyz,
+                        const std::array<double,4>& target_xyzw,  // x,y,z,w
+                        const std::string& targets_frame,
+                        std::vector<double>& result_q,
+                        int max_iters = 140,
+                        double pos_tol_m = 5e-4,
+                        double rot_tol_rad = 2e-3,
+                        double pos_weight = 1.0,
+                        double rot_weight = 0.75,
+                        double lambda = 5e-2,
+                        double alpha = 0.55,
+                        double max_joint_step_rad = 2e-2,
+                        double numerical_eps = 1e-5) const
+    {
+        if (!ok_ || !fk_solver_) return false;
+        if (current_q.size() < num_joints_) return false;
+        if (num_joints_ == 0) return false;
+
+        auto frame_s = toLower_(targets_frame);
+        if (frame_s.empty()) frame_s = "base";
+
+        Eigen::Vector3d p_target(target_xyz[0], target_xyz[1], target_xyz[2]);
+        Eigen::Quaterniond q_target_input(
+            target_xyzw[3], target_xyzw[0], target_xyzw[1], target_xyzw[2]);
+
+        if (!std::isfinite(p_target.x()) || !std::isfinite(p_target.y()) || !std::isfinite(p_target.z())) {
+            return false;
+        }
+        if (!std::isfinite(q_target_input.w()) || !std::isfinite(q_target_input.x()) ||
+            !std::isfinite(q_target_input.y()) || !std::isfinite(q_target_input.z())) {
+            return false;
+        }
+        if (q_target_input.norm() < 1e-12) return false;
+        q_target_input.normalize();
+
+        Eigen::Isometry3d E_target_input = Eigen::Isometry3d::Identity();
+        E_target_input.translation() = p_target;
+        E_target_input.linear() = q_target_input.toRotationMatrix();
+
+        Eigen::Isometry3d E_base_target = E_target_input;
+        if (frame_s == "world" || frame_s == "global") {
+            E_base_target = world_T_base_.inverse() * E_target_input;
+        } else if (!(frame_s == "base" || frame_s == "robot_base" || frame_s == "local")) {
+            std::cerr << "[IK Warn] Unknown targets_frame='" << targets_frame
+                      << "'. Pose DLS treats it as 'base'." << std::endl;
+        }
+
+        p_target = E_base_target.translation();
+        const Eigen::Matrix3d R_target = E_base_target.linear();
+
+        if (max_iters <= 0) max_iters = 140;
+        if (pos_tol_m <= 0.0) pos_tol_m = 5e-4;
+        if (rot_tol_rad <= 0.0) rot_tol_rad = 2e-3;
+        if (pos_weight <= 0.0) pos_weight = 1.0;
+        if (rot_weight <= 0.0) rot_weight = 0.75;
+        if (lambda <= 0.0) lambda = 5e-2;
+        if (alpha <= 0.0) alpha = 0.55;
+        if (max_joint_step_rad <= 0.0) max_joint_step_rad = 2e-2;
+        if (numerical_eps <= 0.0) numerical_eps = 1e-5;
+
+        auto so3Log = [](const Eigen::Matrix3d& R)->Eigen::Vector3d {
+            Eigen::Matrix3d R_clean = R;
+            if (!R_clean.allFinite()) return Eigen::Vector3d::Zero();
+
+            double cos_angle = (R_clean.trace() - 1.0) * 0.5;
+            cos_angle = std::clamp(cos_angle, -1.0, 1.0);
+            const double angle = std::acos(cos_angle);
+
+            if (angle < 1e-8) {
+                return Eigen::Vector3d(
+                    0.5 * (R_clean(2,1) - R_clean(1,2)),
+                    0.5 * (R_clean(0,2) - R_clean(2,0)),
+                    0.5 * (R_clean(1,0) - R_clean(0,1)));
+            }
+
+            Eigen::AngleAxisd aa(R_clean);
+            Eigen::Vector3d axis = aa.axis();
+            if (!axis.allFinite() || axis.norm() < 1e-12) return Eigen::Vector3d::Zero();
+            axis.normalize();
+            return angle * axis;
+        };
+
+        auto fk_pose = [&](const std::vector<double>& q_in,
+                           Eigen::Vector3d& p_out,
+                           Eigen::Matrix3d& R_out)->bool {
+            if (q_in.size() < num_joints_) return false;
+            KDL::JntArray q_kdl(num_joints_);
+            for (unsigned int i = 0; i < num_joints_; ++i) q_kdl(i) = q_in[i];
+
+            KDL::Frame T;
+            if (fk_solver_->JntToCart(q_kdl, T) < 0) return false;
+
+            p_out = Eigen::Vector3d(T.p.x(), T.p.y(), T.p.z());
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    R_out(r, c) = T.M(r, c);
+                }
+            }
+            return std::isfinite(p_out.x()) && std::isfinite(p_out.y()) && std::isfinite(p_out.z()) && R_out.allFinite();
+        };
+
+        std::vector<double> q(num_joints_, 0.0);
+        for (unsigned int i = 0; i < num_joints_; ++i) {
+            q[i] = current_q[i];
+            if (!std::isfinite(q[i])) q[i] = 0.0;
+        }
+
+        Eigen::Vector3d p_cur = Eigen::Vector3d::Zero();
+        Eigen::Matrix3d R_cur = Eigen::Matrix3d::Identity();
+        if (!fk_pose(q, p_cur, R_cur)) return false;
+
+        double best_score = std::numeric_limits<double>::infinity();
+        std::vector<double> best_q = q;
+
+        for (int iter = 0; iter < max_iters; ++iter) {
+            if (!fk_pose(q, p_cur, R_cur)) return false;
+
+            const Eigen::Vector3d e_pos = p_target - p_cur;
+            const Eigen::Vector3d e_rot = so3Log(R_target * R_cur.transpose());
+
+            const double pos_err = e_pos.norm();
+            const double rot_err = e_rot.norm();
+            const double score = pos_weight * pos_err + rot_weight * rot_err;
+
+            if (score < best_score) {
+                best_score = score;
+                best_q = q;
+            }
+            if (pos_err <= pos_tol_m && rot_err <= rot_tol_rad) {
+                result_q = q;
+                return true;
+            }
+
+            Eigen::MatrixXd J(6, num_joints_);
+            J.setZero();
+
+            for (unsigned int j = 0; j < num_joints_; ++j) {
+                std::vector<double> q_plus = q;
+                std::vector<double> q_minus = q;
+                q_plus[j] += numerical_eps;
+                q_minus[j] -= numerical_eps;
+
+                Eigen::Vector3d p_plus, p_minus;
+                Eigen::Matrix3d R_plus, R_minus;
+                if (!fk_pose(q_plus, p_plus, R_plus) || !fk_pose(q_minus, p_minus, R_minus)) {
+                    return false;
+                }
+
+                J.block<3,1>(0, static_cast<int>(j)) = (p_plus - p_minus) / (2.0 * numerical_eps);
+                J.block<3,1>(3, static_cast<int>(j)) = so3Log(R_plus * R_minus.transpose()) / (2.0 * numerical_eps);
+            }
+
+            Eigen::MatrixXd Jw = J;
+            Jw.block(0, 0, 3, static_cast<int>(num_joints_)) *= pos_weight;
+            Jw.block(3, 0, 3, static_cast<int>(num_joints_)) *= rot_weight;
+
+            Eigen::Matrix<double,6,1> ew;
+            ew.segment<3>(0) = pos_weight * e_pos;
+            ew.segment<3>(3) = rot_weight * e_rot;
+
+            const Eigen::Matrix<double,6,6> A =
+                Jw * Jw.transpose() + (lambda * lambda) * Eigen::Matrix<double,6,6>::Identity();
+
+            Eigen::VectorXd dq = Jw.transpose() * A.ldlt().solve(ew);
+            if (dq.size() != static_cast<int>(num_joints_)) return false;
+            for (int i = 0; i < dq.size(); ++i) {
+                if (!std::isfinite(dq(i))) return false;
+            }
+
+            const double max_abs_dq = dq.cwiseAbs().maxCoeff();
+            if (max_abs_dq > max_joint_step_rad) {
+                dq *= (max_joint_step_rad / max_abs_dq);
+            }
+
+            for (unsigned int i = 0; i < num_joints_; ++i) {
+                q[i] += alpha * dq(static_cast<int>(i));
+                q[i] = std::clamp(q[i], -M_PI, M_PI);
+            }
+        }
+
+        if (!best_q.empty()) {
+            Eigen::Vector3d p_best = Eigen::Vector3d::Zero();
+            Eigen::Matrix3d R_best = Eigen::Matrix3d::Identity();
+            if (fk_pose(best_q, p_best, R_best)) {
+                const double pos_err = (p_target - p_best).norm();
+                const double rot_err = so3Log(R_target * R_best.transpose()).norm();
+                if (pos_err <= std::max(5.0 * pos_tol_m, 0.003) &&
+                    rot_err <= std::max(5.0 * rot_tol_rad, 0.035)) {
+                    result_q = best_q;
+                    return true;
+                }
+            }
         }
 
         result_q.clear();
