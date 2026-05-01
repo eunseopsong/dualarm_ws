@@ -568,13 +568,13 @@ void DualArmForceControl::ControlModeCallback(
     const std::string prev_hand_mode = current_hand_control_mode_;
 
     const std::string new_arm_mode  = to_lower(req->arm_mode);
-    std::string new_hand_mode = to_lower(req->hand_mode);
-    if (!kin_cfg_.hand_enabled && new_hand_mode != "idle") {
-        RCLCPP_WARN(node_->get_logger(),
-                    "[ControlMode] hand.enabled=false in YAML. Forcing requested hand_mode='%s' to 'idle'.",
-                    req->hand_mode.c_str());
-        new_hand_mode = "idle";
-    }
+    const std::string new_hand_mode = to_lower(req->hand_mode);
+
+    // v30 fast hand-forward patch:
+    // Do not force hand_mode to idle when kin_cfg_.hand_enabled is false.
+    // RBY1 uses hand.enabled=false only to disable Cartesian hand FK/IK and
+    // admittance. Joint-space hand forward control is still allowed and is
+    // passed directly to /isaac_joint_command.
 
     auto valid_arm_mode = [](const std::string& m) -> bool {
         return (m == "idle" || m == "forward" || m == "inverse");
@@ -912,7 +912,7 @@ void DualArmForceControl::PrintDualArmStates()
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v30 | Arm:[%s%s%s] Hand:[%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v25 | Arm:[%s%s%s] Hand:[%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
            C_MODE, current_arm_control_mode_.c_str(), C_RESET,
            C_MODE, current_hand_control_mode_.c_str(), C_RESET,

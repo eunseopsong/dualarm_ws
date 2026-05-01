@@ -539,18 +539,20 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     startup_fixed_hand_hold_latched_  = false;
     startup_arm_home_hold_latched_    = false;
 
-    // RBY1 command safety parameters. Defaults are intentionally conservative.
-    // A small Cartesian delta must not create a large absolute joint command jump.
+    // RBY1 command safety / teleoperation responsiveness parameters.
+    // v30 fast-teleop patch:
+    // - defaults are faster than the conservative debug version
+    // - still bounded to avoid large jumps from one target packet
     rby1_arm_max_cmd_step_rad_ = node_->declare_parameter<double>(
-        "rby1_arm_max_cmd_step_rad", 0.006);
+        "rby1_arm_max_cmd_step_rad", 0.015);
     rby1_arm_servo_max_cart_step_m_ = node_->declare_parameter<double>(
-        "rby1_arm_servo_max_cart_step_m", 0.0008);
+        "rby1_arm_servo_max_cart_step_m", 0.0025);
 
     if (rby1_arm_max_cmd_step_rad_ <= 0.0 || !std::isfinite(rby1_arm_max_cmd_step_rad_)) {
-        rby1_arm_max_cmd_step_rad_ = 0.006;
+        rby1_arm_max_cmd_step_rad_ = 0.015;
     }
     if (rby1_arm_servo_max_cart_step_m_ <= 0.0 || !std::isfinite(rby1_arm_servo_max_cart_step_m_)) {
-        rby1_arm_servo_max_cart_step_m_ = 0.0008;
+        rby1_arm_servo_max_cart_step_m_ = 0.0025;
     }
     rby1_arm_cmd_slew_initialized_ = false;
 
@@ -618,18 +620,30 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     // Timers
     // -------------------------
-    print_timer_   = node_->create_wall_timer(500ms, std::bind(&DualArmForceControl::PrintDualArmStates, this));
-    control_timer_ = node_->create_wall_timer(10ms,  std::bind(&DualArmForceControl::ControlLoop, this));
+    const double control_loop_period_ms = node_->declare_parameter<double>(
+        "control_loop_period_ms", 5.0);
+    const double safe_control_loop_period_ms =
+        (std::isfinite(control_loop_period_ms) && control_loop_period_ms > 0.0)
+        ? control_loop_period_ms : 5.0;
+
+    print_timer_ = node_->create_wall_timer(
+        500ms, std::bind(&DualArmForceControl::PrintDualArmStates, this));
+
+    control_timer_ = node_->create_wall_timer(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::duration<double, std::milli>(safe_control_loop_period_ms)),
+        std::bind(&DualArmForceControl::ControlLoop, this));
 
     RCLCPP_INFO(
         node_->get_logger(),
-        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m",
+        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms",
         static_cast<int>(startup_fixed_joint_hold_enabled_),
         static_cast<int>(startup_fixed_hand_hold_enabled_),
         static_cast<int>(startup_arm_home_hold_enabled_),
         kin_cfg_.profile.c_str(),
         rby1_arm_max_cmd_step_rad_,
-        rby1_arm_servo_max_cart_step_m_);
+        rby1_arm_servo_max_cart_step_m_,
+        safe_control_loop_period_ms);
 }
 
 DualArmForceControl::~DualArmForceControl() {}
@@ -801,10 +815,10 @@ void DualArmForceControl::ControlLoop()
                 const bool ok = ik->stepTowardPoseDLS(
                     q_seed, xyz_des, q_des_xyzw, "base", q_sol,
                     std::max(1e-5, rby1_arm_servo_max_cart_step_m_), // cart_step_limit_m
-                    6e-3,                                           // rot_step_limit_rad
+                    1.2e-2,                                         // rot_step_limit_rad
                     1.0,                                            // pos_weight
-                    0.35,                                           // rot_weight
-                    8e-2,                                           // lambda
+                    0.25,                                           // rot_weight
+                    6e-2,                                           // lambda
                     1.0,                                            // alpha
                     std::max(1e-5, rby1_arm_max_cmd_step_rad_),      // max_joint_step_rad
                     1e-5);                                          // numerical_eps
@@ -868,7 +882,20 @@ void DualArmForceControl::ControlLoop()
     // ------------------------------------------------------------------------
     // HAND unified forward / inverse admittance pipeline
     // ------------------------------------------------------------------------
-    if (!kin_cfg_.hand_enabled || current_hand_control_mode_ == "idle") {
+    if (!kin_cfg_.hand_enabled) {
+        // v30 fast hand-forward patch:
+        // Some robot profiles, especially RBY1, use hand.enabled=false to disable
+        // Cartesian fingertip FK/IK/admittance because the hand model is not part
+        // of the reusable hand kinematics profile yet. However, joint-space hand
+        // forward control from Manus glove must still pass through.
+        f_l_hand_t_.setZero();
+        f_r_hand_t_.setZero();
+
+        if (current_hand_control_mode_ == "forward") {
+            q_l_h_t_ = q_l_h_motion_t_;
+            q_r_h_t_ = q_r_h_motion_t_;
+        }
+    } else if (current_hand_control_mode_ == "idle") {
         f_l_hand_t_.setZero();
         f_r_hand_t_.setZero();
     } else {
@@ -995,33 +1022,35 @@ void DualArmForceControl::ControlLoop()
             continue;
         }
 
+        // Hand joints must be checked before generic startup fixed-joint hold.
+        // In the RBY1 profile, finger joints are also latched as fixed joints for
+        // safety, but hand forward mode should override that fixed hold and publish
+        // the Manus/forward joint target.
+        {
+            auto hj = dualarm_forcecon::kin::parseHandJointName(n);
+            if (hj.ok) {
+                const int idx = hj.finger_id * 4 + hj.joint_id;
+                if (idx >= 0 && idx < 20) {
+                    if (kin_cfg_.hand_enabled || current_hand_control_mode_ == "forward") {
+                        if (hj.is_left) cmd.position.push_back(q_l_h_t_(idx));
+                        else            cmd.position.push_back(q_r_h_t_(idx));
+                        continue;
+                    }
+
+                    if (startup_fixed_hand_hold_enabled_ && startup_fixed_hand_hold_latched_) {
+                        if (hj.is_left) cmd.position.push_back(q_l_h_fixed_(idx));
+                        else            cmd.position.push_back(q_r_h_fixed_(idx));
+                        continue;
+                    }
+                }
+            }
+        }
+
         if (startup_fixed_joint_hold_enabled_ && startup_fixed_joint_hold_latched_) {
             const auto it_fixed = startup_fixed_joint_position_.find(n);
             if (it_fixed != startup_fixed_joint_position_.end()) {
                 cmd.position.push_back(it_fixed->second);
                 continue;
-            }
-        }
-
-        if (kin_cfg_.hand_enabled) {
-            auto hj = dualarm_forcecon::kin::parseHandJointName(n);
-            if (hj.ok) {
-                const int idx = hj.finger_id * 4 + hj.joint_id;
-                if (idx >= 0 && idx < 20) {
-                    if (hj.is_left) cmd.position.push_back(q_l_h_t_(idx));
-                    else            cmd.position.push_back(q_r_h_t_(idx));
-                    continue;
-                }
-            }
-        } else if (startup_fixed_hand_hold_enabled_ && startup_fixed_hand_hold_latched_) {
-            auto hj = dualarm_forcecon::kin::parseHandJointName(n);
-            if (hj.ok) {
-                const int idx = hj.finger_id * 4 + hj.joint_id;
-                if (idx >= 0 && idx < 20) {
-                    if (hj.is_left) cmd.position.push_back(q_l_h_fixed_(idx));
-                    else            cmd.position.push_back(q_r_h_fixed_(idx));
-                    continue;
-                }
             }
         }
 

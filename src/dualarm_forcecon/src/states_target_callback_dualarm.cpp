@@ -228,6 +228,11 @@ void DualArmForceControl::TargetArmPositionCallback(
             r_eul[0], r_eul[1], r_eul[2], ik_euler_conv_, ik_angle_unit_);
 
         rby1_arm_target_active_ = true;
+
+        // v30 fast-teleop patch: generate and publish one command immediately
+        // instead of waiting for the next timer tick. This reduces perceived
+        // delay for Manus/glove-driven teleoperation.
+        ControlLoop();
         return;
     }
 
@@ -517,6 +522,10 @@ void DualArmForceControl::DeltaArmPositionCallback(
                 r_deul[0], r_deul[1], r_deul[2]);
         }
 
+        // v30 fast-teleop patch: publish a first resolved-rate step immediately
+        // on every delta target packet. The periodic ControlLoop continues the
+        // motion afterward.
+        ControlLoop();
         return;
     }
 
@@ -626,6 +635,7 @@ void DualArmForceControl::DeltaArmPositionCallback(
 
     auto abs_msg_ptr = std::make_shared<std_msgs::msg::Float64MultiArray>(abs_msg);
     TargetArmPositionCallback(abs_msg_ptr);
+    ControlLoop();
 }
 
 // ============================================================================
@@ -756,6 +766,8 @@ void DualArmForceControl::TargetArmJointsCallback(
     for (int i = 0; i < q_r_t_.size(); ++i) {
         q_r_t_(i) = msg->data[l_dof + static_cast<size_t>(i)];
     }
+
+    ControlLoop();
 }
 
 // --------------------
@@ -768,11 +780,16 @@ void DualArmForceControl::TargetArmJointsCallback(
 void DualArmForceControl::TargetHandJointsCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
-    if (!kin_cfg_.hand_enabled) return;
+    // v30 fast hand-forward patch:
+    // Allow joint-space hand forward commands even when kin_cfg_.hand_enabled is false.
+    // In that case, Cartesian hand FK/IK/admittance remains disabled, but q_h_t
+    // is passed directly to /isaac_joint_command.
     if (current_hand_control_mode_ != "forward") return;
     if (!msg) return;
 
     const size_t n = msg->data.size();
+    const bool is_rby1 = (kin_cfg_.profile.find("rby1") != std::string::npos);
+    const bool enforce_mimic_for_this_profile = !is_rby1;
 
     auto enforce_mimic_q4_eq_q3 = [&](Eigen::VectorXd& qh20) {
         if (qh20.size() < 20) return;
@@ -798,7 +815,7 @@ void DualArmForceControl::TargetHandJointsCallback(
     auto assign_hand20_to_qh20 = [&](Eigen::VectorXd& qh20, const size_t offset) {
         if (qh20.size() < 20) return;
         for (int i = 0; i < 20; ++i) qh20(i) = msg->data[offset + i];
-        enforce_mimic_q4_eq_q3(qh20);
+        if (enforce_mimic_for_this_profile) enforce_mimic_q4_eq_q3(qh20);
     };
 
     // NOTE:
@@ -847,6 +864,14 @@ void DualArmForceControl::TargetHandJointsCallback(
             x_r_hand_d_,
             t_f_r_thumb_, t_f_r_index_, t_f_r_middle_, t_f_r_ring_, t_f_r_baby_);
     }
+
+    // Direct pass-through for fast hand forward. For hand.enabled=true, the
+    // periodic ControlLoop may still apply the normal hand pipeline/admittance.
+    // For hand.enabled=false, this is the authoritative command path.
+    q_l_h_t_ = q_l_h_motion_t_;
+    q_r_h_t_ = q_r_h_motion_t_;
+
+    ControlLoop();
 }
 
 // ============================================================================
