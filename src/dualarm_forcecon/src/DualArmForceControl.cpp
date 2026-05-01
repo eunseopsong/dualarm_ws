@@ -485,6 +485,8 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     q_l_h_t_.setZero(20); q_r_h_t_.setZero(20);
     q_l_h_motion_t_.setZero(20); q_r_h_motion_t_.setZero(20);
 
+    q_l_h_fixed_.setZero(20); q_r_h_fixed_.setZero(20);
+
     f_l_c_.setZero(); f_r_c_.setZero();
     f_l_t_.setZero(); f_r_t_.setZero();
 
@@ -526,6 +528,11 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     hand_idle_synced_ = false;
 
     delta_arm_base_pose_initialized_ = false;
+
+    startup_fixed_joint_hold_enabled_ = (kin_cfg_.profile.find("rby1") != std::string::npos);
+    startup_fixed_hand_hold_enabled_  = startup_fixed_joint_hold_enabled_;
+    startup_fixed_joint_hold_latched_ = false;
+    startup_fixed_hand_hold_latched_  = false;
 
     // -------------------------
     // Kinematics
@@ -593,6 +600,13 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     print_timer_   = node_->create_wall_timer(500ms, std::bind(&DualArmForceControl::PrintDualArmStates, this));
     control_timer_ = node_->create_wall_timer(10ms,  std::bind(&DualArmForceControl::ControlLoop, this));
+
+    RCLCPP_INFO(
+        node_->get_logger(),
+        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d profile=%s",
+        static_cast<int>(startup_fixed_joint_hold_enabled_),
+        static_cast<int>(startup_fixed_hand_hold_enabled_),
+        kin_cfg_.profile.c_str());
 }
 
 DualArmForceControl::~DualArmForceControl() {}
@@ -616,10 +630,17 @@ void DualArmForceControl::ControlLoop()
     // HAND idle sync
     // ------------------------------------------------------------------------
     if (current_hand_control_mode_ == "idle" && !hand_idle_synced_) {
-        q_l_h_motion_t_ = q_l_h_c_;
-        q_r_h_motion_t_ = q_r_h_c_;
-        q_l_h_t_ = q_l_h_c_;
-        q_r_h_t_ = q_r_h_c_;
+        if (startup_fixed_hand_hold_enabled_ && startup_fixed_hand_hold_latched_) {
+            q_l_h_motion_t_ = q_l_h_fixed_;
+            q_r_h_motion_t_ = q_r_h_fixed_;
+            q_l_h_t_ = q_l_h_fixed_;
+            q_r_h_t_ = q_r_h_fixed_;
+        } else {
+            q_l_h_motion_t_ = q_l_h_c_;
+            q_r_h_motion_t_ = q_r_h_c_;
+            q_l_h_t_ = q_l_h_c_;
+            q_r_h_t_ = q_r_h_c_;
+        }
 
         x_l_hand_d_   = x_l_hand_c_;
         x_r_hand_d_   = x_r_hand_c_;
@@ -766,6 +787,14 @@ void DualArmForceControl::ControlLoop()
             continue;
         }
 
+        if (startup_fixed_joint_hold_enabled_ && startup_fixed_joint_hold_latched_) {
+            const auto it_fixed = startup_fixed_joint_position_.find(n);
+            if (it_fixed != startup_fixed_joint_position_.end()) {
+                cmd.position.push_back(it_fixed->second);
+                continue;
+            }
+        }
+
         if (kin_cfg_.hand_enabled) {
             auto hj = dualarm_forcecon::kin::parseHandJointName(n);
             if (hj.ok) {
@@ -773,6 +802,16 @@ void DualArmForceControl::ControlLoop()
                 if (idx >= 0 && idx < 20) {
                     if (hj.is_left) cmd.position.push_back(q_l_h_t_(idx));
                     else            cmd.position.push_back(q_r_h_t_(idx));
+                    continue;
+                }
+            }
+        } else if (startup_fixed_hand_hold_enabled_ && startup_fixed_hand_hold_latched_) {
+            auto hj = dualarm_forcecon::kin::parseHandJointName(n);
+            if (hj.ok) {
+                const int idx = hj.finger_id * 4 + hj.joint_id;
+                if (idx >= 0 && idx < 20) {
+                    if (hj.is_left) cmd.position.push_back(q_l_h_fixed_(idx));
+                    else            cmd.position.push_back(q_r_h_fixed_(idx));
                     continue;
                 }
             }

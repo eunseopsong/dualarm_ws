@@ -142,6 +142,16 @@ private:
     // republished as hold-current instead of being forced to zero.
     std::unordered_map<std::string, double> last_joint_position_;
 
+    // RBY1 startup hold:
+    // lock wheel / torso / head / finger joints to the first observed JointState.
+    bool startup_fixed_joint_hold_enabled_ = false;
+    bool startup_fixed_joint_hold_latched_ = false;
+    std::unordered_map<std::string, double> startup_fixed_joint_position_;
+
+    bool startup_fixed_hand_hold_enabled_ = false;
+    bool startup_fixed_hand_hold_latched_ = false;
+    Eigen::VectorXd q_l_h_fixed_, q_r_h_fixed_;
+
     // ------------------------------------------------------------------------
     // Mode / init
     // ------------------------------------------------------------------------

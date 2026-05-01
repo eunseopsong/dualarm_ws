@@ -121,11 +121,29 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
         is_initialized_ = true;
     }
 
+    auto starts_with = [](const std::string& s, const std::string& prefix) -> bool {
+        return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+    };
+
+    auto is_rby1_fixed_joint_name = [&](const std::string& n) -> bool {
+        if (n == "left_wheel" || n == "right_wheel") return true;
+        if (starts_with(n, "torso_")) return true;
+        if (starts_with(n, "head_")) return true;
+        auto hj = dualarm_forcecon::kin::parseHandJointName(n);
+        return hj.ok;
+    };
+
     const size_t n_pos = std::min(msg->name.size(), msg->position.size());
     for (size_t i = 0; i < n_pos; ++i) {
         const std::string& n = msg->name[i];
         const double p = msg->position[i];
         last_joint_position_[n] = p;
+
+        if (startup_fixed_joint_hold_enabled_ && !startup_fixed_joint_hold_latched_) {
+            if (is_rby1_fixed_joint_name(n)) {
+                startup_fixed_joint_position_[n] = p;
+            }
+        }
 
         const int li = kin_cfg_.findLeftArmJointIndex(n);
         const int ri = kin_cfg_.findRightArmJointIndex(n);
@@ -139,7 +157,8 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
             continue;
         }
 
-        if (!kin_cfg_.hand_enabled) continue;
+        const bool should_track_hand_state = kin_cfg_.hand_enabled || startup_fixed_hand_hold_enabled_;
+        if (!should_track_hand_state) continue;
 
         auto hj = dualarm_forcecon::kin::parseHandJointName(n);
         if (!hj.ok) continue;
@@ -149,6 +168,20 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
 
         if (hj.is_left) q_l_h_c_(idx) = p;
         else            q_r_h_c_(idx) = p;
+    }
+
+    if (startup_fixed_hand_hold_enabled_ && !startup_fixed_hand_hold_latched_) {
+        q_l_h_fixed_ = q_l_h_c_;
+        q_r_h_fixed_ = q_r_h_c_;
+        startup_fixed_hand_hold_latched_ = true;
+    }
+
+    if (startup_fixed_joint_hold_enabled_ && !startup_fixed_joint_hold_latched_) {
+        startup_fixed_joint_hold_latched_ = true;
+        RCLCPP_INFO(
+            node_->get_logger(),
+            "[StartupHold] latched %zu startup fixed joints (wheel/torso/head/fingers)",
+            startup_fixed_joint_position_.size());
     }
 }
 
