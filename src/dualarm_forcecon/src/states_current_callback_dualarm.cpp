@@ -133,6 +133,11 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
         return hj.ok;
     };
 
+    // Used only for the first RBY1 startup arm-home latch.
+    // We latch only when one JointState message contains every configured arm joint.
+    std::vector<bool> seen_left_arm(static_cast<std::size_t>(q_l_c_.size()), false);
+    std::vector<bool> seen_right_arm(static_cast<std::size_t>(q_r_c_.size()), false);
+
     const size_t n_pos = std::min(msg->name.size(), msg->position.size());
     for (size_t i = 0; i < n_pos; ++i) {
         const std::string& n = msg->name[i];
@@ -150,10 +155,16 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
 
         if (li >= 0 && li < q_l_c_.size()) {
             q_l_c_(li) = p;
+            if (static_cast<std::size_t>(li) < seen_left_arm.size()) {
+                seen_left_arm[static_cast<std::size_t>(li)] = true;
+            }
             continue;
         }
         if (ri >= 0 && ri < q_r_c_.size()) {
             q_r_c_(ri) = p;
+            if (static_cast<std::size_t>(ri) < seen_right_arm.size()) {
+                seen_right_arm[static_cast<std::size_t>(ri)] = true;
+            }
             continue;
         }
 
@@ -174,6 +185,29 @@ void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::Sha
         q_l_h_fixed_ = q_l_h_c_;
         q_r_h_fixed_ = q_r_h_c_;
         startup_fixed_hand_hold_latched_ = true;
+    }
+
+    if (startup_arm_home_hold_enabled_ && !startup_arm_home_hold_latched_) {
+        const bool left_ready =
+            !seen_left_arm.empty() &&
+            std::all_of(seen_left_arm.begin(), seen_left_arm.end(), [](bool v){ return v; });
+        const bool right_ready =
+            !seen_right_arm.empty() &&
+            std::all_of(seen_right_arm.begin(), seen_right_arm.end(), [](bool v){ return v; });
+
+        if (left_ready && right_ready) {
+            q_l_arm_home_hold_ = q_l_c_;
+            q_r_arm_home_hold_ = q_r_c_;
+            q_l_t_ = q_l_arm_home_hold_;
+            q_r_t_ = q_r_arm_home_hold_;
+            startup_arm_home_hold_latched_ = true;
+
+            RCLCPP_INFO(
+                node_->get_logger(),
+                "[StartupArmHomeHold] latched startup arm home joints | L_dof=%d R_dof=%d",
+                static_cast<int>(q_l_arm_home_hold_.size()),
+                static_cast<int>(q_r_arm_home_hold_.size()));
+        }
     }
 
     if (startup_fixed_joint_hold_enabled_ && !startup_fixed_joint_hold_latched_) {
@@ -330,8 +364,16 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
     else if (current_arm_control_mode_ == "inverse") {
         const bool is_rby1 = (kin_cfg_.profile.find("rby1") != std::string::npos);
         if (is_rby1 && !rby1_arm_target_active_) {
-            target_pose_l_ = current_pose_l_;
-            target_pose_r_ = current_pose_r_;
+            // Before the first explicit target, monitor the same home pose
+            // used by /delta_arm_cartesian_pose. Do not chase current_pose_*;
+            // otherwise the displayed target follows gravity drift.
+            if (delta_arm_base_pose_initialized_) {
+                target_pose_l_ = delta_arm_base_pose_l_;
+                target_pose_r_ = delta_arm_base_pose_r_;
+            } else {
+                target_pose_l_ = current_pose_l_;
+                target_pose_r_ = current_pose_r_;
+            }
         }
         // Doosan inverse keeps target_pose_* managed by callbacks as before.
     }
@@ -620,11 +662,24 @@ void DualArmForceControl::ControlModeCallback(
     arm_idle_synced_ = false;
 
     if (current_arm_control_mode_ == "inverse") {
-        q_l_t_ = q_l_c_;
-        q_r_t_ = q_r_c_;
+        const bool is_rby1 = (kin_cfg_.profile.find("rby1") != std::string::npos);
 
-        target_pose_l_ = current_pose_l_;
-        target_pose_r_ = current_pose_r_;
+        if (is_rby1 && startup_arm_home_hold_enabled_ && startup_arm_home_hold_latched_) {
+            q_l_t_ = q_l_arm_home_hold_;
+            q_r_t_ = q_r_arm_home_hold_;
+        } else {
+            q_l_t_ = q_l_c_;
+            q_r_t_ = q_r_c_;
+        }
+
+        if (is_rby1 && delta_arm_base_pose_initialized_) {
+            target_pose_l_ = delta_arm_base_pose_l_;
+            target_pose_r_ = delta_arm_base_pose_r_;
+        } else {
+            target_pose_l_ = current_pose_l_;
+            target_pose_r_ = current_pose_r_;
+        }
+
         rby1_arm_target_active_ = false;  // armed only when an explicit arm target arrives
     } else {
         rby1_arm_target_active_ = false;

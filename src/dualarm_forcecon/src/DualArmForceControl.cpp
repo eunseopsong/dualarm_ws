@@ -487,6 +487,9 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     q_l_h_fixed_.setZero(20); q_r_h_fixed_.setZero(20);
 
+    q_l_arm_home_hold_.setZero(kin_cfg_.leftArmDof());
+    q_r_arm_home_hold_.setZero(kin_cfg_.rightArmDof());
+
     f_l_c_.setZero(); f_r_c_.setZero();
     f_l_t_.setZero(); f_r_t_.setZero();
 
@@ -531,8 +534,10 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     startup_fixed_joint_hold_enabled_ = (kin_cfg_.profile.find("rby1") != std::string::npos);
     startup_fixed_hand_hold_enabled_  = startup_fixed_joint_hold_enabled_;
+    startup_arm_home_hold_enabled_    = startup_fixed_joint_hold_enabled_;
     startup_fixed_joint_hold_latched_ = false;
     startup_fixed_hand_hold_latched_  = false;
+    startup_arm_home_hold_latched_    = false;
 
     // -------------------------
     // Kinematics
@@ -603,9 +608,10 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     RCLCPP_INFO(
         node_->get_logger(),
-        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d profile=%s",
+        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d profile=%s",
         static_cast<int>(startup_fixed_joint_hold_enabled_),
         static_cast<int>(startup_fixed_hand_hold_enabled_),
+        static_cast<int>(startup_arm_home_hold_enabled_),
         kin_cfg_.profile.c_str());
 }
 
@@ -633,10 +639,29 @@ void DualArmForceControl::ControlLoop()
     const bool is_rby1_profile = (kin_cfg_.profile.find("rby1") != std::string::npos);
     if (is_rby1_profile && current_arm_control_mode_ == "inverse") {
         if (!rby1_arm_target_active_) {
-            q_l_t_ = q_l_c_;
-            q_r_t_ = q_r_c_;
-            target_pose_l_ = current_pose_l_;
-            target_pose_r_ = current_pose_r_;
+            // Important: do NOT follow q_c_ here.
+            // q_t_=q_c_ makes the command follow the falling arm, so gravity
+            // drift reappears before any explicit target command arrives.
+            // Instead, keep publishing the first observed startup home joints.
+            if (startup_arm_home_hold_enabled_ && startup_arm_home_hold_latched_) {
+                q_l_t_ = q_l_arm_home_hold_;
+                q_r_t_ = q_r_arm_home_hold_;
+
+                if (delta_arm_base_pose_initialized_) {
+                    target_pose_l_ = delta_arm_base_pose_l_;
+                    target_pose_r_ = delta_arm_base_pose_r_;
+                } else {
+                    target_pose_l_ = current_pose_l_;
+                    target_pose_r_ = current_pose_r_;
+                }
+            } else {
+                // Fallback only during the very first cycles before the first
+                // complete JointState has been latched.
+                q_l_t_ = q_l_c_;
+                q_r_t_ = q_r_c_;
+                target_pose_l_ = current_pose_l_;
+                target_pose_r_ = current_pose_r_;
+            }
         } else {
             auto run_one_arm = [&](bool is_left) {
                 auto ik = is_left ? arm_ik_l_ : arm_ik_r_;
@@ -683,7 +708,8 @@ void DualArmForceControl::ControlLoop()
                 // Previous position-only RBY1 servo stopped as soon as xyz matched,
                 // which allowed orientation drift to remain.
                 if (dist < 5e-4 && rot_err < 2e-3) {
-                    q_t = q_cur;
+                    // Keep the previous command. Do not assign q_t=q_cur,
+                    // because q_cur may already include small gravity drift.
                     return;
                 }
 
@@ -726,10 +752,9 @@ void DualArmForceControl::ControlLoop()
                 if (ok && q_sol.size() >= static_cast<size_t>(q_t.size())) {
                     for (int i = 0; i < q_t.size(); ++i) q_t(i) = q_sol[static_cast<size_t>(i)];
                 } else {
-                    // Do NOT fall back to position-only IK here.
-                    // Fallback would move xyz but reintroduce the orientation drift
-                    // that this patch is meant to remove.
-                    q_t = q_cur;
+                    // Do NOT fall back to position-only IK here, and do not
+                    // overwrite q_t with q_cur. Keep the previous command so
+                    // the arm does not sag when one IK iteration fails.
                     RCLCPP_WARN_THROTTLE(
                         node_->get_logger(), *node_->get_clock(), 1000,
                         "[IK][%s][RBY1-servo-pose] pose DLS failed. Hold current. "

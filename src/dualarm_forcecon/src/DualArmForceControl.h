@@ -152,6 +152,14 @@ private:
     bool startup_fixed_hand_hold_latched_ = false;
     Eigen::VectorXd q_l_h_fixed_, q_r_h_fixed_;
 
+    // RBY1 startup arm home hold:
+    // latch the first observed arm JointState at node startup and keep publishing
+    // this home joint target while arm inverse mode is active but no explicit
+    // Cartesian target/delta command has arrived yet.
+    bool startup_arm_home_hold_enabled_ = false;
+    bool startup_arm_home_hold_latched_ = false;
+    Eigen::VectorXd q_l_arm_home_hold_, q_r_arm_home_hold_;
+
     // ------------------------------------------------------------------------
     // Mode / init
     // ------------------------------------------------------------------------
@@ -165,7 +173,10 @@ private:
     bool hand_idle_synced_ = false;
 
     // RBY1 arm inverse servo: target pose is stored by callbacks and
-    // incrementally tracked in ControlLoop() using position-only DLS.
+    // incrementally tracked in ControlLoop() using pose-constrained DLS.
+    // false means no explicit /target_arm_cartesian_pose or
+    // /delta_arm_cartesian_pose command has arrived yet. In that state,
+    // RBY1 keeps publishing the latched startup home joint command.
     bool rby1_arm_target_active_ = false;
 
     // ------------------------------------------------------------------------
