@@ -1,4 +1,4 @@
-# DualArm Force Control README (v30)
+# DualArm Force Control README (v31)
 
 ## Quick Start Example Commands
 
@@ -21,35 +21,71 @@ cb
 
 ### 2. Run controller node
 
+#### RBY1 fast teleop + hand forward
+
 ```bash
 source ~/dualarm_ws/install/setup.bash
 
 ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
-  -p forcecon_cfg_yaml:=/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml
+  -p forcecon_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml \
+  -p kinematics_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml \
+  -p control_loop_period_ms:=5.0 \
+  -p rby1_arm_max_cmd_step_rad:=0.015 \
+  -p rby1_arm_servo_max_cart_step_m:=0.0025
 ```
 
-The controller node name is:
+If the robot moves too aggressively, use the conservative setting:
 
-```text
-dualarm_forcecon_node
+```bash
+ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
+  -p forcecon_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml \
+  -p kinematics_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml \
+  -p control_loop_period_ms:=10.0 \
+  -p rby1_arm_max_cmd_step_rad:=0.008 \
+  -p rby1_arm_servo_max_cart_step_m:=0.0012
 ```
+
+#### Doosan/AIDIN dual-arm
+
+```bash
+source ~/dualarm_ws/install/setup.bash
+
+ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
+  -p forcecon_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml \
+  -p kinematics_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml
+```
+
+If the PC username is `eunseop`, replace `/home/vision` with `/home/eunseop`.
 
 ---
 
 ### 3. Change control mode
 
-For Doosan/AIDIN dual-arm experiments with arm + hand:
+#### RBY1 arm inverse + hand forward
 
 ```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
 "{arm_mode: 'inverse', hand_mode: 'forward'}"
 ```
 
-For RBY1 arm-only experiments:
+The monitor should show:
+
+```text
+Dual Arm & Hand Monitor v31 | Arm:[inverse] Hand:[forward]
+```
+
+#### RBY1 arm only
 
 ```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
 "{arm_mode: 'inverse', hand_mode: 'idle'}"
+```
+
+#### Doosan/AIDIN arm inverse + hand forward
+
+```bash
+ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
+"{arm_mode: 'inverse', hand_mode: 'forward'}"
 ```
 
 ---
@@ -89,7 +125,7 @@ ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
          0.000, 0.000, 0.100, 0.0, 0.0, 0.0]}"
 ```
 
-Example: right arm first moves in -y, then moves in +z while keeping the same -y offset.
+Example: right arm first moves in `-y`, then moves in `+z` while keeping the same `-y` offset.
 
 ```bash
 ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
@@ -108,7 +144,7 @@ Important:
 It is not an incremental delta from the previous command.
 ```
 
-So, if the first command is:
+So if the first command is:
 
 ```text
 R = [0.0, -0.2, 0.0, 0, 0, 0]
@@ -128,9 +164,88 @@ R = [0.0, 0.0, 0.1, 0, 0, 0]
 
 ---
 
-### 5. Send hand forward command for Doosan/AIDIN setup
+### 5. Send hand forward command
 
-RBY1 v30 is currently arm-only in this controller, so this hand command is mainly for the Doosan/AIDIN dual-arm + hand setup.
+Topic:
+
+```text
+/forward_hand_joint_targets
+```
+
+Type:
+
+```text
+std_msgs/msg/Float64MultiArray
+```
+
+Recommended v31 format:
+
+```text
+40 values = left hand 20 + right hand 20
+```
+
+Per hand:
+
+```text
+5 fingers × 4 joints = 20 values
+```
+
+Canonical finger order:
+
+```text
+thumb, index, middle, ring, baby
+```
+
+Per finger:
+
+```text
+[joint1, joint2, joint3, joint4]
+```
+
+Full command layout:
+
+```text
+[
+  L_thumb_1, L_thumb_2, L_thumb_3, L_thumb_4,
+  L_index_1, L_index_2, L_index_3, L_index_4,
+  L_middle_1, L_middle_2, L_middle_3, L_middle_4,
+  L_ring_1, L_ring_2, L_ring_3, L_ring_4,
+  L_baby_1, L_baby_2, L_baby_3, L_baby_4,
+
+  R_thumb_1, R_thumb_2, R_thumb_3, R_thumb_4,
+  R_index_1, R_index_2, R_index_3, R_index_4,
+  R_middle_1, R_middle_2, R_middle_3, R_middle_4,
+  R_ring_1, R_ring_2, R_ring_3, R_ring_4,
+  R_baby_1, R_baby_2, R_baby_3, R_baby_4
+]
+```
+
+For RBY1 v31, `hand_mode=forward` is allowed even when the RBY1 kinematics YAML has `hand.enabled=false`. In that case, the hand joints are treated as direct forward targets and are passed to `/isaac_joint_command`. Hand FK/IK/admittance is not used for RBY1 hand forward.
+
+---
+
+#### Hand command 1: open both hands
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+#### Hand command 2: close both index fingers slightly
 
 ```bash
 ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
@@ -151,42 +266,233 @@ ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray
 
 ---
 
-### 6. Send selected-finger target force for Doosan/AIDIN setup
+#### Hand command 3: close both hands moderately
 
 ```bash
-ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
-"{data: [0, 1, 0.0, 0.0, 5.0]}"
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5
+]}"
 ```
 
-Format:
+---
 
-```text
-[hand_id, finger_id, fx, fy, fz]
+#### Hand command 4: close both hands strongly
+
+Start from moderate values first. Use this only after confirming the joint direction and limits are safe.
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.3, 0.5, 0.5, 0.5,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8,
+
+  0.3, 0.5, 0.5, 0.5,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8
+]}"
 ```
 
-where:
+---
 
-```text
-hand_id   : 0 = left, 1 = right
-finger_id : 0 = thumb, 1 = index, 2 = middle, 3 = ring, 4 = baby
+#### Hand command 5: left hand close, right hand open
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+#### Hand command 6: left hand open, right hand close
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5
+]}"
+```
+
+---
+
+#### Hand command 7: both thumbs only
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.3, 0.5, 0.5, 0.5,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.3, 0.5, 0.5, 0.5,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+#### Hand command 8: both index + thumb pinch-ready pose
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.25, 0.45, 0.45, 0.45,
+  0.35, 0.55, 0.55, 0.55,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.25, 0.45, 0.45, 0.45,
+  0.35, 0.55, 0.55, 0.55,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+#### Hand command 9: left index only
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.3, 0.5, 0.5, 0.5,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+#### Hand command 10: right index only
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.3, 0.5, 0.5, 0.5,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+#### Hand command 11: contact-ready ring fingers
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.4, 0.4, 0.4,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.4, 0.4, 0.4,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+#### Hand command 12: Manus glove neutral test pose
+
+Use this as a safe intermediate pose when checking Manus glove mapping.
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.1, 0.15, 0.15, 0.15,
+  0.1, 0.15, 0.15, 0.15,
+  0.1, 0.15, 0.15, 0.15,
+  0.1, 0.15, 0.15, 0.15,
+  0.1, 0.15, 0.15, 0.15,
+
+  0.1, 0.15, 0.15, 0.15,
+  0.1, 0.15, 0.15, 0.15,
+  0.1, 0.15, 0.15, 0.15,
+  0.1, 0.15, 0.15, 0.15,
+  0.1, 0.15, 0.15, 0.15
+]}"
 ```
 
 ---
 
 # 1. Version Summary
 
-## 1.1 v30 purpose
+## 1.1 v31 purpose
 
-`v30` is the version where the same `dualarm_forcecon` controller is used with two different robot kinematics profiles:
+`v31` is the fast teleoperation version based on `v30`.
+
+The major goal of v31 is:
 
 ```text
-Doosan/AIDIN dual-arm
-RBY1 arm-only
+RBY1 arm inverse teleop + RBY1 hand forward command at the same time
 ```
 
-The controller package remains common, but the FK/IK configuration is selected through robot-specific YAML files.
-
-The main controller role is:
+v31 keeps the same common controller structure:
 
 ```text
 dualarm_forcecon
@@ -194,7 +500,7 @@ dualarm_forcecon
   hand forward/inverse handling, hand force/admittance control, monitor printing
 ```
 
-The reusable kinematics role is:
+and keeps the reusable kinematics package:
 
 ```text
 dualarm_kinematics
@@ -203,132 +509,58 @@ dualarm_kinematics
 
 ---
 
-## 1.2 Recommended v30 modes
+## 1.2 v31 changes from v30
 
-### Doosan/AIDIN dual-arm
+v31 adds the following behavior:
 
 ```text
-arm_mode  = inverse
-hand_mode = forward
+1. RBY1 hand_mode=forward is allowed.
+2. hand.enabled=false no longer forces requested hand_mode=forward to idle.
+3. RBY1 hand forward commands are passed through to /isaac_joint_command.
+4. Torso/head/wheel joints are still held at their initial values.
+5. Arm delta target callback triggers immediate control update to reduce teleop delay.
+6. Default control loop can be run faster for Manus glove teleoperation.
+7. RBY1 arm command step and Cartesian servo step can be increased for faster motion.
 ```
 
-Use this when controlling both arms and hands.
-
-### RBY1
+The main practical workflow is now:
 
 ```text
-arm_mode  = inverse
-hand_mode = idle
-```
+RBY1:
+  arm_mode  = inverse
+  hand_mode = forward
 
-Use this because the current RBY1 profile in v30 is arm-only and `hand.enabled=false`.
-
----
-
-# 2. Package Structure
-
-The expected workspace layout is:
-
-```text
-dualarm_ws/
-└── src/
-    ├── dualarm_forcecon_interfaces/
-    │   └── srv/
-    │       └── SetControlMode.srv
-    │
-    ├── dualarm_kinematics/
-    │   ├── config/
-    │   │   ├── doosan_dualarm_kinematics.yaml
-    │   │   ├── generic_dualarm_kinematics.yaml
-    │   │   └── rby1_kinematics.yaml
-    │   └── include/
-    │       └── dualarm_kinematics/
-    │           ├── arm/
-    │           │   ├── arm_forward_kinematics.hpp
-    │           │   └── arm_inverse_kinematics.hpp
-    │           ├── hand/
-    │           │   ├── hand_forward_kinematics.hpp
-    │           │   └── hand_inverse_kinematics.hpp
-    │           └── core/
-    │               ├── kinematics_config.hpp
-    │               └── kinematics_utils.hpp
-    │
-    └── dualarm_forcecon/
-        ├── include/
-        │   └── dualarm_forcecon/
-        │       └── control/
-        │           └── hand_admittance_control.hpp
-        ├── src/
-        │   ├── DualArmForceControl.cpp
-        │   ├── DualArmForceControl.h
-        │   ├── node_dualarm_main.cpp
-        │   ├── states_current_callback_dualarm.cpp
-        │   └── states_target_callback_dualarm.cpp
-        └── yaml/
-            └── forcecon_cfg.yaml
+Doosan/AIDIN:
+  arm_mode  = inverse
+  hand_mode = forward
 ```
 
 ---
 
-# 3. Kinematics Profile Selection
+# 2. Doosan/AIDIN vs RBY1 Configuration Differences
 
-## 3.1 Main controller YAML
-
-The runtime controller is launched with:
-
-```bash
--p forcecon_cfg_yaml:=/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml
-```
-
-Inside `forcecon_cfg.yaml`, the active robot profile should point to the desired kinematics YAML.
-
-v30 supports robot-specific kinematics profile selection, for example:
-
-```yaml
-kinematics:
-  active_robot_id: 0
-  profiles:
-    - id: 0
-      name: doosan_dualarm
-      config_yaml: /home/eunseop/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml
-
-    - id: 1
-      name: rby1
-      config_yaml: /home/eunseop/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml
-```
-
-You can also override the kinematics YAML directly at launch time:
-
-```bash
-ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
-  -p forcecon_cfg_yaml:=/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml \
-  -p kinematics_cfg_yaml:=/home/eunseop/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml
-```
-
----
-
-# 4. Doosan/AIDIN vs RBY1 Configuration Differences
-
-## 4.1 Summary table
+## 2.1 Summary table
 
 | Item | Doosan/AIDIN dual-arm | RBY1 |
 |---|---|---|
 | Profile name | `doosan_aidin` | `rby1_arm_only` |
-| Main use in v30 | Arm + hand control | Arm-only control |
+| Main use in v31 | Arm + hand control | Arm inverse + hand forward teleop |
 | Arm DOF per side | 6 DOF | 7 DOF |
 | Arm base link | `base_link` | `link_torso_5` |
 | Left tip link | `left_link_6` | `ee_left` |
 | Right tip link | `right_link_6` | `ee_right` |
 | Left arm joint names | `left_joint_1` ~ `left_joint_6` | `left_arm_0` ~ `left_arm_6` |
 | Right arm joint names | `right_joint_1` ~ `right_joint_6` | `right_arm_0` ~ `right_arm_6` |
-| Hand config | enabled | disabled |
-| Hand base links | `left_joint_6`, `right_joint_6` | not used |
-| Recommended mode | `arm=inverse`, `hand=forward` | `arm=inverse`, `hand=idle` |
+| Hand config | `hand.enabled=true` | `hand.enabled=false`, but forward pass-through allowed |
+| Hand FK/IK | enabled | not used |
+| Hand forward command | joint target command | direct joint target pass-through |
+| Recommended mode | `arm=inverse`, `hand=forward` | `arm=inverse`, `hand=forward` |
+| Fixed joints | usually not relevant | wheel/torso/head are held at startup values |
 | Practical caution | Standard 6-DOF arm IK | Redundant 7-DOF arm; workspace/manipulability matters |
 
 ---
 
-## 4.2 Doosan/AIDIN profile
+## 2.2 Doosan/AIDIN profile
 
 The Doosan/AIDIN profile uses:
 
@@ -363,29 +595,20 @@ robot_kinematics:
     right_base_link: right_joint_6
 ```
 
-This means the controller expects:
-
-```text
-left arm  : 6 joints
-right arm : 6 joints
-left hand : enabled
-right hand: enabled
-```
-
-The Doosan/AIDIN profile is the better fit for the full arm + hand pipeline:
+This profile is intended for the full arm + hand + force/admittance pipeline:
 
 ```text
 /delta_arm_cartesian_pose
+/target_arm_cartesian_pose
+/forward_arm_joint_targets
 /forward_hand_joint_targets
 /target_hand_force
-/isaac_contact_states
-/hand_force_current_monitor
-/hand_force_target_monitor
+/isaac_joint_command
 ```
 
 ---
 
-## 4.3 RBY1 profile
+## 2.3 RBY1 profile
 
 The RBY1 profile uses:
 
@@ -420,12 +643,18 @@ robot_kinematics:
     enabled: false
 ```
 
-This means the controller expects:
+In v31, `hand.enabled=false` means:
 
 ```text
-left arm  : 7 joints
-right arm : 7 joints
-hand      : disabled in this profile
+Do not run RBY1 hand FK/IK/admittance.
+Do allow hand forward joint command pass-through.
+```
+
+So RBY1 can now run:
+
+```text
+arm_mode  = inverse
+hand_mode = forward
 ```
 
 The RBY1 chain intentionally starts from:
@@ -445,77 +674,53 @@ Reason:
 ```text
 If the KDL chain starts from base, the chain includes torso_0~torso_5 plus arm_0~arm_6.
 That makes the IK chain larger than the intended arm-only control problem.
-For v30 arm-only control, link_torso_5 is used as the arm base.
+For v31 arm-only IK, link_torso_5 is used as the arm base.
 ```
 
 ---
 
-## 4.4 Practical behavior difference
+# 3. RBY1 Fixed Joint Behavior
 
-### Doosan/AIDIN
-
-Doosan/AIDIN has 6 joints per arm. Cartesian IK is closer to a standard 6-DOF manipulator problem.
-
-In practice:
+For RBY1, these joints are held at their startup values:
 
 ```text
-delta command → target Cartesian pose → arm IK → joint command
+left_wheel
+right_wheel
+torso_*
+head_*
 ```
 
-The same delta command often behaves predictably because the arm has a more direct 6-DOF kinematic chain.
+These joints are not part of the arm IK command.
 
-### RBY1
-
-RBY1 has 7 joints per arm in the selected arm-only chain. This gives redundancy, but it also means:
+The RBY1 arm joints are controlled by arm mode:
 
 ```text
-the same Cartesian target can have multiple joint solutions
+left_arm_0 ~ left_arm_6
+right_arm_0 ~ right_arm_6
 ```
 
-and some motions depend strongly on the current posture.
-
-In v30, the RBY1 arm control should be understood as:
+The hand joints are controlled by hand forward mode:
 
 ```text
-node start home pose is latched
-delta command is interpreted relative to that home pose
-arm is commanded in inverse mode
-hand is idle
-workspace/manipulability must be considered
+hand_mode = forward
+→ /forward_hand_joint_targets
+→ direct joint command pass-through
+→ /isaac_joint_command
 ```
 
-A motion like:
+So the intended v31 behavior is:
 
 ```text
-right arm +z 0.1 m directly from home
-```
-
-may be difficult or unstable if the home pose is close to a poor-manipulability posture for that direction.
-
-A more stable command sequence can be:
-
-```text
-1. move the right arm in -y direction
-2. then command the combined target: -y offset + z offset
-```
-
-Example:
-
-```bash
-ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0, 0, 0, 0, 0, 0,
-         0, -0.2, 0, 0, 0, 0]}"
-
-ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0, 0, 0, 0, 0, 0,
-         0, -0.2, 0.1, 0, 0, 0]}"
+wheel / torso / head : startup hold
+arm joints           : inverse control
+hand joints          : forward control
 ```
 
 ---
 
-# 5. Topic Interface
+# 4. Topic Interface
 
-## 5.1 Current state input
+## 4.1 Current state input
 
 ```text
 /isaac_joint_states
@@ -539,7 +744,7 @@ RBY1 fixed joint hold
 
 ---
 
-## 5.2 Final command output
+## 4.2 Final command output
 
 ```text
 /isaac_joint_command
@@ -559,15 +764,15 @@ For Doosan/AIDIN:
 arm command + hand command
 ```
 
-For RBY1:
+For RBY1 v31:
 
 ```text
-arm command + hold values for non-controlled joints
+arm inverse command + hand forward command + torso/head/wheel startup hold
 ```
 
 ---
 
-## 5.3 Arm inverse Cartesian target
+## 4.3 Arm inverse Cartesian target
 
 ```text
 /target_arm_cartesian_pose
@@ -589,7 +794,7 @@ This topic is an absolute Cartesian target.
 
 ---
 
-## 5.4 Arm delta Cartesian target
+## 4.4 Arm delta Cartesian target
 
 ```text
 /delta_arm_cartesian_pose
@@ -611,7 +816,7 @@ The delta is applied relative to the initial pose latched after node startup.
 
 ---
 
-## 5.5 Arm forward joint target
+## 4.5 Arm forward joint target
 
 ```text
 /forward_arm_joint_targets
@@ -631,7 +836,7 @@ arm_mode = forward
 
 ---
 
-## 5.6 Hand forward joint target
+## 4.6 Hand forward joint target
 
 ```text
 /forward_hand_joint_targets
@@ -643,27 +848,15 @@ Type:
 std_msgs/msg/Float64MultiArray
 ```
 
-Recommended format for the Doosan/AIDIN hand pipeline:
+This topic is used when:
 
 ```text
-40 values = left hand 20 + right hand 20
-```
-
-Per hand:
-
-```text
-5 fingers × 4 joints = 20 values
-```
-
-Canonical order:
-
-```text
-thumb, index, middle, ring, baby
+hand_mode = forward
 ```
 
 ---
 
-## 5.7 Hand target force
+## 4.7 Hand target force
 
 ```text
 /target_hand_force
@@ -681,19 +874,15 @@ Compact format:
 [hand_id, finger_id, fx, fy, fz]
 ```
 
-Legacy-compatible format:
-
-```text
-[hand_id, finger_id, px, py, pz, fx, fy, fz]
-```
-
 This is mainly for the Doosan/AIDIN hand force/admittance pipeline.
+
+RBY1 v31 hand forward does not use hand admittance by default.
 
 ---
 
-# 6. v30 RBY1 Usage Notes
+# 5. RBY1 Teleoperation Notes
 
-## 6.1 Home pose latch
+## 5.1 Home pose latch
 
 For RBY1, the intended workflow is:
 
@@ -707,9 +896,9 @@ For RBY1, the intended workflow is:
 
 ---
 
-## 6.2 Delta command is home-relative, not previous-command-relative
+## 5.2 Delta command is home-relative
 
-This is important for RBY1 testing.
+This is important for Manus glove teleoperation.
 
 If the robot receives:
 
@@ -717,7 +906,7 @@ If the robot receives:
 R = [0, -0.2, 0, 0, 0, 0]
 ```
 
-and then the user wants to add:
+and the user wants to add:
 
 ```text
 +z 0.1
@@ -737,7 +926,31 @@ R = [0, 0, 0.1, 0, 0, 0]
 
 ---
 
-## 6.3 Workspace and posture limitation
+## 5.3 Teleop response tuning
+
+For faster response:
+
+```bash
+-p control_loop_period_ms:=5.0
+-p rby1_arm_max_cmd_step_rad:=0.015
+-p rby1_arm_servo_max_cart_step_m:=0.0025
+```
+
+For safer/slower response:
+
+```bash
+-p control_loop_period_ms:=10.0
+-p rby1_arm_max_cmd_step_rad:=0.008
+-p rby1_arm_servo_max_cart_step_m:=0.0012
+```
+
+If the arm vibrates, jumps, or overshoots, reduce these values.
+
+If the arm response is too slow during Manus glove teleop, increase them gradually.
+
+---
+
+## 5.4 Workspace and posture limitation
 
 RBY1 is posture-sensitive.
 
@@ -763,7 +976,7 @@ may work correctly.
 
 ---
 
-# 7. Monitor Interpretation
+# 6. Monitor Interpretation
 
 The monitor prints:
 
@@ -785,11 +998,11 @@ P[m] = fingertip position in hand base frame
 F[N] = measured/target force
 ```
 
-For RBY1 with `hand.enabled=false`, hand values may remain zero. This is expected in the arm-only profile.
+For RBY1 v31, hand forward is direct joint target pass-through. If `hand.enabled=false`, hand FK/IK monitor values may remain zero even when hand joint commands are being published. In that case, verify hand motion through Isaac joint states or the robot visualization.
 
 ---
 
-# 8. File Role Rules
+# 7. File Role Rules
 
 Keep the file-role separation.
 
@@ -816,24 +1029,18 @@ Do not move constructor/control-loop implementation into callback files.
 
 ---
 
-# 9. Recommended v30 Commit Scope
+# 8. Recommended v31 Commit
 
-This version should be saved as:
+Suggested commit:
 
-```text
-v30
+```bash
+git add .
+git commit -m "v31: enable RBY1 hand forward with fast arm teleop"
 ```
 
 Suggested tag:
 
 ```bash
-git tag v30
-```
-
-Suggested push:
-
-```bash
+git tag v31
 git push origin main --tags
 ```
-
-Recommended commit message is provided separately below.
