@@ -912,7 +912,7 @@ void DualArmForceControl::PrintDualArmStates()
     printf("\033[2J\033[H");
 
     printf("%s============================================================================================================%s\n", C_DIM, C_RESET);
-    printf("%s   Dual Arm & Hand Monitor v25 | Arm:[%s%s%s] Hand:[%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
+    printf("%s   Dual Arm & Hand Monitor v30 | Arm:[%s%s%s] Hand:[%s%s%s] | %sCUR_POS%s %sTAR_POS%s %sCUR_F%s %sTAR_F%s%s\n",
            C_TITLE,
            C_MODE, current_arm_control_mode_.c_str(), C_RESET,
            C_MODE, current_hand_control_mode_.c_str(), C_RESET,
