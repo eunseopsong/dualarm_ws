@@ -37,6 +37,27 @@ ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
 "{linear: {x: 0.0}, angular: {z: 0.0}}"
 ```
 
+Turn waist 90 degrees left:
+
+```bash
+ros2 topic pub --once /forward_aux_joint_targets sensor_msgs/msg/JointState \
+"{name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'], position: [0.0, 0.0875, 0.0883, -0.1739, 0.0, 1.5708]}"
+```
+
+Turn waist 90 degrees right:
+
+```bash
+ros2 topic pub --once /forward_aux_joint_targets sensor_msgs/msg/JointState \
+"{name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'], position: [0.0, 0.0875, 0.0883, -0.1739, 0.0, -1.5708]}"
+```
+
+Return waist to center:
+
+```bash
+ros2 topic pub --once /forward_aux_joint_targets sensor_msgs/msg/JointState \
+"{name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'], position: [0.0, 0.0875, 0.0883, -0.1739, 0.0, 0.0]}"
+```
+
 In the current Isaac setup, positive `/cmd_vel.linear.x` is forward because `mobile_base.invert_wheel_velocity_command` is set to `true` in `yaml/forcecon_cfg.yaml`.
 
-The `/cmd_vel` command is converted to `left_wheel` and `right_wheel` velocity commands using `mobile_base` parameters in `yaml/forcecon_cfg.yaml`. The torso upright target is configured by `mobile_base.torso_upright_joint_names` and `mobile_base.torso_upright_positions`.
+The `/cmd_vel` command is converted to `left_wheel` and `right_wheel` velocity commands using `mobile_base` parameters in `yaml/forcecon_cfg.yaml`. The torso upright target is configured by `mobile_base.torso_upright_joint_names` and `mobile_base.torso_upright_positions`. Waist left/right uses `torso_5`; if the visual direction is opposite in Isaac, swap the signs of `+/-1.5708`.
