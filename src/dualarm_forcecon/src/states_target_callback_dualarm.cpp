@@ -879,6 +879,7 @@ void DualArmForceControl::TargetHandJointsCallback(
 // msg: JointState command for RBY1 non-arm joints.
 //   - name + position controls torso_* joints as absolute position targets.
 //   - name + velocity controls left_wheel/right_wheel as velocity targets.
+//   - name + velocity on torso_* optionally sets max torso position speed [rad/s].
 // ============================================================================
 void DualArmForceControl::TargetAuxJointsCallback(
     const sensor_msgs::msg::JointState::SharedPtr msg)
@@ -918,6 +919,8 @@ void DualArmForceControl::TargetAuxJointsCallback(
         if (is_wheel(n)) {
             aux_joint_velocity_command_[n] = v;
             got_wheel_velocity = true;
+        } else if (is_torso(n) && v > 0.0) {
+            aux_joint_position_max_speed_command_[n] = v;
         }
     }
 

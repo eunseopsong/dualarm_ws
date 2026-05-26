@@ -128,6 +128,7 @@ private:
 
     rclcpp::TimerBase::SharedPtr print_timer_;
     rclcpp::TimerBase::SharedPtr control_timer_;
+    double control_loop_period_s_ = 0.005;
 
     // ------------------------------------------------------------------------
     // Params
@@ -183,8 +184,9 @@ private:
     // RBY1 non-arm command extension.
     // /forward_aux_joint_targets accepts JointState commands:
     // - wheel joints use velocity
-    // - torso joints use position
+    // - torso joints use position, optional velocity as max position speed
     std::unordered_map<std::string, double> aux_joint_position_command_;
+    std::unordered_map<std::string, double> aux_joint_position_max_speed_command_;
     std::unordered_map<std::string, double> aux_joint_velocity_command_;
     rclcpp::Time aux_joint_velocity_stamp_;
     double aux_joint_velocity_timeout_sec_ = 0.5;
@@ -199,6 +201,7 @@ private:
     double wheel_radius_m_ = 0.1;
     double wheel_base_m_ = 0.53;
     double max_wheel_speed_rad_s_ = 10.0;
+    double torso_position_max_speed_rad_s_ = 0.5;
     bool invert_wheel_velocity_command_ = true;
     bool torso_upright_hold_enabled_ = true;
     bool torso_upright_hold_during_wheel_only_ = true;

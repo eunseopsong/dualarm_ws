@@ -563,6 +563,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     double wheel_base_default = 0.53;
     double max_wheel_speed_default = 10.0;
     bool invert_wheel_velocity_command_default = true;
+    double torso_position_max_speed_default = 0.5;
     bool torso_upright_hold_enabled_default = true;
     bool torso_upright_hold_during_wheel_only_default = true;
     std::vector<std::string> torso_upright_joint_names_default{
@@ -580,6 +581,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         readScalar(base_node, "wheel_base_m", wheel_base_default);
         readScalar(base_node, "max_wheel_speed_rad_s", max_wheel_speed_default);
         readScalar(base_node, "invert_wheel_velocity_command", invert_wheel_velocity_command_default);
+        readScalar(base_node, "torso_position_max_speed_rad_s", torso_position_max_speed_default);
         readScalar(base_node, "torso_upright_hold_enabled", torso_upright_hold_enabled_default);
         readScalar(base_node, "torso_upright_hold_during_wheel_only", torso_upright_hold_during_wheel_only_default);
         if (base_node["torso_upright_joint_names"] && base_node["torso_upright_joint_names"].IsSequence()) {
@@ -608,6 +610,8 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "max_wheel_speed_rad_s", max_wheel_speed_default);
     invert_wheel_velocity_command_ = node_->declare_parameter<bool>(
         "invert_wheel_velocity_command", invert_wheel_velocity_command_default);
+    torso_position_max_speed_rad_s_ = node_->declare_parameter<double>(
+        "torso_position_max_speed_rad_s", torso_position_max_speed_default);
     torso_upright_hold_enabled_ = node_->declare_parameter<bool>(
         "torso_upright_hold_enabled", torso_upright_hold_enabled_default);
     torso_upright_hold_during_wheel_only_ = node_->declare_parameter<bool>(
@@ -639,6 +643,9 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     }
     if (max_wheel_speed_rad_s_ <= 0.0 || !std::isfinite(max_wheel_speed_rad_s_)) {
         max_wheel_speed_rad_s_ = 10.0;
+    }
+    if (torso_position_max_speed_rad_s_ <= 0.0 || !std::isfinite(torso_position_max_speed_rad_s_)) {
+        torso_position_max_speed_rad_s_ = 0.5;
     }
     torso_upright_position_command_.clear();
     const std::size_t torso_upright_size =
@@ -782,6 +789,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     const double safe_control_loop_period_ms =
         (std::isfinite(control_loop_period_ms) && control_loop_period_ms > 0.0)
         ? control_loop_period_ms : 5.0;
+    control_loop_period_s_ = safe_control_loop_period_ms * 0.001;
 
     print_timer_ = node_->create_wall_timer(
         500ms, std::bind(&DualArmForceControl::PrintDualArmStates, this));
@@ -793,7 +801,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     RCLCPP_INFO(
         node_->get_logger(),
-        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d hand_runtime_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms wheel_radius=%.3f m wheel_base=%.3f m max_wheel=%.2f rad/s torso_upright_hold=%d torso_joints=%zu",
+        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d hand_runtime_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms wheel_radius=%.3f m wheel_base=%.3f m max_wheel=%.2f rad/s torso_max_speed=%.2f rad/s torso_upright_hold=%d torso_joints=%zu",
         static_cast<int>(startup_fixed_joint_hold_enabled_),
         static_cast<int>(startup_fixed_hand_hold_enabled_),
         static_cast<int>(startup_arm_home_hold_enabled_),
@@ -805,6 +813,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         wheel_radius_m_,
         wheel_base_m_,
         max_wheel_speed_rad_s_,
+        torso_position_max_speed_rad_s_,
         static_cast<int>(torso_upright_hold_enabled_),
         torso_upright_position_command_.size());
 }
@@ -1204,6 +1213,21 @@ void DualArmForceControl::ControlLoop()
         right = std::clamp(right, -max_wheel_speed_rad_s_, max_wheel_speed_rad_s_);
         return {left, right};
     };
+    auto limit_torso_position_step = [&](const std::string& n, double target) -> double {
+        double max_speed = torso_position_max_speed_rad_s_;
+        const auto it_speed = aux_joint_position_max_speed_command_.find(n);
+        if (it_speed != aux_joint_position_max_speed_command_.end() &&
+            it_speed->second > 0.0 && std::isfinite(it_speed->second)) {
+            max_speed = it_speed->second;
+        }
+
+        if (max_speed <= 0.0 || !std::isfinite(max_speed)) return target;
+
+        const auto it_current = last_joint_position_.find(n);
+        const double current = it_current != last_joint_position_.end() ? it_current->second : target;
+        const double max_step = max_speed * control_loop_period_s_;
+        return current + std::clamp(target - current, -max_step, max_step);
+    };
 
     const bool active_aux_wheel_velocity_command = has_active_wheel_velocity_command();
     const bool active_cmd_vel_command = has_active_cmd_vel_command();
@@ -1261,7 +1285,11 @@ void DualArmForceControl::ControlLoop()
 
         const auto it_aux_pos = aux_joint_position_command_.find(n);
         if (it_aux_pos != aux_joint_position_command_.end()) {
-            cmd.position.push_back(it_aux_pos->second);
+            if (is_torso_joint(n)) {
+                cmd.position.push_back(limit_torso_position_step(n, it_aux_pos->second));
+            } else {
+                cmd.position.push_back(it_aux_pos->second);
+            }
             continue;
         }
 
@@ -1271,7 +1299,7 @@ void DualArmForceControl::ControlLoop()
         if (use_torso_upright_hold && is_torso_joint(n)) {
             const auto it_torso = torso_upright_position_command_.find(n);
             if (it_torso != torso_upright_position_command_.end()) {
-                cmd.position.push_back(it_torso->second);
+                cmd.position.push_back(limit_torso_position_step(n, it_torso->second));
                 continue;
             }
         }
