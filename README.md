@@ -1,43 +1,8 @@
-# DualArmForceControl README (v28)
+# DualArm Force Control README (v31 - Hand Admittance Restored)
 
-`v28` is the version where `dualarm_forcecon` was extended from the v27 split-package structure to support **RBY1 arm control** using the existing Isaac Sim Action Graph.
+## Quick Start Example Commands
 
-The main goals of v28 are:
-
-```text
-1. Keep the v27 package split:
-   dualarm_forcecon   = ROS 2 control node
-   dualarm_kinematics = reusable FK/IK and robot profile package
-
-2. Add RBY1 support:
-   - official RBY1 URDF-based kinematics
-   - RBY1 arm-only KDL chain
-   - 7-DOF left/right arm support
-   - full-order command publishing with non-arm joint hold
-   - position-only DLS IK fallback for RBY1 inverse control
-
-3. Preserve existing Doosan/AIDIN dualarm workflow.
-```
-
-Recommended default operation mode for the current RBY1 test workflow:
-
-```text
-arm_mode  = inverse
-hand_mode = idle
-```
-
-For Doosan/AIDIN dualarm with hand control:
-
-```text
-arm_mode  = inverse
-hand_mode = forward
-```
-
----
-
-# Quick Start Example Commands
-
-## Build
+### 1. Build
 
 ```bash
 cd ~/dualarm_ws
@@ -45,7 +10,7 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
-If using the `cb` alias:
+If using the custom alias:
 
 ```bash
 cd ~/dualarm_ws
@@ -54,630 +19,67 @@ cb
 
 ---
 
-## Run controller node
+### 2. Run controller node
+
+#### RBY1 fast teleop + hand admittance
+
+Use this when running RBY1 arm teleoperation with Manus glove hand command and selected-finger admittance correction.
 
 ```bash
 source ~/dualarm_ws/install/setup.bash
 
-ros2 run dualarm_forcecon dualarm_forcecon_node
+ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
+  -p forcecon_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml \
+  -p kinematics_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml \
+  -p control_loop_period_ms:=5.0 \
+  -p rby1_arm_max_cmd_step_rad:=0.015 \
+  -p rby1_arm_servo_max_cart_step_m:=0.0025 \
+  -p enable_hand_runtime_when_yaml_disabled:=true \
+  -p fallback_left_hand_base_link:=left_joint_6 \
+  -p fallback_right_hand_base_link:=right_joint_6
 ```
 
-or explicitly:
+If the robot moves too aggressively:
 
 ```bash
 ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
-  -p forcecon_cfg_yaml:=/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml
+  -p forcecon_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml \
+  -p kinematics_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml \
+  -p control_loop_period_ms:=10.0 \
+  -p rby1_arm_max_cmd_step_rad:=0.008 \
+  -p rby1_arm_servo_max_cart_step_m:=0.0012 \
+  -p enable_hand_runtime_when_yaml_disabled:=true \
+  -p fallback_left_hand_base_link:=left_joint_6 \
+  -p fallback_right_hand_base_link:=right_joint_6
 ```
+
+If the PC username is `eunseop`, replace `/home/vision` with `/home/eunseop`.
 
 ---
 
-## Select robot profile
+### 3. Change control mode
 
-In:
-
-```text
-~/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml
-```
-
-Use:
-
-```yaml
-kinematics:
-  active_robot_id: 0   # Doosan/AIDIN dualarm
-```
-
-or:
-
-```yaml
-kinematics:
-  active_robot_id: 1   # RBY1
-```
-
-Runtime override:
-
-```bash
-ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
-  -p robot_profile_id:=1
-```
-
-Direct kinematics YAML override:
-
-```bash
-ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
-  -p kinematics_cfg_yaml:=/home/eunseop/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml
-```
-
----
-
-## RBY1 recommended test mode
+#### RBY1 arm inverse + hand forward
 
 ```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'inverse', hand_mode: 'idle'}"
+"{arm_mode: 'inverse', hand_mode: 'forward'}"
 ```
 
-RBY1 hand is disabled in the current arm-only config:
-
-```yaml
-hand:
-  enabled: false
-```
-
----
-
-## RBY1 delta Cartesian arm command
-
-Topic:
+Expected monitor:
 
 ```text
-/delta_arm_cartesian_pose
+Dual Arm & Hand Monitor v31 | Arm:[inverse] Hand:[forward]
 ```
 
-Type:
-
-```text
-std_msgs/msg/Float64MultiArray
-```
-
-Format:
-
-```text
-[L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]
-```
-
-Unit:
-
-```text
-position delta    : meter
-orientation delta : radian
-```
-
-For RBY1 v28, inverse control uses:
-
-```text
-strict full-pose KDL IK first
-→ if it fails, position-only DLS IK fallback
-```
-
-Start with 1 mm.
-
-### Zero delta
-
-```bash
-ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.000, 0.000, 0.000, 0.0, 0.0, 0.0,
-         0.000, 0.000, 0.000, 0.0, 0.0, 0.0]}"
-```
-
-### +Z 1 mm
-
-```bash
-ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.000, 0.000, 0.001, 0.0, 0.0, 0.0,
-         0.000, 0.000, 0.001, 0.0, 0.0, 0.0]}"
-```
-
-### +X 1 mm
-
-```bash
-ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.001, 0.000, 0.000, 0.0, 0.0, 0.0,
-         0.001, 0.000, 0.000, 0.0, 0.0, 0.0]}"
-```
-
-### Outward Y 1 mm
-
-```bash
-ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.000,  0.001, 0.000, 0.0, 0.0, 0.0,
-         0.000, -0.001, 0.000, 0.0, 0.0, 0.0]}"
-```
-
-### +Z 3 mm
-
-```bash
-ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.000, 0.000, 0.003, 0.0, 0.0, 0.0,
-         0.000, 0.000, 0.003, 0.0, 0.0, 0.0]}"
-```
-
-### +Z 5 mm
-
-```bash
-ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.000, 0.000, 0.005, 0.0, 0.0, 0.0,
-         0.000, 0.000, 0.005, 0.0, 0.0, 0.0]}"
-```
-
----
-
-## RBY1 forward joint command test
-
-Forward mode is useful to verify command publishing, Action Graph mapping, and joint order.
+#### RBY1 arm inverse + hand inverse
 
 ```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'forward', hand_mode: 'idle'}"
+"{arm_mode: 'inverse', hand_mode: 'inverse'}"
 ```
 
-Home-like command:
-
-```bash
-ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
-"{data: [
--0.78, 0.26, 0.00, 0.00, 0.00, -0.78, 0.00,
--0.78,-0.26, 0.00, 0.00, 0.00, -0.78, 1.30
-]}"
-```
-
-Small left/right shoulder movement:
-
-```bash
-ros2 topic pub --once /forward_arm_joint_targets std_msgs/msg/Float64MultiArray \
-"{data: [
--0.76, 0.26, 0.00, 0.00, 0.00, -0.78, 0.00,
--0.76,-0.26, 0.00, 0.00, 0.00, -0.78, 1.30
-]}"
-```
-
-Expected command size for RBY1:
-
-```text
-left arm  7 DOF
-right arm 7 DOF
-total     14 values
-```
-
----
-
-## Verify home pose latch
-
-After node starts, v28 should keep the current USD default pose instead of sending zero pose.
-
-```bash
-ros2 topic echo --once /isaac_joint_states
-ros2 topic echo --once /isaac_joint_command
-```
-
-Expected behavior:
-
-```text
-/isaac_joint_command has the full RBY1 joint list
-non-arm joints are held at the first /isaac_joint_states snapshot
-arm joints are initialized from current USD home pose
-```
-
----
-
-## Verify command topic
-
-```bash
-ros2 topic info /isaac_joint_command -v
-ros2 topic hz /isaac_joint_command
-ros2 topic echo --once /isaac_joint_command
-```
-
-For RBY1 v28, command publishing uses full joint order:
-
-```text
-left_wheel
-right_wheel
-torso_0
-...
-left_arm_0
-right_arm_0
-...
-hand joints
-```
-
-But only the arm target is updated by the controller.
-
----
-
-# 0. Dependency
-
-## 0.1 Target environment
-
-```text
-Ubuntu 22.04
-ROS 2 Humble
-Isaac Sim 5.0.0
-C++17
-```
-
-Recommended shell setup:
-
-```bash
-source /opt/ros/humble/setup.bash
-source ~/dualarm_ws/install/setup.bash
-```
-
----
-
-## 0.2 ROS 2 packages
-
-Workspace packages:
-
-```text
-dualarm_forcecon_interfaces
-dualarm_kinematics
-dualarm_forcecon
-```
-
-Optional:
-
-```text
-rby1_joystick_teleop
-```
-
----
-
-## 0.3 External libraries
-
-Required:
-
-```text
-Eigen3
-yaml-cpp
-Pinocchio
-KDL / kdl_parser
-urdfdom
-```
-
-Typical install:
-
-```bash
-sudo apt update
-sudo apt install -y \
-  libeigen3-dev \
-  libyaml-cpp-dev \
-  ros-humble-kdl-parser \
-  ros-humble-orocos-kdl \
-  liburdfdom-dev
-```
-
-Pinocchio install depends on system setup. Check:
-
-```bash
-pkg-config --modversion pinocchio
-```
-
-or:
-
-```bash
-ros2 pkg prefix pinocchio
-```
-
----
-
-## 0.4 Official RBY1 resources
-
-Official SDK:
-
-```bash
-cd ~/dualarm_ws/src/dualarm_kinematics
-mkdir -p urdf/rby1_official
-cd urdf/rby1_official
-
-git clone https://github.com/RainbowRobotics/rby1-sdk.git
-git clone https://github.com/RainbowRobotics/rby1-dev.git
-```
-
-Official URDF candidate used in v28:
-
-```text
-dualarm_kinematics/urdf/rby1_official/rby1-sdk/models/rby1a/urdf/model.urdf
-```
-
-This file is copied and cleaned into:
-
-```text
-dualarm_kinematics/urdf/rby1a_kdl.urdf
-```
-
----
-
-# 1. Usage and Example Commands
-
-## 1.1 Build
-
-```bash
-cd ~/dualarm_ws
-cb
-```
-
-or:
-
-```bash
-cd ~/dualarm_ws
-colcon build --symlink-install
-source install/setup.bash
-```
-
----
-
-## 1.2 Run node
-
-```bash
-ros2 run dualarm_forcecon dualarm_forcecon_node
-```
-
-The default config file is:
-
-```text
-/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml
-```
-
-Explicit run:
-
-```bash
-ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
-  -p forcecon_cfg_yaml:=/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml
-```
-
----
-
-## 1.3 Force controller config
-
-Main runtime config:
-
-```text
-dualarm_forcecon/yaml/forcecon_cfg.yaml
-```
-
-Robot profile selector:
-
-```yaml
-kinematics:
-  active_robot_id: 1
-
-  profiles:
-    - id: 0
-      name: doosan_dualarm
-      config_yaml: /home/eunseop/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml
-
-    - id: 1
-      name: rby1
-      config_yaml: /home/eunseop/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml
-```
-
-Command publish mode for RBY1:
-
-```yaml
-command_publish:
-  mode: full_hold_non_arm
-  publish_rate_hz: 60.0
-  arm_command_filter_enabled: true
-  arm_command_max_step_rad: 0.002
-```
-
-Meaning:
-
-```text
-full_hold_non_arm:
-  /isaac_joint_command publishes the full joint list
-  arm joints are updated by control target
-  non-arm joints are held at first /isaac_joint_states snapshot
-```
-
-This keeps the existing Isaac Action Graph working while preventing torso/wheel/head from being actively overwritten by new commands.
-
----
-
-## 1.4 RBY1 kinematics config
-
-File:
-
-```text
-dualarm_kinematics/config/rby1_kinematics.yaml
-```
-
-Current v28 config:
-
-```yaml
-robot_kinematics:
-  profile: rby1_arm_only
-
-  urdf_path: /home/eunseop/dualarm_ws/src/dualarm_kinematics/urdf/rby1a_kdl.urdf
-
-  arm:
-    base_link: link_torso_5
-
-    left_tip_link: ee_left
-    right_tip_link: ee_right
-
-    left_joint_names:
-      - left_arm_0
-      - left_arm_1
-      - left_arm_2
-      - left_arm_3
-      - left_arm_4
-      - left_arm_5
-      - left_arm_6
-
-    right_joint_names:
-      - right_arm_0
-      - right_arm_1
-      - right_arm_2
-      - right_arm_3
-      - right_arm_4
-      - right_arm_5
-      - right_arm_6
-
-  hand:
-    enabled: false
-```
-
-Important:
-
-```text
-base_link: link_torso_5
-```
-
-Do not use:
-
-```text
-base_link: base
-```
-
-If `base` is used, the KDL chain becomes:
-
-```text
-base -> torso_0~5 -> arm_0~6 -> ee
-```
-
-Then the chain expects 13 joints, while the arm controller only provides 7 joints.
-
-Correct arm-only KDL chain:
-
-```text
-link_torso_5 -> ee_left
-link_torso_5 -> ee_right
-```
-
----
-
-## 1.5 Convert official RBY1 URDF to KDL-compatible URDF
-
-Official URDF contains elements that standard ROS/KDL parser may not accept, such as unsupported geometry or incomplete parser requirements.
-
-Raw copy:
-
-```bash
-cd ~/dualarm_ws/src/dualarm_kinematics/urdf
-
-cp rby1_official/rby1-sdk/models/rby1a/urdf/model.urdf rby1a_official_raw.urdf
-```
-
-Clean script:
-
-```bash
-gedit ~/dualarm_ws/src/dualarm_kinematics/urdf/make_rby1a_kdl_urdf.py
-```
-
-Script:
-
-```python
-#!/usr/bin/env python3
-from pathlib import Path
-import xml.etree.ElementTree as ET
-
-SRC = Path("/home/eunseop/dualarm_ws/src/dualarm_kinematics/urdf/rby1a_official_raw.urdf")
-DST = Path("/home/eunseop/dualarm_ws/src/dualarm_kinematics/urdf/rby1a_kdl.urdf")
-
-tree = ET.parse(SRC)
-root = tree.getroot()
-
-# Remove unsupported collision geometry for standard ROS urdfdom/KDL parser.
-for link in root.findall("link"):
-    for collision in list(link.findall("collision")):
-        link.remove(collision)
-
-# Ensure joint limit fields are parser-safe.
-for joint in root.findall("joint"):
-    jtype = joint.attrib.get("type", "")
-    if jtype in ("revolute", "prismatic"):
-        limit = joint.find("limit")
-        if limit is None:
-            limit = ET.SubElement(joint, "limit")
-        if "lower" not in limit.attrib:
-            limit.set("lower", "-3.141592653589793")
-        if "upper" not in limit.attrib:
-            limit.set("upper", "3.141592653589793")
-        if "effort" not in limit.attrib:
-            limit.set("effort", "1000.0")
-        if "velocity" not in limit.attrib:
-            limit.set("velocity", "10.0")
-
-    elif jtype == "continuous":
-        limit = joint.find("limit")
-        if limit is None:
-            limit = ET.SubElement(joint, "limit")
-        if "effort" not in limit.attrib:
-            limit.set("effort", "1000.0")
-        if "velocity" not in limit.attrib:
-            limit.set("velocity", "10.0")
-
-ET.indent(tree, space="  ")
-tree.write(DST, encoding="utf-8", xml_declaration=True)
-
-print(f"[OK] Wrote cleaned URDF: {DST}")
-```
-
-Run:
-
-```bash
-chmod +x ~/dualarm_ws/src/dualarm_kinematics/urdf/make_rby1a_kdl_urdf.py
-python3 ~/dualarm_ws/src/dualarm_kinematics/urdf/make_rby1a_kdl_urdf.py
-```
-
-Check:
-
-```bash
-check_urdf ~/dualarm_ws/src/dualarm_kinematics/urdf/rby1a_kdl.urdf
-```
-
-Expected tree includes:
-
-```text
-root Link: base
-...
-link_torso_5
-  child: link_left_arm_0 -> ... -> link_left_arm_6 -> FT_sensor_L -> ee_left
-  child: link_right_arm_0 -> ... -> link_right_arm_6 -> FT_sensor_R -> ee_right
-```
-
----
-
-## 1.6 RBY1 control mode service
-
-Service:
-
-```text
-/change_control_mode
-```
-
-Type:
-
-```text
-dualarm_forcecon_interfaces/srv/SetControlMode
-```
-
-RBY1 arm inverse:
-
-```bash
-ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'inverse', hand_mode: 'idle'}"
-```
-
-RBY1 arm forward:
-
-```bash
-ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'forward', hand_mode: 'idle'}"
-```
-
-Idle:
+#### Full idle
 
 ```bash
 ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
@@ -686,9 +88,151 @@ ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetContro
 
 ---
 
-## 1.7 Main topics
+## 1. Version Summary
 
-### State input
+### 1.1 v31 current meaning
+
+The current v31 version combines the following behavior:
+
+```text
+RBY1:
+  arm  : inverse teleoperation using /delta_arm_cartesian_pose
+  hand : forward or inverse hand command
+  force: selected-finger admittance correction using /target_hand_force + /isaac_contact_states
+```
+
+The important rollback from the temporary fast hand pass-through version is:
+
+```text
+RBY1 hand forward is no longer treated as simple direct pass-through only.
+It returns to the old v25-style motion-reference + admittance-correction pipeline.
+```
+
+---
+
+### 1.2 Hand control architecture
+
+The hand command path is:
+
+```text
+motion reference
+    +
+selected-finger desired force
+    +
+measured contact force
+    ↓
+HandAdmittanceControl
+    ↓
+selected-finger IK correction
+    ↓
+final hand joint command
+```
+
+For hand forward mode:
+
+```text
+/forward_hand_joint_targets
+    -> q_h_motion_t_
+    -> FK
+    -> optional selected-finger admittance correction
+    -> Hand IK for selected finger
+    -> q_h_t_
+    -> /isaac_joint_command
+```
+
+For hand inverse mode:
+
+```text
+/target_hand_fingertips or /delta_hand_fingertips
+    -> Hand IK
+    -> q_h_motion_t_
+    -> optional selected-finger admittance correction
+    -> q_h_t_
+    -> /isaac_joint_command
+```
+
+There is no separate hand `forcecon` mode. Force control is an internal correction layer used while hand mode remains:
+
+```text
+forward
+or
+inverse
+```
+
+---
+
+## 2. Robot Configuration Notes
+
+### 2.1 RBY1
+
+For RBY1, the arm chain uses:
+
+```text
+base link : link_torso_5
+left tip  : ee_left
+right tip : ee_right
+```
+
+By default, the RBY1 non-arm joints remain held at startup values:
+
+```text
+left_wheel
+right_wheel
+torso_*
+head_*
+```
+
+The intended v31 behavior is:
+
+```text
+wheel joints         : startup hold, or velocity override from /forward_aux_joint_targets
+torso joints         : startup hold, or position override from /forward_aux_joint_targets
+head joints          : startup hold
+arm joints           : inverse control
+hand joints          : forward or inverse hand control
+selected finger      : optional admittance correction
+```
+
+If `rby1_kinematics.yaml` still has:
+
+```yaml
+hand:
+  enabled: false
+```
+
+then run with:
+
+```bash
+-p enable_hand_runtime_when_yaml_disabled:=true
+```
+
+or change the YAML to:
+
+```yaml
+hand:
+  enabled: true
+```
+
+Long-term, the cleaner approach is to make the RBY1 hand link names valid in `rby1_kinematics.yaml` and use `hand.enabled: true`.
+
+---
+
+### 2.2 Doosan/AIDIN
+
+Doosan/AIDIN uses the original hand FK/IK/admittance path naturally because its hand profile is configured as enabled.
+
+Recommended mode:
+
+```text
+arm_mode  = inverse
+hand_mode = forward
+```
+
+---
+
+## 3. Topic Interface
+
+### 3.1 State input
 
 ```text
 /isaac_joint_states
@@ -700,32 +244,18 @@ Type:
 sensor_msgs/msg/JointState
 ```
 
-RBY1 joint order observed:
+Used for:
 
 ```text
-left_wheel
-right_wheel
-torso_0
-torso_1
-torso_2
-torso_3
-torso_4
-torso_5
-head_0
-left_arm_0
-right_arm_0
-head_1
-left_arm_1
-right_arm_1
-...
-left_arm_6
-right_arm_6
-hand joints...
+current joint state
+FK current pose
+home/base pose latch
+startup fixed joint hold
 ```
 
 ---
 
-### Command output
+### 3.2 Main output
 
 ```text
 /isaac_joint_command
@@ -737,13 +267,45 @@ Type:
 sensor_msgs/msg/JointState
 ```
 
-In v28 RBY1 mode, this publishes the full joint list because the existing Isaac Action Graph expects full-order joint commands.
+Publishes the final combined command:
 
-Only arm joints are actively changed by controller logic.
+```text
+arm command + hand command + fixed joint hold values
+```
 
 ---
 
-### Delta arm command
+### 3.3 Contact input
+
+```text
+/isaac_contact_states
+```
+
+Type:
+
+```text
+std_msgs/msg/Float32MultiArray
+```
+
+Expected contact order:
+
+```text
+5 left + 5 right
+```
+
+The internal canonical finger order is:
+
+```text
+0 thumb
+1 index
+2 middle
+3 ring
+4 baby
+```
+
+---
+
+### 3.4 Arm delta Cartesian target
 
 ```text
 /delta_arm_cartesian_pose
@@ -761,12 +323,34 @@ Format:
 [L dx dy dz droll dpitch dyaw, R dx dy dz droll dpitch dyaw]
 ```
 
----
-
-### Forward arm command
+Units:
 
 ```text
-/forward_arm_joint_targets
+position delta    : meter
+orientation delta : radian
+```
+
+Important:
+
+```text
+/delta_arm_cartesian_pose is home-pose-relative absolute delta.
+It is not incremental from the previous command.
+```
+
+Example:
+
+```bash
+ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
+"{data: [0.000, 0.000, 0.000, 0.0, 0.0, 0.0,
+         0.000, -0.200, 0.100, 0.0, 0.0, 0.0]}"
+```
+
+---
+
+### 3.5 Hand forward joint target
+
+```text
+/forward_hand_joint_targets
 ```
 
 Type:
@@ -775,45 +359,187 @@ Type:
 std_msgs/msg/Float64MultiArray
 ```
 
-RBY1 format:
+Recommended format:
 
 ```text
-[left_arm_0 ... left_arm_6, right_arm_0 ... right_arm_6]
+40 values = left hand 20 + right hand 20
 ```
 
-Total:
+Per hand:
 
 ```text
-14 values
+5 fingers × 4 joints = 20 values
+```
+
+Finger order:
+
+```text
+thumb, index, middle, ring, baby
+```
+
+Per finger:
+
+```text
+[joint1, joint2, joint3, joint4]
+```
+
+The current hand IK/admittance code may internally compress to 15 independent DoF:
+
+```text
+joint4 is treated as mimic of joint3 where needed
 ```
 
 ---
 
-## 1.8 Doosan/AIDIN existing usage
+### 3.6 RBY1 wheel / torso auxiliary joint target
 
-Select:
-
-```yaml
-kinematics:
-  active_robot_id: 0
+```text
+/forward_aux_joint_targets
 ```
 
-Recommended mode:
+Type:
+
+```text
+sensor_msgs/msg/JointState
+```
+
+Wheel velocity command:
 
 ```bash
-ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
-"{arm_mode: 'inverse', hand_mode: 'forward'}"
+ros2 topic pub /forward_aux_joint_targets sensor_msgs/msg/JointState "{
+  name: ['left_wheel', 'right_wheel'],
+  velocity: [10.0, 10.0],
+  position: [],
+  effort: []
+}"
 ```
 
-Delta arm command:
+Torso position command:
 
 ```bash
-ros2 topic pub --once /delta_arm_cartesian_pose std_msgs/msg/Float64MultiArray \
-"{data: [0.000, 0.000, 0.001, 0.0, 0.0, 0.0,
-         0.000, 0.000, 0.001, 0.0, 0.0, 0.0]}"
+ros2 topic pub --once /forward_aux_joint_targets sensor_msgs/msg/JointState "{
+  name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'],
+  position: [0.0, 0.2, -0.4, 0.3, 0.0, 0.0],
+  velocity: [],
+  effort: []
+}"
 ```
 
-Hand forward command example:
+Notes:
+
+```text
+wheel velocity overrides timeout after aux_joint_velocity_timeout_sec.
+torso position overrides are latched until a new torso command is received.
+```
+
+---
+
+### 3.7 Hand target force
+
+```text
+/target_hand_force
+```
+
+Type:
+
+```text
+std_msgs/msg/Float64MultiArray
+```
+
+Compact format:
+
+```text
+[hand_id, finger_id, fx, fy, fz]
+```
+
+Legacy-compatible format:
+
+```text
+[hand_id, finger_id, px, py, pz, fx, fy, fz]
+```
+
+Index convention:
+
+```text
+hand_id:
+  0 = left
+  1 = right
+
+finger_id:
+  0 = thumb
+  1 = index
+  2 = middle
+  3 = ring
+  4 = baby
+```
+
+Force unit:
+
+```text
+N
+```
+
+Frame:
+
+```text
+hand-base frame
+```
+
+Important:
+
+```text
+/target_hand_force does not replace hand motion target.
+For stable admittance behavior, publish a valid hand motion target first.
+Then publish /target_hand_force.
+```
+
+---
+
+## 4. Hand Forward Example Commands
+
+### Command 1: open both hands
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+### Command 2: neutral slightly bent pose
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.10, 0.15, 0.15, 0.15,
+  0.10, 0.15, 0.15, 0.15,
+  0.10, 0.15, 0.15, 0.15,
+  0.10, 0.15, 0.15, 0.15,
+  0.10, 0.15, 0.15, 0.15,
+
+  0.10, 0.15, 0.15, 0.15,
+  0.10, 0.15, 0.15, 0.15,
+  0.10, 0.15, 0.15, 0.15,
+  0.10, 0.15, 0.15, 0.15,
+  0.10, 0.15, 0.15, 0.15
+]}"
+```
+
+---
+
+### Command 3: close both index fingers slightly
 
 ```bash
 ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
@@ -832,574 +558,639 @@ ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray
 ]}"
 ```
 
-Target hand force example:
+---
+
+### Command 4: close both hands moderately
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5
+]}"
+```
+
+---
+
+### Command 5: close both hands strongly
+
+Use this only after confirming joint directions and limits.
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.3, 0.5, 0.5, 0.5,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8,
+
+  0.3, 0.5, 0.5, 0.5,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8,
+  0.5, 0.8, 0.8, 0.8
+]}"
+```
+
+---
+
+### Command 6: left hand close, right hand open
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+### Command 7: left hand open, right hand close
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5
+]}"
+```
+
+---
+
+### Command 8: both thumbs only
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.3, 0.5, 0.5, 0.5,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.3, 0.5, 0.5, 0.5,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+### Command 9: both index + thumb pinch-ready pose
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.25, 0.45, 0.45, 0.45,
+  0.35, 0.55, 0.55, 0.55,
+  0.0,  0.0,  0.0,  0.0,
+  0.0,  0.0,  0.0,  0.0,
+  0.0,  0.0,  0.0,  0.0,
+
+  0.25, 0.45, 0.45, 0.45,
+  0.35, 0.55, 0.55, 0.55,
+  0.0,  0.0,  0.0,  0.0,
+  0.0,  0.0,  0.0,  0.0,
+  0.0,  0.0,  0.0,  0.0
+]}"
+```
+
+---
+
+### Command 10: left index only
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.3, 0.5, 0.5, 0.5,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+### Command 11: right index only
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.3, 0.5, 0.5, 0.5,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+### Command 12: contact-ready ring fingers
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.4, 0.4, 0.4,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.4, 0.4, 0.4,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+### Command 13: contact-ready index fingers
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.25, 0.45, 0.45, 0.45,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.25, 0.45, 0.45, 0.45,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+### Command 14: left ring contact-ready, right hand open
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.4, 0.4, 0.4,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+### Command 15: right ring contact-ready, left hand open
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.4, 0.4, 0.4,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+---
+
+## 5. Target Hand Force Example Commands
+
+Before sending force target, send a hand motion target first.
+
+A recommended basic sequence is:
+
+```text
+1. Set hand_mode=forward
+2. Send /forward_hand_joint_targets
+3. Send /target_hand_force
+4. Watch /hand_force_target_monitor and /hand_force_current_monitor
+```
+
+---
+
+### Force command 1: left ring, +5 N z
 
 ```bash
 ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
-"{data: [0, 1, 0.0, 0.0, 5.0]}"
-```
-
----
-
-# 2. Package Structure
-
-## 2.1 Workspace structure
-
-```text
-dualarm_ws/
-└── src/
-    ├── dualarm_forcecon_interfaces/
-    │   ├── CMakeLists.txt
-    │   ├── package.xml
-    │   └── srv/
-    │       └── SetControlMode.srv
-    │
-    ├── dualarm_kinematics/
-    │   ├── CMakeLists.txt
-    │   ├── package.xml
-    │   ├── config/
-    │   │   ├── doosan_dualarm_kinematics.yaml
-    │   │   ├── generic_dualarm_kinematics.yaml
-    │   │   └── rby1_kinematics.yaml
-    │   ├── urdf/
-    │   │   ├── rby1_official/
-    │   │   │   ├── rby1-sdk/
-    │   │   │   └── rby1-dev/
-    │   │   ├── rby1a_official_raw.urdf
-    │   │   ├── rby1a_kdl.urdf
-    │   │   └── make_rby1a_kdl_urdf.py
-    │   └── include/
-    │       └── dualarm_kinematics/
-    │           ├── arm/
-    │           │   ├── arm_forward_kinematics.hpp
-    │           │   └── arm_inverse_kinematics.hpp
-    │           ├── hand/
-    │           │   ├── hand_forward_kinematics.hpp
-    │           │   └── hand_inverse_kinematics.hpp
-    │           └── core/
-    │               ├── kinematics_config.hpp
-    │               └── kinematics_utils.hpp
-    │
-    └── dualarm_forcecon/
-        ├── CMakeLists.txt
-        ├── package.xml
-        ├── include/
-        │   └── dualarm_forcecon/
-        │       └── control/
-        │           └── hand_admittance_control.hpp
-        ├── src/
-        │   ├── DualArmForceControl.cpp
-        │   ├── DualArmForceControl.h
-        │   ├── node_dualarm_main.cpp
-        │   ├── states_current_callback_dualarm.cpp
-        │   └── states_target_callback_dualarm.cpp
-        └── yaml/
-            └── forcecon_cfg.yaml
-```
-
----
-
-## 2.2 `dualarm_kinematics` role
-
-`dualarm_kinematics` owns reusable kinematics logic.
-
-It owns:
-
-```text
-arm FK
-arm IK
-position-only DLS IK fallback
-hand FK
-hand IK
-kinematics config loader
-robot-specific YAML profiles
-RBY1 KDL-compatible URDF
-```
-
-It should not own:
-
-```text
-ROS publishers
-ROS subscribers
-ROS service callbacks
-control mode state machine
-force/admittance controller runtime
-```
-
----
-
-## 2.3 `dualarm_forcecon` role
-
-`dualarm_forcecon` owns ROS 2 runtime control logic.
-
-It owns:
-
-```text
-ROS 2 node
-current-state callbacks
-target callbacks
-mode service
-control loop
-command publishing
-full_hold_non_arm publishing policy
-hand admittance control
-monitor printing
-force monitor topics
-```
-
----
-
-## 2.4 File-role separation rules
-
-Preserve this structure.
-
-```text
-DualArmForceControl.cpp
-= constructor / destructor / ControlLoop only
-
-states_current_callback_dualarm.cpp
-= current state callbacks
-= joint state parsing
-= USD home pose latch
-= full joint hold snapshot
-= FK monitor update
-= contact force callback
-= mode service callback
-= PrintDualArmStates
-= force monitor publish
-
-states_target_callback_dualarm.cpp
-= forward arm command callback
-= target arm Cartesian pose callback
-= delta arm Cartesian pose callback
-= forward hand joint target callback
-= hand target/delta callbacks
-= target hand force callback
-
-node_dualarm_main.cpp
-= ROS 2 node creation and spin only
-```
-
----
-
-# 3. Remaining Content
-
-## 3.1 v28 change summary
-
-Major changes from v27:
-
-```text
-1. Added RBY1 official URDF workflow.
-2. Converted official RBY1 URDF to KDL-compatible URDF.
-3. Added RBY1 kinematics config.
-4. Set RBY1 arm-only KDL chain base to link_torso_5.
-5. Removed remaining 6DOF hardcoding in arm target/current callbacks.
-6. Added full_hold_non_arm command publish mode.
-7. Added USD home pose latch from first /isaac_joint_states.
-8. Added RBY1 7DOF forward arm control support.
-9. Added position-only DLS IK fallback for inverse control.
-10. Verified RBY1 forward and inverse arm commands.
-```
-
----
-
-## 3.2 Why `full_hold_non_arm` is used
-
-The existing Isaac Action Graph worked with full-order JointState command.
-
-When only 14 arm joints were published:
-
-```text
-/isaac_joint_command = left_arm_0~6 + right_arm_0~6 only
-```
-
-the graph did not move the robot as expected.
-
-Therefore v28 uses:
-
-```text
-full_hold_non_arm
+"{data: [0, 3, 0.0, 0.0, 5.0]}"
 ```
 
 Meaning:
 
 ```text
-/isaac_joint_command publishes all RBY1 joints in the original /isaac_joint_states order.
-
-arm joints:
-  updated by controller
-
-non-arm joints:
-  held at first observed USD home pose
-```
-
-This solves:
-
-```text
-1. Existing Action Graph compatibility
-2. Torso/wheel/head unwanted command changes
-3. USD home pose reset-to-zero problem
+0 = left hand
+3 = ring finger
+force = (0, 0, +5) N in hand-base frame
 ```
 
 ---
 
-## 3.3 Why `link_torso_5` is used as kinematics base
-
-If RBY1 KDL chain uses:
-
-```text
-base -> ee_left
-```
-
-then the chain includes:
-
-```text
-torso_0~5 + left_arm_0~6
-```
-
-Total:
-
-```text
-13 joints
-```
-
-But the controller provides only 7 arm joints.
-
-Therefore, for arm-only control:
-
-```text
-base_link = link_torso_5
-```
-
-This makes the chain:
-
-```text
-link_torso_5 -> ee_left
-link_torso_5 -> ee_right
-```
-
-Expected DOF:
-
-```text
-7 joints per arm
-```
-
----
-
-## 3.4 Why position-only DLS IK fallback is used
-
-RBY1 KDL full-pose IK failed even for 1 mm delta in the current pose.
-
-Observed failure:
-
-```text
-[IK][L] solveIK failed or invalid output size. ok=0 size=0 expected=7
-[IK][R] solveIK failed or invalid output size. ok=0 size=0 expected=7
-```
-
-So v28 keeps the existing strict IK first, then uses fallback:
-
-```text
-strict full-pose KDL IK
-  if success:
-    use strict IK result
-  else:
-    use position-only DLS IK
-```
-
-DLS equation:
-
-```text
-e_p = p_des - p(q)
-
-J_p = ∂p / ∂q
-
-dq = J_p^T (J_p J_p^T + λ² I)^-1 e_p
-
-q_next = q + α dq
-```
-
-The fallback controls position only. Orientation is not strictly guaranteed in this fallback mode.
-
----
-
-## 3.5 Home pose latch behavior
-
-v28 must not send zero pose at startup.
-
-At first `/isaac_joint_states` message:
-
-```text
-q_current is latched as USD home pose
-q_target is initialized from q_current
-q_publish is initialized from q_current
-non-arm hold snapshot is initialized from q_current
-```
-
-Expected log:
-
-```text
-[JointStateInit] latched USD home pose: total_joints=... Ldof=7 Rdof=7 mode=full_hold_non_arm
-```
-
-Expected result:
-
-```text
-Node startup should not move RBY1 away from USD default pose.
-```
-
----
-
-## 3.6 RBY1 validated status
-
-Validated:
-
-```text
-RBY1 /isaac_joint_states received
-RBY1 official joint names match Isaac joint names
-RBY1 KDL-compatible URDF generated
-check_urdf success
-RBY1 FK loaded
-RBY1 IK object constructed
-RBY1 command publish connected to Isaac Action Graph
-RBY1 forward joint command works
-RBY1 inverse delta command works using DLS fallback
-```
-
-Current limitation:
-
-```text
-RBY1 inverse fallback is position-only.
-Orientation delta is not fully controlled yet.
-RBY1 hand/contact force control is not enabled yet.
-```
-
----
-
-## 3.7 RBY1 next tasks
-
-Recommended next steps:
-
-```text
-1. Add RBY1 hand command support.
-2. Add /isaac_contact_states for RBY1 hands.
-3. Add RBY1 selected-finger force control.
-4. Improve DLS IK with orientation weighting.
-5. Add null-space posture control for 7DOF arm.
-6. Add joint limit avoidance.
-7. Add torso fixed-base or torso hold policy if needed.
-8. Add launch file for selecting robot_profile_id.
-```
-
----
-
-## 3.8 Troubleshooting
-
-### Node starts but robot moves to zero pose
-
-Cause:
-
-```text
-current USD home pose was not latched before publishing command
-```
-
-Check:
+### Force command 2: right ring, +5 N z
 
 ```bash
-ros2 topic echo --once /isaac_joint_states
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [1, 3, 0.0, 0.0, 5.0]}"
+```
+
+---
+
+### Force command 3: left index, +3 N z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 1, 0.0, 0.0, 3.0]}"
+```
+
+---
+
+### Force command 4: right index, +3 N z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [1, 1, 0.0, 0.0, 3.0]}"
+```
+
+---
+
+### Force command 5: left thumb, +2 N z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 0, 0.0, 0.0, 2.0]}"
+```
+
+---
+
+### Force command 6: right thumb, +2 N z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [1, 0, 0.0, 0.0, 2.0]}"
+```
+
+---
+
+### Force command 7: left middle, +4 N z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 2, 0.0, 0.0, 4.0]}"
+```
+
+---
+
+### Force command 8: right middle, +4 N z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [1, 2, 0.0, 0.0, 4.0]}"
+```
+
+---
+
+### Force command 9: left baby, +2 N z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 4, 0.0, 0.0, 2.0]}"
+```
+
+---
+
+### Force command 10: right baby, +2 N z
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [1, 4, 0.0, 0.0, 2.0]}"
+```
+
+---
+
+### Force command 11: release selected force target to zero
+
+This clears force target for the selected finger side/finger.
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 3, 0.0, 0.0, 0.0]}"
+```
+
+Right ring release:
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [1, 3, 0.0, 0.0, 0.0]}"
+```
+
+---
+
+### Force command 12: opposite sign test
+
+If Isaac contact force sign is opposite to the expected direction, test the sign.
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 3, 0.0, 0.0, -5.0]}"
+```
+
+---
+
+### Force command 13: x-axis force test
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 3, 2.0, 0.0, 0.0]}"
+```
+
+---
+
+### Force command 14: y-axis force test
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 3, 0.0, 2.0, 0.0]}"
+```
+
+---
+
+### Force command 15: legacy-compatible format
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 3, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0]}"
+```
+
+Meaning:
+
+```text
+[hand_id, finger_id, px, py, pz, fx, fy, fz]
+```
+
+The position part is legacy-compatible and is ignored in the current desired-force usage.
+
+---
+
+## 6. Combined Hand Motion + Force Examples
+
+### Example A: left ring contact-ready + left ring force
+
+Step 1: set hand mode.
+
+```bash
+ros2 service call /change_control_mode dualarm_forcecon_interfaces/srv/SetControlMode \
+"{arm_mode: 'inverse', hand_mode: 'forward'}"
+```
+
+Step 2: send left ring contact-ready pose.
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.2, 0.4, 0.4, 0.4,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+```
+
+Step 3: send desired force.
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 3, 0.0, 0.0, 5.0]}"
+```
+
+---
+
+### Example B: right index contact-ready + right index force
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  0.0, 0.0, 0.0, 0.0,
+  0.25, 0.45, 0.45, 0.45,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
+]}"
+
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [1, 1, 0.0, 0.0, 3.0]}"
+```
+
+---
+
+### Example C: keep both hands moderately closed and regulate left ring force
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+
+  0.2, 0.3, 0.3, 0.3,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5,
+  0.3, 0.5, 0.5, 0.5
+]}"
+
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [0, 3, 0.0, 0.0, 4.0]}"
+```
+
+---
+
+## 7. Monitor / Debug Commands
+
+Check command rates:
+
+```bash
+ros2 topic hz /forward_hand_joint_targets
+ros2 topic hz /target_hand_force
+ros2 topic hz /isaac_joint_command
+ros2 topic hz /isaac_contact_states
+```
+
+Check command output:
+
+```bash
 ros2 topic echo --once /isaac_joint_command
 ```
 
-Arm and non-arm command should match the current state at startup.
-
----
-
-### FK error: expected 13 got 7
-
-Cause:
-
-```text
-rby1_kinematics.yaml uses base_link: base
-```
-
-Fix:
-
-```yaml
-base_link: link_torso_5
-```
-
----
-
-### Node starts but official URDF parse fails
-
-Cause:
-
-```text
-official URDF contains parser-incompatible elements
-```
-
-Fix:
+Check force monitors:
 
 ```bash
-python3 ~/dualarm_ws/src/dualarm_kinematics/urdf/make_rby1a_kdl_urdf.py
-check_urdf ~/dualarm_ws/src/dualarm_kinematics/urdf/rby1a_kdl.urdf
+ros2 topic echo /hand_force_target_monitor
+ros2 topic echo /hand_force_current_monitor
+```
+
+Recommended rqt plot signals:
+
+```text
+/hand_force_target_monitor/data[0..29]
+/hand_force_current_monitor/data[0..29]
+```
+
+Canonical order:
+
+```text
+left  thumb xyz  -> data[0:3]
+left  index xyz  -> data[3:6]
+left  middle xyz -> data[6:9]
+left  ring xyz   -> data[9:12]
+left  baby xyz   -> data[12:15]
+
+right thumb xyz  -> data[15:18]
+right index xyz  -> data[18:21]
+right middle xyz -> data[21:24]
+right ring xyz   -> data[24:27]
+right baby xyz   -> data[27:30]
 ```
 
 ---
 
-### Forward works but inverse does not
+## 8. Tuning Notes
 
-Cause:
+Hand admittance behavior is strongly affected by `forcecon_cfg.yaml`.
+
+Important parameters:
 
 ```text
-strict full-pose IK failed
+mass
+damping
+stiffness
+force_ctrl_enable
+force_error_axis_sign
+hybrid_force_axis
+contact_on_threshold_N
+contact_off_threshold_N
+max_offset_m
+max_step_m
+max_adm_velocity_mps
+ik_max_iters
+ik_tol_pos_m
+ik_lambda
+ik_alpha
 ```
 
-Fix:
+If the finger feels too soft:
 
 ```text
-Use v28 position-only DLS IK fallback.
-Start with 1 mm delta.
+increase stiffness
+increase damping
+increase Isaac joint drive stiffness/damping
+increase max effort/force of the finger drive
+```
+
+If the finger vibrates:
+
+```text
+increase damping
+reduce stiffness
+reduce max_step_m
+reduce max_adm_velocity_mps
+increase force_lpf_tau_s slightly
+```
+
+If force direction is wrong:
+
+```text
+change force_error_axis_sign
+or test opposite sign in /target_hand_force
 ```
 
 ---
 
-### Robot vibrates when arm moves
-
-Possible causes:
-
-```text
-full command updates non-arm joints incorrectly
-arm target step is too large
-arm command filter is too aggressive
-torso/base drive is weak
-```
-
-Recommended settings:
-
-```yaml
-command_publish:
-  mode: full_hold_non_arm
-  publish_rate_hz: 60.0
-  arm_command_filter_enabled: true
-  arm_command_max_step_rad: 0.002
-```
-
-Start with:
-
-```text
-1 mm delta
-```
-
----
-
-### Robot does not move but command is published
-
-Check subscriber:
-
-```bash
-ros2 topic info /isaac_joint_command -v
-```
-
-Expected:
-
-```text
-Subscription count: 1
-Node name: _World_ActionGraph_ros2_subscribe_joint_state
-```
-
-Check Action Graph:
-
-```text
-ROS2 Subscribe Joint State
-  positionCommand -> Articulation Controller.positionCommand
-  jointNames      -> Articulation Controller.jointNames
-
-Articulation Controller.robotPath
-  /World/rby1
-```
-
----
-
-## 3.9 Recommended git commit
+## 9. Recommended Commit
 
 ```bash
 git add .
-git commit -m "Add RBY1 full-order hold and DLS inverse support"
+git commit -m "docs: update v31 README for hand admittance and force commands"
 ```
 
-More detailed:
+Long version:
 
 ```bash
-git add .
-git commit -m "Add RBY1 full-order hold and DLS inverse support" \
-  -m "Introduce RBY1 kinematics configuration, KDL-compatible URDF workflow, full_hold_non_arm command publishing, USD home pose latch, 7-DOF arm callback handling, and position-only DLS IK fallback for inverse arm control."
+git commit -m "docs: update v31 README for hand admittance and force commands" \
+-m "Document the restored v25-style hand motion-reference plus selected-finger admittance pipeline.
+
+Add /target_hand_force compact and legacy command examples, expanded hand forward poses, and combined hand motion plus force-control sequences for RBY1 and Doosan/AIDIN workflows."
 ```
-
-Optional tag:
-
-```bash
-git tag -a v28 -m "v28: RBY1 arm inverse control support"
-git push origin main
-git push origin v28
-```
-
----
-
-# 4. v28 Summary
-
-Before v28:
-
-```text
-v27:
-  dualarm_kinematics split package exists
-  YAML robot profile selector exists
-  Doosan/AIDIN dualarm works
-  RBY1 profile exists but inverse control is not ready
-```
-
-After v28:
-
-```text
-v28:
-  RBY1 official URDF is used through KDL-compatible cleaned URDF
-  RBY1 arm-only FK/IK chain is configured from link_torso_5 to ee_left/right
-  RBY1 7DOF arm current/target callbacks work
-  /isaac_joint_command keeps full joint order for existing Isaac Action Graph
-  non-arm joints are held at first USD home pose
-  forward arm joint control works
-  inverse delta Cartesian arm control works through position-only DLS fallback
-```
-
-Default RBY1 command flow:
-
-```text
-/isaac_joint_states
-    -> latch current USD home pose
-    -> parse current RBY1 arm states
-
-/delta_arm_cartesian_pose
-    -> update target EE position
-    -> strict full-pose IK
-    -> position-only DLS fallback if strict IK fails
-    -> update arm target joints
-
-ControlLoop
-    -> full_hold_non_arm publish
-    -> /isaac_joint_command
-```
-
-Recommended RBY1 test mode:
-
-```text
-arm_mode  = inverse
-hand_mode = idle
-```
-
-Recommended first delta:
-
-```text
-1 mm
-```
-
-RBY1 hand/contact force control is not yet enabled in v28. It should be added after arm-only behavior is stable.

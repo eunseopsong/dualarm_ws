@@ -54,6 +54,7 @@ public:
     // ------------------------------------------------------------------------
     void TargetArmJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetHandJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    void TargetAuxJointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
 
     // ------------------------------------------------------------------------
     // Measured contact force callback (Isaac)
@@ -106,6 +107,7 @@ private:
     // Forward joint targets
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_joint_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_joint_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr target_aux_joint_sub_;
 
     // Desired-force reference topic
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_force_sub_;
@@ -142,26 +144,47 @@ private:
     // republished as hold-current instead of being forced to zero.
     std::unordered_map<std::string, double> last_joint_position_;
 
-    // Latched non-arm hold snapshot for mobile manipulators such as RBY1.
-    // In full_hold_non_arm mode, wheel/torso/head/hand joints are published in the
-    // original Isaac joint order using these latched positions, while only arm joints
-    // are updated by the controller.
-    std::unordered_map<std::string, double> hold_joint_position_;
-    bool non_arm_hold_initialized_{false};
+    // RBY1 startup hold:
+    // lock wheel / torso / head / finger joints to the first observed JointState.
+    bool startup_fixed_joint_hold_enabled_ = false;
 
-    // ------------------------------------------------------------------------
-    // Command publish policy
-    // ------------------------------------------------------------------------
-    // full              : publish all JointState names and hold non-controlled joints at latest observed positions
-    // arm_only          : publish only configured left/right arm joints
-    // full_hold_non_arm : publish full JointState in original order, but freeze non-arm joints at initial snapshot
-    std::string command_publish_mode_{"full"};
-    double command_publish_rate_hz_{100.0};
+    // Hand runtime can be enabled even when the selected robot YAML has
+    // hand.enabled=false. This is needed for RBY1 + external hand teleop, where
+    // the arm kinematics profile is arm-only but the old v25 hand admittance
+    // pipeline should still run for hand forward/inverse modes.
+    bool hand_runtime_enabled_ = false;
+    bool startup_fixed_joint_hold_latched_ = false;
+    std::unordered_map<std::string, double> startup_fixed_joint_position_;
 
-    bool arm_command_filter_enabled_{false};
-    double arm_command_max_step_rad_{0.0};
-    bool arm_pub_initialized_{false};
-    Eigen::VectorXd q_l_pub_, q_r_pub_;
+    bool startup_fixed_hand_hold_enabled_ = false;
+    bool startup_fixed_hand_hold_latched_ = false;
+    Eigen::VectorXd q_l_h_fixed_, q_r_h_fixed_;
+
+    // RBY1 startup arm home hold:
+    // latch the first observed arm JointState at node startup and keep publishing
+    // this home joint target while arm inverse mode is active but no explicit
+    // Cartesian target/delta command has arrived yet.
+    bool startup_arm_home_hold_enabled_ = false;
+    bool startup_arm_home_hold_latched_ = false;
+    Eigen::VectorXd q_l_arm_home_hold_, q_r_arm_home_hold_;
+
+    // RBY1 arm command safety. The RBY1 arm is redundant, so pose IK can
+    // occasionally return a far-away but mathematically valid joint solution.
+    // Isaac receives absolute joint-position commands, therefore final arm
+    // commands are slew-limited before publishing.
+    bool rby1_arm_cmd_slew_initialized_ = false;
+    Eigen::VectorXd q_l_arm_cmd_prev_, q_r_arm_cmd_prev_;
+    double rby1_arm_max_cmd_step_rad_ = 0.006;
+    double rby1_arm_servo_max_cart_step_m_ = 0.0008;
+
+    // RBY1 non-arm command extension.
+    // /forward_aux_joint_targets accepts JointState commands:
+    // - wheel joints use velocity
+    // - torso joints use position
+    std::unordered_map<std::string, double> aux_joint_position_command_;
+    std::unordered_map<std::string, double> aux_joint_velocity_command_;
+    rclcpp::Time aux_joint_velocity_stamp_;
+    double aux_joint_velocity_timeout_sec_ = 0.5;
 
     // ------------------------------------------------------------------------
     // Mode / init
@@ -174,6 +197,13 @@ private:
 
     bool arm_idle_synced_  = false;
     bool hand_idle_synced_ = false;
+
+    // RBY1 arm inverse servo: target pose is stored by callbacks and
+    // incrementally tracked in ControlLoop() using pose-constrained DLS.
+    // false means no explicit /target_arm_cartesian_pose or
+    // /delta_arm_cartesian_pose command has arrived yet. In that state,
+    // RBY1 keeps publishing the latched startup home joint command.
+    bool rby1_arm_target_active_ = false;
 
     // ------------------------------------------------------------------------
     // Joint states

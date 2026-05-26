@@ -2,7 +2,6 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
-#include <cctype>
 #include <yaml-cpp/yaml.h>
 
 using namespace std::chrono_literals;
@@ -320,37 +319,6 @@ inline std::string resolveKinematicsConfigYaml(
 }
 
 
-inline std::string toLowerAscii(std::string s)
-{
-    for (char& c : s) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    return s;
-}
-
-inline void slewLimitVector(Eigen::VectorXd& q_cmd,
-                            const Eigen::VectorXd& q_target,
-                            double max_step_rad)
-{
-    if (q_cmd.size() != q_target.size()) {
-        q_cmd = q_target;
-        return;
-    }
-
-    if (!std::isfinite(max_step_rad) || max_step_rad <= 0.0) {
-        q_cmd = q_target;
-        return;
-    }
-
-    for (int i = 0; i < q_cmd.size(); ++i) {
-        double dq = q_target(i) - q_cmd(i);
-        if (!std::isfinite(dq)) dq = 0.0;
-        dq = std::max(-max_step_rad, std::min(max_step_rad, dq));
-        q_cmd(i) += dq;
-    }
-}
-
-
 } // namespace
 
 DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
@@ -447,65 +415,6 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
                 kin_cfg_.left_arm_tip_link.c_str(), kin_cfg_.right_arm_tip_link.c_str(),
                 kin_cfg_.leftArmDof(), kin_cfg_.rightArmDof(), static_cast<int>(kin_cfg_.hand_enabled));
 
-
-    // -------------------------
-    // Command publish policy
-    // -------------------------
-    // full              : publish the original JointState name list and hold unknown joints at their last state.
-    // arm_only          : publish only the selected robot arm joints from the kinematics config.
-    // full_hold_non_arm : publish the original full JointState order, update only arm joints,
-    //                     and freeze all non-arm joints at the first observed snapshot.
-    //
-    // RBY1 arm tests should prefer full_hold_non_arm because Isaac Action Graph often expects
-    // the full articulation joint order, while torso/wheel/head should remain fixed.
-    const YAML::Node command_pub_node = root["command_publish"];
-    if (command_pub_node) {
-        readScalar<std::string>(command_pub_node, "mode", command_publish_mode_);
-        readScalar<double>(command_pub_node, "publish_rate_hz", command_publish_rate_hz_);
-        readScalar<bool>(command_pub_node, "arm_command_filter_enabled", arm_command_filter_enabled_);
-        readScalar<double>(command_pub_node, "arm_command_max_step_rad", arm_command_max_step_rad_);
-    }
-
-    command_publish_mode_ = toLowerAscii(command_publish_mode_);
-    if (command_publish_mode_ != "full" && command_publish_mode_ != "arm_only" &&
-        command_publish_mode_ != "full_hold_non_arm") {
-        RCLCPP_WARN(node_->get_logger(),
-                    "[CommandPublish] unknown mode='%s'. Fallback to 'full'.",
-                    command_publish_mode_.c_str());
-        command_publish_mode_ = "full";
-    }
-
-    if (!std::isfinite(command_publish_rate_hz_) || command_publish_rate_hz_ <= 0.0) {
-        command_publish_rate_hz_ = 100.0;
-    }
-    command_publish_rate_hz_ = std::max(1.0, std::min(500.0, command_publish_rate_hz_));
-
-    if (!std::isfinite(arm_command_max_step_rad_) || arm_command_max_step_rad_ < 0.0) {
-        arm_command_max_step_rad_ = 0.0;
-    }
-
-    command_publish_mode_ = node_->declare_parameter<std::string>(
-        "command_publish_mode", command_publish_mode_);
-    arm_command_filter_enabled_ = node_->declare_parameter<bool>(
-        "arm_command_filter_enabled", arm_command_filter_enabled_);
-    arm_command_max_step_rad_ = node_->declare_parameter<double>(
-        "arm_command_max_step_rad", arm_command_max_step_rad_);
-    command_publish_rate_hz_ = node_->declare_parameter<double>(
-        "command_publish_rate_hz", command_publish_rate_hz_);
-
-    command_publish_mode_ = toLowerAscii(command_publish_mode_);
-    if (command_publish_mode_ != "full" && command_publish_mode_ != "arm_only" &&
-        command_publish_mode_ != "full_hold_non_arm") {
-        command_publish_mode_ = "full";
-    }
-
-    RCLCPP_INFO(node_->get_logger(),
-                "[CommandPublish] mode=%s rate=%.1fHz arm_filter=%d max_step=%.6f rad/step",
-                command_publish_mode_.c_str(),
-                command_publish_rate_hz_,
-                static_cast<int>(arm_command_filter_enabled_),
-                arm_command_max_step_rad_);
-
     // -------------------------
     // ROS IF
     // -------------------------
@@ -543,6 +452,10 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "/forward_hand_joint_targets", qos,
         std::bind(&DualArmForceControl::TargetHandJointsCallback, this, std::placeholders::_1));
 
+    target_aux_joint_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
+        "/forward_aux_joint_targets", qos,
+        std::bind(&DualArmForceControl::TargetAuxJointsCallback, this, std::placeholders::_1));
+
     target_hand_force_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/target_hand_force", qos,
         std::bind(&DualArmForceControl::TargetHandForceCallback, this, std::placeholders::_1));
@@ -571,12 +484,15 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     q_r_c_.setZero(kin_cfg_.rightArmDof());
     q_l_t_.setZero(kin_cfg_.leftArmDof());
     q_r_t_.setZero(kin_cfg_.rightArmDof());
-    q_l_pub_.setZero(kin_cfg_.leftArmDof());
-    q_r_pub_.setZero(kin_cfg_.rightArmDof());
 
     q_l_h_c_.setZero(20); q_r_h_c_.setZero(20);
     q_l_h_t_.setZero(20); q_r_h_t_.setZero(20);
     q_l_h_motion_t_.setZero(20); q_r_h_motion_t_.setZero(20);
+
+    q_l_h_fixed_.setZero(20); q_r_h_fixed_.setZero(20);
+
+    q_l_arm_home_hold_.setZero(kin_cfg_.leftArmDof());
+    q_r_arm_home_hold_.setZero(kin_cfg_.rightArmDof());
 
     f_l_c_.setZero(); f_r_c_.setZero();
     f_l_t_.setZero(); f_r_t_.setZero();
@@ -617,9 +533,37 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     arm_idle_synced_ = false;
     hand_idle_synced_ = false;
-    arm_pub_initialized_ = false;
 
     delta_arm_base_pose_initialized_ = false;
+
+    startup_fixed_joint_hold_enabled_ = (kin_cfg_.profile.find("rby1") != std::string::npos);
+    startup_fixed_hand_hold_enabled_  = startup_fixed_joint_hold_enabled_;
+    startup_arm_home_hold_enabled_    = startup_fixed_joint_hold_enabled_;
+    startup_fixed_joint_hold_latched_ = false;
+    startup_fixed_hand_hold_latched_  = false;
+    startup_arm_home_hold_latched_    = false;
+
+    // RBY1 command safety / teleoperation responsiveness parameters.
+    // v30 fast-teleop patch:
+    // - defaults are faster than the conservative debug version
+    // - still bounded to avoid large jumps from one target packet
+    rby1_arm_max_cmd_step_rad_ = node_->declare_parameter<double>(
+        "rby1_arm_max_cmd_step_rad", 0.015);
+    rby1_arm_servo_max_cart_step_m_ = node_->declare_parameter<double>(
+        "rby1_arm_servo_max_cart_step_m", 0.0025);
+    aux_joint_velocity_timeout_sec_ = node_->declare_parameter<double>(
+        "aux_joint_velocity_timeout_sec", 0.5);
+
+    if (rby1_arm_max_cmd_step_rad_ <= 0.0 || !std::isfinite(rby1_arm_max_cmd_step_rad_)) {
+        rby1_arm_max_cmd_step_rad_ = 0.015;
+    }
+    if (rby1_arm_servo_max_cart_step_m_ <= 0.0 || !std::isfinite(rby1_arm_servo_max_cart_step_m_)) {
+        rby1_arm_servo_max_cart_step_m_ = 0.0025;
+    }
+    if (!std::isfinite(aux_joint_velocity_timeout_sec_)) {
+        aux_joint_velocity_timeout_sec_ = 0.5;
+    }
+    rby1_arm_cmd_slew_initialized_ = false;
 
     // -------------------------
     // Kinematics
@@ -641,16 +585,78 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         arm_ik_r_->setWorldBaseTransformXYZEulerDeg(world_base_xyz_, world_base_euler_xyz_deg_);
     }
 
-    if (kin_cfg_.hand_enabled) {
+    // ----------------------------------------------------------------------
+    // Hand FK/IK runtime
+    // ----------------------------------------------------------------------
+    // v31 rollback patch:
+    // In v25/v27 Doosan-only behavior, hand forward/inverse modes always used
+    // the unified hand admittance pipeline:
+    //     q_h_motion_t_ -> FK/IK/admittance -> q_h_t_
+    //
+    // The earlier RBY1 fast teleop patch bypassed this when hand.enabled=false
+    // and directly copied q_h_motion_t_ to q_h_t_. That made the hand move, but
+    // removed the selected-finger admittance correction.  Here we allow the hand
+    // runtime to be created even for arm-only robot profiles.
+    const bool enable_hand_runtime_when_yaml_disabled =
+        node_->declare_parameter<bool>("enable_hand_runtime_when_yaml_disabled", true);
+
+    const std::string fallback_left_hand_base_link =
+        node_->declare_parameter<std::string>("fallback_left_hand_base_link", "left_joint_6");
+    const std::string fallback_right_hand_base_link =
+        node_->declare_parameter<std::string>("fallback_right_hand_base_link", "right_joint_6");
+
+    const std::vector<std::string> fallback_hand_tip_suffixes =
+        node_->declare_parameter<std::vector<std::string>>(
+            "fallback_hand_tip_suffixes",
+            std::vector<std::string>{
+                "link4_thumb", "link4_index", "link4_middle", "link4_ring", "link4_baby"
+            });
+
+    const bool request_hand_runtime =
+        kin_cfg_.hand_enabled || enable_hand_runtime_when_yaml_disabled;
+
+    std::string hand_left_base_link = kin_cfg_.left_hand_base_link;
+    std::string hand_right_base_link = kin_cfg_.right_hand_base_link;
+    std::vector<std::string> hand_tip_suffixes = kin_cfg_.hand_tip_suffixes;
+
+    if (hand_left_base_link.empty())  hand_left_base_link  = fallback_left_hand_base_link;
+    if (hand_right_base_link.empty()) hand_right_base_link = fallback_right_hand_base_link;
+    if (hand_tip_suffixes.empty())    hand_tip_suffixes    = fallback_hand_tip_suffixes;
+
+    hand_runtime_enabled_ = false;
+
+    if (request_hand_runtime) {
         hand_fk_l_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(
-            urdf_path_, kin_cfg_.left_hand_base_link, kin_cfg_.hand_tip_suffixes);
+            urdf_path_, hand_left_base_link, hand_tip_suffixes);
         hand_fk_r_ = std::make_shared<dualarm_forcecon::HandForwardKinematics>(
-            urdf_path_, kin_cfg_.right_hand_base_link, kin_cfg_.hand_tip_suffixes);
+            urdf_path_, hand_right_base_link, hand_tip_suffixes);
 
         hand_ik_l_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(
-            urdf_path_, kin_cfg_.left_hand_base_link, kin_cfg_.hand_tip_suffixes);
+            urdf_path_, hand_left_base_link, hand_tip_suffixes);
         hand_ik_r_ = std::make_shared<dualarm_forcecon::HandInverseKinematics>(
-            urdf_path_, kin_cfg_.right_hand_base_link, kin_cfg_.hand_tip_suffixes);
+            urdf_path_, hand_right_base_link, hand_tip_suffixes);
+
+        const bool hand_fk_ok =
+            hand_fk_l_ && hand_fk_r_ && hand_fk_l_->ok() && hand_fk_r_->ok();
+        const bool hand_ik_ok =
+            hand_ik_l_ && hand_ik_r_ && hand_ik_l_->ok() && hand_ik_r_->ok();
+
+        hand_runtime_enabled_ = hand_fk_ok && hand_ik_ok;
+
+        if (!hand_runtime_enabled_) {
+            RCLCPP_WARN(
+                node_->get_logger(),
+                "[HandRuntime] requested but FK/IK is not fully OK. "
+                "Hand forward will fall back to joint pass-through; hand inverse/admittance will be disabled. "
+                "urdf=%s Lbase=%s Rbase=%s",
+                urdf_path_.c_str(), hand_left_base_link.c_str(), hand_right_base_link.c_str());
+        } else {
+            RCLCPP_INFO(
+                node_->get_logger(),
+                "[HandRuntime] enabled. YAML hand.enabled=%d Lbase=%s Rbase=%s",
+                static_cast<int>(kin_cfg_.hand_enabled),
+                hand_left_base_link.c_str(), hand_right_base_link.c_str());
+        }
     } else {
         hand_fk_l_.reset();
         hand_fk_r_.reset();
@@ -685,11 +691,31 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     // Timers
     // -------------------------
-    const auto control_period = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::duration<double>(1.0 / command_publish_rate_hz_));
+    const double control_loop_period_ms = node_->declare_parameter<double>(
+        "control_loop_period_ms", 5.0);
+    const double safe_control_loop_period_ms =
+        (std::isfinite(control_loop_period_ms) && control_loop_period_ms > 0.0)
+        ? control_loop_period_ms : 5.0;
 
-    print_timer_   = node_->create_wall_timer(500ms, std::bind(&DualArmForceControl::PrintDualArmStates, this));
-    control_timer_ = node_->create_wall_timer(control_period, std::bind(&DualArmForceControl::ControlLoop, this));
+    print_timer_ = node_->create_wall_timer(
+        500ms, std::bind(&DualArmForceControl::PrintDualArmStates, this));
+
+    control_timer_ = node_->create_wall_timer(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::duration<double, std::milli>(safe_control_loop_period_ms)),
+        std::bind(&DualArmForceControl::ControlLoop, this));
+
+    RCLCPP_INFO(
+        node_->get_logger(),
+        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d hand_runtime_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms",
+        static_cast<int>(startup_fixed_joint_hold_enabled_),
+        static_cast<int>(startup_fixed_hand_hold_enabled_),
+        static_cast<int>(startup_arm_home_hold_enabled_),
+        static_cast<int>(hand_runtime_enabled_),
+        kin_cfg_.profile.c_str(),
+        rby1_arm_max_cmd_step_rad_,
+        rby1_arm_servo_max_cart_step_m_,
+        safe_control_loop_period_ms);
 }
 
 DualArmForceControl::~DualArmForceControl() {}
@@ -709,31 +735,206 @@ void DualArmForceControl::ControlLoop()
         arm_idle_synced_ = false;
     }
 
-    // ------------------------------------------------------------------------
-    // ARM command output filter / slew-rate limiter
-    // ------------------------------------------------------------------------
-    if (!arm_pub_initialized_ || q_l_pub_.size() != q_l_t_.size() || q_r_pub_.size() != q_r_t_.size()) {
-        q_l_pub_ = q_l_c_;
-        q_r_pub_ = q_r_c_;
-        arm_pub_initialized_ = true;
-    }
 
-    if (arm_command_filter_enabled_) {
-        slewLimitVector(q_l_pub_, q_l_t_, arm_command_max_step_rad_);
-        slewLimitVector(q_r_pub_, q_r_t_, arm_command_max_step_rad_);
-    } else {
-        q_l_pub_ = q_l_t_;
-        q_r_pub_ = q_r_t_;
+    // ------------------------------------------------------------------------
+    // RBY1 arm inverse: pose-constrained incremental servo in ControlLoop
+    // ------------------------------------------------------------------------
+    const bool is_rby1_profile = (kin_cfg_.profile.find("rby1") != std::string::npos);
+    if (is_rby1_profile && current_arm_control_mode_ == "inverse") {
+        auto init_rby1_cmd_slew_if_needed = [&]() {
+            if (rby1_arm_cmd_slew_initialized_) return;
+
+            if (startup_arm_home_hold_enabled_ && startup_arm_home_hold_latched_) {
+                q_l_arm_cmd_prev_ = q_l_arm_home_hold_;
+                q_r_arm_cmd_prev_ = q_r_arm_home_hold_;
+            } else {
+                q_l_arm_cmd_prev_ = q_l_c_;
+                q_r_arm_cmd_prev_ = q_r_c_;
+            }
+
+            rby1_arm_cmd_slew_initialized_ = true;
+        };
+
+        auto apply_rby1_arm_cmd_slew = [&](bool is_left, const Eigen::VectorXd& q_des) -> Eigen::VectorXd {
+            init_rby1_cmd_slew_if_needed();
+
+            Eigen::VectorXd& q_prev = is_left ? q_l_arm_cmd_prev_ : q_r_arm_cmd_prev_;
+            const Eigen::VectorXd& q_cur = is_left ? q_l_c_ : q_r_c_;
+
+            if (q_prev.size() != q_des.size()) {
+                q_prev = (q_cur.size() == q_des.size()) ? q_cur : q_des;
+            }
+
+            Eigen::VectorXd q_cmd = q_prev;
+            const int n = std::min<int>(q_cmd.size(), q_des.size());
+            const double step_lim = std::max(1e-5, rby1_arm_max_cmd_step_rad_);
+
+            for (int i = 0; i < n; ++i) {
+                double dq = q_des(i) - q_prev(i);
+                if (!std::isfinite(dq)) dq = 0.0;
+                dq = std::clamp(dq, -step_lim, step_lim);
+                q_cmd(i) = q_prev(i) + dq;
+            }
+
+            q_prev = q_cmd;
+            return q_cmd;
+        };
+
+        if (!rby1_arm_target_active_) {
+            // Important: do NOT follow q_c_ here.
+            // q_t_=q_c_ makes the command follow the falling arm, so gravity
+            // drift reappears before any explicit target command arrives.
+            // Instead, keep publishing the first observed startup home joints.
+            if (startup_arm_home_hold_enabled_ && startup_arm_home_hold_latched_) {
+                q_l_t_ = q_l_arm_home_hold_;
+                q_r_t_ = q_r_arm_home_hold_;
+                q_l_arm_cmd_prev_ = q_l_t_;
+                q_r_arm_cmd_prev_ = q_r_t_;
+                rby1_arm_cmd_slew_initialized_ = true;
+
+                if (delta_arm_base_pose_initialized_) {
+                    target_pose_l_ = delta_arm_base_pose_l_;
+                    target_pose_r_ = delta_arm_base_pose_r_;
+                } else {
+                    target_pose_l_ = current_pose_l_;
+                    target_pose_r_ = current_pose_r_;
+                }
+            } else {
+                // Fallback only during the very first cycles before the first
+                // complete JointState has been latched.
+                q_l_t_ = q_l_c_;
+                q_r_t_ = q_r_c_;
+                q_l_arm_cmd_prev_ = q_l_t_;
+                q_r_arm_cmd_prev_ = q_r_t_;
+                rby1_arm_cmd_slew_initialized_ = true;
+                target_pose_l_ = current_pose_l_;
+                target_pose_r_ = current_pose_r_;
+            }
+        } else {
+            auto run_one_arm = [&](bool is_left) {
+                auto ik = is_left ? arm_ik_l_ : arm_ik_r_;
+                auto& q_cur = is_left ? q_l_c_ : q_r_c_;
+                auto& q_t   = is_left ? q_l_t_ : q_r_t_;
+                auto& cur_p = is_left ? current_pose_l_ : current_pose_r_;
+                auto& des_p = is_left ? target_pose_l_ : target_pose_r_;
+
+                if (!ik || !ik->isOk()) return;
+
+                auto quat_msg_to_eigen = [](const geometry_msgs::msg::Quaternion& qm) {
+                    Eigen::Quaterniond q(qm.w, qm.x, qm.y, qm.z);
+                    if (!std::isfinite(q.w()) || !std::isfinite(q.x()) ||
+                        !std::isfinite(q.y()) || !std::isfinite(q.z()) ||
+                        q.norm() < 1e-12) {
+                        return Eigen::Quaterniond::Identity();
+                    }
+                    q.normalize();
+                    return q;
+                };
+
+                auto quat_angle_error = [&](const geometry_msgs::msg::Quaternion& q_cur_msg,
+                                            const geometry_msgs::msg::Quaternion& q_des_msg) {
+                    Eigen::Quaterniond qc = quat_msg_to_eigen(q_cur_msg);
+                    Eigen::Quaterniond qd = quat_msg_to_eigen(q_des_msg);
+                    const double dot_abs = std::abs(qc.dot(qd));
+                    const double dot_clamped = std::clamp(dot_abs, 0.0, 1.0);
+                    return 2.0 * std::acos(dot_clamped);
+                };
+
+                Eigen::Vector3d p_cur(cur_p.position.x, cur_p.position.y, cur_p.position.z);
+                Eigen::Vector3d p_des(des_p.position.x, des_p.position.y, des_p.position.z);
+
+                if (!std::isfinite(p_cur.x()) || !std::isfinite(p_cur.y()) || !std::isfinite(p_cur.z()) ||
+                    !std::isfinite(p_des.x()) || !std::isfinite(p_des.y()) || !std::isfinite(p_des.z())) {
+                    return;
+                }
+
+                const Eigen::Vector3d dp_to_target = p_des - p_cur;
+                const double dist = dp_to_target.norm();
+                const double rot_err = quat_angle_error(cur_p.orientation, des_p.orientation);
+
+                // This stop condition only prevents unnecessary computation.
+                // q_t is intentionally NOT overwritten with q_cur, because q_cur may
+                // contain gravity drift. The previous command remains published.
+                if (dist < 5e-4 && rot_err < 2e-3) {
+                    return;
+                }
+
+                std::array<double,3> xyz_des{p_des.x(), p_des.y(), p_des.z()};
+                std::array<double,4> q_des_xyzw{
+                    des_p.orientation.x,
+                    des_p.orientation.y,
+                    des_p.orientation.z,
+                    des_p.orientation.w
+                };
+
+                init_rby1_cmd_slew_if_needed();
+                const Eigen::VectorXd& q_seed_eig = is_left ? q_l_arm_cmd_prev_ : q_r_arm_cmd_prev_;
+                std::vector<double> q_seed(q_seed_eig.size(), 0.0);
+                for (int i = 0; i < q_seed_eig.size(); ++i) {
+                    q_seed[static_cast<size_t>(i)] = q_seed_eig(i);
+                }
+
+                std::vector<double> q_sol;
+
+                // RBY1 v35:
+                // Do NOT run a strict full iterative pose IK here.
+                // The previous version could fail every tick, so q_t stayed at the
+                // home hold command even though TAR changed. Instead, use one-step
+                // resolved-rate pose DLS from the previous published command.
+                // This always produces a small continuous joint update toward
+                // target_pose while keeping the home orientation when orientation
+                // delta is zero.
+                const bool ok = ik->stepTowardPoseDLS(
+                    q_seed, xyz_des, q_des_xyzw, "base", q_sol,
+                    std::max(1e-5, rby1_arm_servo_max_cart_step_m_), // cart_step_limit_m
+                    1.2e-2,                                         // rot_step_limit_rad
+                    1.0,                                            // pos_weight
+                    0.25,                                           // rot_weight
+                    6e-2,                                           // lambda
+                    1.0,                                            // alpha
+                    std::max(1e-5, rby1_arm_max_cmd_step_rad_),      // max_joint_step_rad
+                    1e-5);                                          // numerical_eps
+
+                if (ok && q_sol.size() >= static_cast<size_t>(q_t.size())) {
+                    Eigen::VectorXd q_des(q_t.size());
+                    for (int i = 0; i < q_t.size(); ++i) {
+                        q_des(i) = q_sol[static_cast<size_t>(i)];
+                    }
+                    q_t = apply_rby1_arm_cmd_slew(is_left, q_des);
+                } else {
+                    // Keep the previous command. Do not fall back to q_cur.
+                    RCLCPP_WARN_THROTTLE(
+                        node_->get_logger(), *node_->get_clock(), 1000,
+                        "[IK][%s][RBY1-servo-step] resolved-rate pose step failed. Hold previous command. "
+                        "cur=(%.4f %.4f %.4f) des=(%.4f %.4f %.4f) dist=%.4f rot_err=%.4f rad",
+                        is_left ? "L" : "R",
+                        p_cur.x(), p_cur.y(), p_cur.z(),
+                        p_des.x(), p_des.y(), p_des.z(),
+                        dist,
+                        rot_err);
+                }
+            };
+
+            run_one_arm(true);
+            run_one_arm(false);
+        }
     }
 
     // ------------------------------------------------------------------------
     // HAND idle sync
     // ------------------------------------------------------------------------
     if (current_hand_control_mode_ == "idle" && !hand_idle_synced_) {
-        q_l_h_motion_t_ = q_l_h_c_;
-        q_r_h_motion_t_ = q_r_h_c_;
-        q_l_h_t_ = q_l_h_c_;
-        q_r_h_t_ = q_r_h_c_;
+        if (startup_fixed_hand_hold_enabled_ && startup_fixed_hand_hold_latched_) {
+            q_l_h_motion_t_ = q_l_h_fixed_;
+            q_r_h_motion_t_ = q_r_h_fixed_;
+            q_l_h_t_ = q_l_h_fixed_;
+            q_r_h_t_ = q_r_h_fixed_;
+        } else {
+            q_l_h_motion_t_ = q_l_h_c_;
+            q_r_h_motion_t_ = q_r_h_c_;
+            q_l_h_t_ = q_l_h_c_;
+            q_r_h_t_ = q_r_h_c_;
+        }
 
         x_l_hand_d_   = x_l_hand_c_;
         x_r_hand_d_   = x_r_hand_c_;
@@ -753,7 +954,19 @@ void DualArmForceControl::ControlLoop()
     // ------------------------------------------------------------------------
     // HAND unified forward / inverse admittance pipeline
     // ------------------------------------------------------------------------
-    if (!kin_cfg_.hand_enabled || current_hand_control_mode_ == "idle") {
+    if (!hand_runtime_enabled_) {
+        // No valid hand FK/IK runtime is available. Keep only safe joint-space
+        // pass-through for forward mode. In this fallback mode, force/admittance
+        // correction and hand inverse are intentionally disabled because they need
+        // fingertip FK/IK.
+        f_l_hand_t_.setZero();
+        f_r_hand_t_.setZero();
+
+        if (current_hand_control_mode_ == "forward") {
+            q_l_h_t_ = q_l_h_motion_t_;
+            q_r_h_t_ = q_r_h_motion_t_;
+        }
+    } else if (current_hand_control_mode_ == "idle") {
         f_l_hand_t_.setZero();
         f_r_hand_t_.setZero();
     } else {
@@ -862,95 +1075,105 @@ void DualArmForceControl::ControlLoop()
     // ------------------------------------------------------------------------
     // Publish consolidated joint command
     // ------------------------------------------------------------------------
+    auto is_wheel_joint = [](const std::string& n) -> bool {
+        return n == "left_wheel" || n == "right_wheel";
+    };
+    auto has_active_wheel_velocity_command = [&]() -> bool {
+        if (aux_joint_velocity_command_.empty()) return false;
+        if (aux_joint_velocity_timeout_sec_ <= 0.0) return true;
+        if (aux_joint_velocity_stamp_.nanoseconds() == 0) return false;
+
+        const double age_sec = (node_->now() - aux_joint_velocity_stamp_).seconds();
+        return std::isfinite(age_sec) && age_sec <= aux_joint_velocity_timeout_sec_;
+    };
+
+    const bool active_wheel_velocity_command = has_active_wheel_velocity_command();
+
     sensor_msgs::msg::JointState cmd;
     cmd.header.stamp = node_->now();
+    cmd.position.reserve(joint_names_.size());
 
-    if (command_publish_mode_ == "arm_only") {
-        // Partial arm-only mode:
-        //   Publish only left/right arm joints. This is clean ROS-wise, but some Isaac
-        //   Action Graph articulation setups do not apply partial JointState commands.
-        const int nl = std::min<int>(kin_cfg_.left_arm_joint_names.size(), q_l_pub_.size());
-        const int nr = std::min<int>(kin_cfg_.right_arm_joint_names.size(), q_r_pub_.size());
-
-        cmd.name.reserve(static_cast<std::size_t>(nl + nr));
-        cmd.position.reserve(static_cast<std::size_t>(nl + nr));
-
-        for (int i = 0; i < nl; ++i) {
-            cmd.name.push_back(kin_cfg_.left_arm_joint_names[static_cast<std::size_t>(i)]);
-            cmd.position.push_back(q_l_pub_(i));
-        }
-        for (int i = 0; i < nr; ++i) {
-            cmd.name.push_back(kin_cfg_.right_arm_joint_names[static_cast<std::size_t>(i)]);
-            cmd.position.push_back(q_r_pub_(i));
-        }
-    } else {
-        // Full-order modes:
-        //   Preserve the exact incoming Isaac JointState name order. This keeps the Isaac
-        //   Action Graph behavior identical to the original full-command setup.
-        //
-        //   full:
-        //     non-controlled joints follow latest observed state.
-        //
-        //   full_hold_non_arm:
-        //     non-arm joints are frozen at the first observed snapshot. This is preferred
-        //     for RBY1 arm-only tests because torso/wheel/head stay fixed while arms move.
-        if (command_publish_mode_ == "full_hold_non_arm" && !non_arm_hold_initialized_ && !joint_names_.empty()) {
-            hold_joint_position_.clear();
-            for (const auto& n : joint_names_) {
-                const auto it = last_joint_position_.find(n);
-                if (it != last_joint_position_.end()) {
-                    hold_joint_position_[n] = it->second;
-                } else {
-                    hold_joint_position_[n] = 0.0;
-                }
-            }
-            non_arm_hold_initialized_ = true;
-            RCLCPP_INFO(node_->get_logger(),
-                        "[CommandPublish] latched non-arm hold snapshot for %zu joints.",
-                        hold_joint_position_.size());
+    for (const auto& n : joint_names_) {
+        if (active_wheel_velocity_command && is_wheel_joint(n)) {
+            continue;
         }
 
-        cmd.name = joint_names_;
-        cmd.position.reserve(joint_names_.size());
+        const int li = kin_cfg_.findLeftArmJointIndex(n);
+        const int ri = kin_cfg_.findRightArmJointIndex(n);
 
-        for (const auto& n : joint_names_) {
-            const int li = kin_cfg_.findLeftArmJointIndex(n);
-            const int ri = kin_cfg_.findRightArmJointIndex(n);
+        cmd.name.push_back(n);
 
-            if (li >= 0 && li < q_l_pub_.size()) {
-                cmd.position.push_back(q_l_pub_(li));
-                continue;
-            }
-            if (ri >= 0 && ri < q_r_pub_.size()) {
-                cmd.position.push_back(q_r_pub_(ri));
-                continue;
-            }
+        if (li >= 0 && li < q_l_t_.size()) {
+            cmd.position.push_back(q_l_t_(li));
+            continue;
+        }
+        if (ri >= 0 && ri < q_r_t_.size()) {
+            cmd.position.push_back(q_r_t_(ri));
+            continue;
+        }
 
-            if (command_publish_mode_ != "full_hold_non_arm" && kin_cfg_.hand_enabled) {
-                auto hj = dualarm_forcecon::kin::parseHandJointName(n);
-                if (hj.ok) {
-                    const int idx = hj.finger_id * 4 + hj.joint_id;
-                    if (idx >= 0 && idx < 20) {
+        // Hand joints must be checked before generic startup fixed-joint hold.
+        // In the RBY1 profile, finger joints are also latched as fixed joints for
+        // safety, but hand forward mode should override that fixed hold and publish
+        // the Manus/forward joint target.
+        {
+            auto hj = dualarm_forcecon::kin::parseHandJointName(n);
+            if (hj.ok) {
+                const int idx = hj.finger_id * 4 + hj.joint_id;
+                if (idx >= 0 && idx < 20) {
+                    if (hand_runtime_enabled_ ||
+                        current_hand_control_mode_ == "forward" ||
+                        current_hand_control_mode_ == "inverse") {
                         if (hj.is_left) cmd.position.push_back(q_l_h_t_(idx));
                         else            cmd.position.push_back(q_r_h_t_(idx));
                         continue;
                     }
+
+                    if (startup_fixed_hand_hold_enabled_ && startup_fixed_hand_hold_latched_) {
+                        if (hj.is_left) cmd.position.push_back(q_l_h_fixed_(idx));
+                        else            cmd.position.push_back(q_r_h_fixed_(idx));
+                        continue;
+                    }
                 }
             }
-
-            if (command_publish_mode_ == "full_hold_non_arm") {
-                const auto it_hold = hold_joint_position_.find(n);
-                if (it_hold != hold_joint_position_.end()) {
-                    cmd.position.push_back(it_hold->second);
-                    continue;
-                }
-            }
-
-            const auto it = last_joint_position_.find(n);
-            cmd.position.push_back(it != last_joint_position_.end() ? it->second : 0.0);
         }
+
+        const auto it_aux_pos = aux_joint_position_command_.find(n);
+        if (it_aux_pos != aux_joint_position_command_.end()) {
+            cmd.position.push_back(it_aux_pos->second);
+            continue;
+        }
+
+        if (startup_fixed_joint_hold_enabled_ && startup_fixed_joint_hold_latched_) {
+            const auto it_fixed = startup_fixed_joint_position_.find(n);
+            if (it_fixed != startup_fixed_joint_position_.end()) {
+                cmd.position.push_back(it_fixed->second);
+                continue;
+            }
+        }
+
+        const auto it = last_joint_position_.find(n);
+        cmd.position.push_back(it != last_joint_position_.end() ? it->second : 0.0);
     }
 
     PublishHandForceMonitor();
     joint_command_pub_->publish(cmd);
+
+    if (active_wheel_velocity_command) {
+        sensor_msgs::msg::JointState wheel_cmd;
+        wheel_cmd.header.stamp = cmd.header.stamp;
+
+        for (const auto& n : joint_names_) {
+            if (!is_wheel_joint(n)) continue;
+
+            const auto it_vel = aux_joint_velocity_command_.find(n);
+            wheel_cmd.name.push_back(n);
+            wheel_cmd.velocity.push_back(
+                it_vel != aux_joint_velocity_command_.end() ? it_vel->second : 0.0);
+        }
+
+        if (!wheel_cmd.name.empty()) {
+            joint_command_pub_->publish(wheel_cmd);
+        }
+    }
 }

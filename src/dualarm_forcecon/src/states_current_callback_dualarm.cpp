@@ -101,6 +101,13 @@ inline std::vector<double> compress20to15(const Eigen::VectorXd& qh)
     return h15;
 }
 
+inline std::vector<double> eigenToStdVec(const Eigen::VectorXd& q)
+{
+    std::vector<double> out(static_cast<std::size_t>(q.size()), 0.0);
+    for (int i = 0; i < q.size(); ++i) out[static_cast<std::size_t>(i)] = q(i);
+    return out;
+}
+
 } // namespace
 
 // --------------------
@@ -109,114 +116,106 @@ inline std::vector<double> compress20to15(const Eigen::VectorXd& qh)
 void DualArmForceControl::JointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
 {
     if (!msg) return;
-
-    const bool first_joint_state = joint_names_.empty();
-
-    if (first_joint_state) {
+    if (joint_names_.empty()) {
         joint_names_ = msg->name;
+        is_initialized_ = true;
     }
 
-    const std::size_t n_msg = std::min(msg->name.size(), msg->position.size());
+    auto starts_with = [](const std::string& s, const std::string& prefix) -> bool {
+        return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+    };
 
-    for (std::size_t i = 0; i < n_msg; ++i) {
+    auto is_rby1_fixed_joint_name = [&](const std::string& n) -> bool {
+        if (n == "left_wheel" || n == "right_wheel") return true;
+        if (starts_with(n, "torso_")) return true;
+        if (starts_with(n, "head_")) return true;
+        auto hj = dualarm_forcecon::kin::parseHandJointName(n);
+        return hj.ok;
+    };
+
+    // Used only for the first RBY1 startup arm-home latch.
+    // We latch only when one JointState message contains every configured arm joint.
+    std::vector<bool> seen_left_arm(static_cast<std::size_t>(q_l_c_.size()), false);
+    std::vector<bool> seen_right_arm(static_cast<std::size_t>(q_r_c_.size()), false);
+
+    const size_t n_pos = std::min(msg->name.size(), msg->position.size());
+    for (size_t i = 0; i < n_pos; ++i) {
         const std::string& n = msg->name[i];
         const double p = msg->position[i];
-
-        if (!std::isfinite(p)) {
-            continue;
-        }
-
-        // Keep latest state for every Isaac joint.
-        // This is required for full/full_hold_non_arm publishing.
         last_joint_position_[n] = p;
 
-        // --------------------------------------------------------------------
-        // Arm joints: use YAML-configured robot profile names.
-        // This is required for RBY1 because its joints are:
-        //   left_arm_0~6, right_arm_0~6
-        // while the old Doosan-only code used:
-        //   left_joint_1~6, right_joint_1~6
-        // --------------------------------------------------------------------
+        if (startup_fixed_joint_hold_enabled_ && !startup_fixed_joint_hold_latched_) {
+            if (is_rby1_fixed_joint_name(n)) {
+                startup_fixed_joint_position_[n] = p;
+            }
+        }
+
         const int li = kin_cfg_.findLeftArmJointIndex(n);
+        const int ri = kin_cfg_.findRightArmJointIndex(n);
+
         if (li >= 0 && li < q_l_c_.size()) {
             q_l_c_(li) = p;
+            if (static_cast<std::size_t>(li) < seen_left_arm.size()) {
+                seen_left_arm[static_cast<std::size_t>(li)] = true;
+            }
             continue;
         }
-
-        const int ri = kin_cfg_.findRightArmJointIndex(n);
         if (ri >= 0 && ri < q_r_c_.size()) {
             q_r_c_(ri) = p;
+            if (static_cast<std::size_t>(ri) < seen_right_arm.size()) {
+                seen_right_arm[static_cast<std::size_t>(ri)] = true;
+            }
             continue;
         }
 
-        // --------------------------------------------------------------------
-        // Hand joints: keep existing parser behavior.
-        // If hand is disabled for the selected robot profile, these values are
-        // still harmless, but they are not used by the control pipeline.
-        // --------------------------------------------------------------------
+        const bool should_track_hand_state = kin_cfg_.hand_enabled || startup_fixed_hand_hold_enabled_;
+        if (!should_track_hand_state) continue;
+
         auto hj = dualarm_forcecon::kin::parseHandJointName(n);
-        if (!hj.ok) {
-            continue;
-        }
+        if (!hj.ok) continue;
 
         const int idx = hj.finger_id * 4 + hj.joint_id;  // 0..19
-        if (idx < 0 || idx >= 20) {
-            continue;
-        }
+        if (idx < 0 || idx >= 20) continue;
 
-        if (hj.is_left) {
-            if (idx < q_l_h_c_.size()) q_l_h_c_(idx) = p;
-        } else {
-            if (idx < q_r_h_c_.size()) q_r_h_c_(idx) = p;
+        if (hj.is_left) q_l_h_c_(idx) = p;
+        else            q_r_h_c_(idx) = p;
+    }
+
+    if (startup_fixed_hand_hold_enabled_ && !startup_fixed_hand_hold_latched_) {
+        q_l_h_fixed_ = q_l_h_c_;
+        q_r_h_fixed_ = q_r_h_c_;
+        startup_fixed_hand_hold_latched_ = true;
+    }
+
+    if (startup_arm_home_hold_enabled_ && !startup_arm_home_hold_latched_) {
+        const bool left_ready =
+            !seen_left_arm.empty() &&
+            std::all_of(seen_left_arm.begin(), seen_left_arm.end(), [](bool v){ return v; });
+        const bool right_ready =
+            !seen_right_arm.empty() &&
+            std::all_of(seen_right_arm.begin(), seen_right_arm.end(), [](bool v){ return v; });
+
+        if (left_ready && right_ready) {
+            q_l_arm_home_hold_ = q_l_c_;
+            q_r_arm_home_hold_ = q_r_c_;
+            q_l_t_ = q_l_arm_home_hold_;
+            q_r_t_ = q_r_arm_home_hold_;
+            startup_arm_home_hold_latched_ = true;
+
+            RCLCPP_INFO(
+                node_->get_logger(),
+                "[StartupArmHomeHold] latched startup arm home joints | L_dof=%d R_dof=%d",
+                static_cast<int>(q_l_arm_home_hold_.size()),
+                static_cast<int>(q_r_arm_home_hold_.size()));
         }
     }
 
-    // ------------------------------------------------------------------------
-    // First JointState latch:
-    // The first incoming Isaac joint state is the USD default/home pose.
-    // We must initialize target and publish buffers from this pose.
-    //
-    // Without this latch, q_l_t_/q_r_t_ stay at constructor zeros and the first
-    // command can pull RBY1 away from its USD home pose.
-    // ------------------------------------------------------------------------
-    if (first_joint_state) {
-        q_l_t_ = q_l_c_;
-        q_r_t_ = q_r_c_;
-        q_l_pub_ = q_l_c_;
-        q_r_pub_ = q_r_c_;
-
-        q_l_h_t_ = q_l_h_c_;
-        q_r_h_t_ = q_r_h_c_;
-        q_l_h_motion_t_ = q_l_h_c_;
-        q_r_h_motion_t_ = q_r_h_c_;
-
-        arm_pub_initialized_ = true;
-        arm_idle_synced_ = true;
-        hand_idle_synced_ = true;
-
-        // In full_hold_non_arm mode, latch all non-arm joints at the USD default
-        // home pose. Arm joints will be overwritten by q_l_pub_/q_r_pub_ in
-        // ControlLoop(), while torso/wheel/head/hand stay fixed at this snapshot.
-        hold_joint_position_.clear();
-        for (const auto& n : joint_names_) {
-            const auto it = last_joint_position_.find(n);
-            hold_joint_position_[n] = (it != last_joint_position_.end()) ? it->second : 0.0;
-        }
-        non_arm_hold_initialized_ = !hold_joint_position_.empty();
-
-        is_initialized_ = true;
-
-        if (node_) {
-            RCLCPP_INFO(
-                node_->get_logger(),
-                "[JointStateInit] latched USD home pose: total_joints=%zu Ldof=%ld Rdof=%ld mode=%s",
-                joint_names_.size(),
-                static_cast<long>(q_l_c_.size()),
-                static_cast<long>(q_r_c_.size()),
-                command_publish_mode_.c_str());
-        }
-    } else {
-        is_initialized_ = true;
+    if (startup_fixed_joint_hold_enabled_ && !startup_fixed_joint_hold_latched_) {
+        startup_fixed_joint_hold_latched_ = true;
+        RCLCPP_INFO(
+            node_->get_logger(),
+            "[StartupHold] latched %zu startup fixed joints (wheel/torso/head/fingers)",
+            startup_fixed_joint_position_.size());
     }
 }
 
@@ -319,15 +318,8 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
     static bool s_tar_l_init = false;
     static bool s_tar_r_init = false;
 
-    const int n_l = static_cast<int>(q_l_c_.size());
-    const int n_r = static_cast<int>(q_r_c_.size());
-
-    if (n_l <= 0 || n_r <= 0) return;
-
-    std::vector<double> jl(static_cast<std::size_t>(n_l), 0.0);
-    std::vector<double> jr(static_cast<std::size_t>(n_r), 0.0);
-    for (int i = 0; i < n_l; ++i) jl[static_cast<std::size_t>(i)] = q_l_c_(i);
-    for (int i = 0; i < n_r; ++i) jr[static_cast<std::size_t>(i)] = q_r_c_(i);
+    const std::vector<double> jl = eigenToStdVec(q_l_c_);
+    const std::vector<double> jr = eigenToStdVec(q_r_c_);
 
     geometry_msgs::msg::Pose cur_l_fk = arm_fk_->getLeftFK(jl);
     geometry_msgs::msg::Pose cur_r_fk = arm_fk_->getRightFK(jr);
@@ -360,10 +352,8 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
         s_tar_r_init = true;
     }
     else if (current_arm_control_mode_ == "forward") {
-        std::vector<double> jl_t(static_cast<std::size_t>(n_l), 0.0);
-        std::vector<double> jr_t(static_cast<std::size_t>(n_r), 0.0);
-        for (int i = 0; i < n_l; ++i) jl_t[static_cast<std::size_t>(i)] = q_l_t_(i);
-        for (int i = 0; i < n_r; ++i) jr_t[static_cast<std::size_t>(i)] = q_r_t_(i);
+        const std::vector<double> jl_t = eigenToStdVec(q_l_t_);
+        const std::vector<double> jr_t = eigenToStdVec(q_r_t_);
 
         geometry_msgs::msg::Pose tar_l_fk = arm_fk_->getLeftFK(jl_t);
         geometry_msgs::msg::Pose tar_r_fk = arm_fk_->getRightFK(jr_t);
@@ -371,7 +361,22 @@ void DualArmForceControl::ArmPositionCallback(const sensor_msgs::msg::JointState
         apply_pose_deadband(target_pose_l_, tar_l_fk, s_tar_l_init);
         apply_pose_deadband(target_pose_r_, tar_r_fk, s_tar_r_init);
     }
-    // arm inverse 모드에서는 target_pose_* 를 TargetArmPositionCallback / DeltaArmPositionCallback 이 관리
+    else if (current_arm_control_mode_ == "inverse") {
+        const bool is_rby1 = (kin_cfg_.profile.find("rby1") != std::string::npos);
+        if (is_rby1 && !rby1_arm_target_active_) {
+            // Before the first explicit target, monitor the same home pose
+            // used by /delta_arm_cartesian_pose. Do not chase current_pose_*;
+            // otherwise the displayed target follows gravity drift.
+            if (delta_arm_base_pose_initialized_) {
+                target_pose_l_ = delta_arm_base_pose_l_;
+                target_pose_r_ = delta_arm_base_pose_r_;
+            } else {
+                target_pose_l_ = current_pose_l_;
+                target_pose_r_ = current_pose_r_;
+            }
+        }
+        // Doosan inverse keeps target_pose_* managed by callbacks as before.
+    }
 }
 
 // --------------------
@@ -384,6 +389,7 @@ void DualArmForceControl::HandPositionCallback(const sensor_msgs::msg::JointStat
 {
     (void)msg;
     if (!is_initialized_) return;
+    if (!hand_runtime_enabled_) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
 
     constexpr double kFingerPosDeadbandM = 1e-6;
@@ -564,6 +570,12 @@ void DualArmForceControl::ControlModeCallback(
     const std::string new_arm_mode  = to_lower(req->arm_mode);
     const std::string new_hand_mode = to_lower(req->hand_mode);
 
+    // v30 fast hand-forward patch:
+    // Do not force hand_mode to idle when kin_cfg_.hand_enabled is false.
+    // RBY1 uses hand.enabled=false only to disable Cartesian hand FK/IK and
+    // admittance. Joint-space hand forward control is still allowed and is
+    // passed directly to /isaac_joint_command.
+
     auto valid_arm_mode = [](const std::string& m) -> bool {
         return (m == "idle" || m == "forward" || m == "inverse");
     };
@@ -650,14 +662,34 @@ void DualArmForceControl::ControlModeCallback(
     arm_idle_synced_ = false;
 
     if (current_arm_control_mode_ == "inverse") {
-        const int n_l = static_cast<int>(std::min(q_l_t_.size(), q_l_c_.size()));
-        const int n_r = static_cast<int>(std::min(q_r_t_.size(), q_r_c_.size()));
+        const bool is_rby1 = (kin_cfg_.profile.find("rby1") != std::string::npos);
 
-        for (int i = 0; i < n_l; ++i) q_l_t_(i) = q_l_c_(i);
-        for (int i = 0; i < n_r; ++i) q_r_t_(i) = q_r_c_(i);
+        if (is_rby1 && startup_arm_home_hold_enabled_ && startup_arm_home_hold_latched_) {
+            q_l_t_ = q_l_arm_home_hold_;
+            q_r_t_ = q_r_arm_home_hold_;
+            q_l_arm_cmd_prev_ = q_l_t_;
+            q_r_arm_cmd_prev_ = q_r_t_;
+            rby1_arm_cmd_slew_initialized_ = true;
+        } else {
+            q_l_t_ = q_l_c_;
+            q_r_t_ = q_r_c_;
+            q_l_arm_cmd_prev_ = q_l_t_;
+            q_r_arm_cmd_prev_ = q_r_t_;
+            rby1_arm_cmd_slew_initialized_ = true;
+        }
 
-        target_pose_l_ = current_pose_l_;
-        target_pose_r_ = current_pose_r_;
+        if (is_rby1 && delta_arm_base_pose_initialized_) {
+            target_pose_l_ = delta_arm_base_pose_l_;
+            target_pose_r_ = delta_arm_base_pose_r_;
+        } else {
+            target_pose_l_ = current_pose_l_;
+            target_pose_r_ = current_pose_r_;
+        }
+
+        rby1_arm_target_active_ = false;  // armed only when an explicit arm target arrives
+    } else {
+        rby1_arm_target_active_ = false;
+        rby1_arm_cmd_slew_initialized_ = false;
     }
 
     f_l_t_.setZero();

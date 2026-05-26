@@ -39,4 +39,4 @@ robot_kinematics:
       - right_arm_6
 
   hand:
-    enabled: false
+    enabled: true

@@ -72,6 +72,13 @@ inline std::vector<double> compress20to15(const Eigen::VectorXd& qh)
     return h15;
 }
 
+inline std::vector<double> eigenToStdVec(const Eigen::VectorXd& q)
+{
+    std::vector<double> out(static_cast<std::size_t>(q.size()), 0.0);
+    for (int i = 0; i < q.size(); ++i) out[static_cast<std::size_t>(i)] = q(i);
+    return out;
+}
+
 inline void updatePointSetFromMatrix(const Eigen::Matrix<double,5,3>& M,
                                      geometry_msgs::msg::Point& thumb,
                                      geometry_msgs::msg::Point& index,
@@ -84,6 +91,93 @@ inline void updatePointSetFromMatrix(const Eigen::Matrix<double,5,3>& M,
     matrixRowToPoint(M, 2, middle);
     matrixRowToPoint(M, 3, ring);
     matrixRowToPoint(M, 4, baby);
+}
+
+
+inline std::string toLowerCopy(std::string s)
+{
+    for (auto &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+inline double angleToRadForIK(double a, const std::string& angle_unit)
+{
+    const std::string unit = toLowerCopy(angle_unit);
+    if (unit == "deg") return a * M_PI / 180.0;
+    if (unit == "auto" && std::fabs(a) > 3.5) return a * M_PI / 180.0;
+    return a;
+}
+
+inline geometry_msgs::msg::Quaternion eigenQuatToMsg(Eigen::Quaterniond q)
+{
+    geometry_msgs::msg::Quaternion out;
+    if (!std::isfinite(q.w()) || !std::isfinite(q.x()) ||
+        !std::isfinite(q.y()) || !std::isfinite(q.z()) ||
+        q.norm() < 1e-12) {
+        out.x = 0.0;
+        out.y = 0.0;
+        out.z = 0.0;
+        out.w = 1.0;
+        return out;
+    }
+
+    q.normalize();
+    out.x = q.x();
+    out.y = q.y();
+    out.z = q.z();
+    out.w = q.w();
+    return out;
+}
+
+inline Eigen::Quaterniond msgQuatToEigen(const geometry_msgs::msg::Quaternion& qmsg)
+{
+    Eigen::Quaterniond q(qmsg.w, qmsg.x, qmsg.y, qmsg.z);
+    if (!std::isfinite(q.w()) || !std::isfinite(q.x()) ||
+        !std::isfinite(q.y()) || !std::isfinite(q.z()) ||
+        q.norm() < 1e-12) {
+        return Eigen::Quaterniond::Identity();
+    }
+    q.normalize();
+    return q;
+}
+
+inline geometry_msgs::msg::Quaternion eulerToQuatMsg(double ex,
+                                                     double ey,
+                                                     double ez,
+                                                     const std::string& euler_conv,
+                                                     const std::string& angle_unit)
+{
+    const double a0 = angleToRadForIK(ex, angle_unit);
+    const double a1 = angleToRadForIK(ey, angle_unit);
+    const double a2 = angleToRadForIK(ez, angle_unit);
+
+    Eigen::AngleAxisd Rx(a0, Eigen::Vector3d::UnitX());
+    Eigen::AngleAxisd Ry(a1, Eigen::Vector3d::UnitY());
+    Eigen::AngleAxisd Rz(a2, Eigen::Vector3d::UnitZ());
+
+    Eigen::Quaterniond q;
+    const std::string conv = toLowerCopy(euler_conv);
+    if (conv == "zyx" || conv == "rzyx") q = Rz * Ry * Rx;
+    else                                 q = Rx * Ry * Rz;  // existing project convention
+
+    return eigenQuatToMsg(q);
+}
+
+inline geometry_msgs::msg::Quaternion composeDeltaOrientation(
+    const geometry_msgs::msg::Quaternion& base_q_msg,
+    const std::array<double,3>& delta_eul,
+    const std::string& euler_conv,
+    const std::string& angle_unit)
+{
+    const Eigen::Quaterniond q_base = msgQuatToEigen(base_q_msg);
+
+    const geometry_msgs::msg::Quaternion dq_msg =
+        eulerToQuatMsg(delta_eul[0], delta_eul[1], delta_eul[2], euler_conv, angle_unit);
+    const Eigen::Quaterniond q_delta = msgQuatToEigen(dq_msg);
+
+    // Local delta convention: target orientation = home orientation * delta.
+    // If delta is zero, this exactly preserves the latched home orientation.
+    return eigenQuatToMsg(q_base * q_delta);
 }
 
 } // namespace
@@ -100,6 +194,47 @@ void DualArmForceControl::TargetArmPositionCallback(
     if (!arm_ik_l_ || !arm_ik_r_) return;
 
     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+    const bool is_rby1 = (kin_cfg_.profile.find("rby1") != std::string::npos);
+
+    if (is_rby1) {
+        auto finite3 = [](const std::array<double,3>& v) {
+            return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+        };
+
+        std::array<double,3> l_xyz_raw{msg->data[0], msg->data[1], msg->data[2]};
+        std::array<double,3> l_eul    {msg->data[3], msg->data[4], msg->data[5]};
+        std::array<double,3> r_xyz_raw{msg->data[6], msg->data[7], msg->data[8]};
+        std::array<double,3> r_eul    {msg->data[9], msg->data[10], msg->data[11]};
+
+        if (!finite3(l_xyz_raw) || !finite3(l_eul) || !finite3(r_xyz_raw) || !finite3(r_eul)) {
+            RCLCPP_WARN(logger, "[TargetArmPositionCallback][RBY1] Non-finite input detected. Ignore.");
+            return;
+        }
+
+        target_pose_l_.position.x = l_xyz_raw[0];
+        target_pose_l_.position.y = l_xyz_raw[1];
+        target_pose_l_.position.z = l_xyz_raw[2];
+
+        target_pose_r_.position.x = r_xyz_raw[0];
+        target_pose_r_.position.y = r_xyz_raw[1];
+        target_pose_r_.position.z = r_xyz_raw[2];
+
+        // RBY1 v32: absolute Cartesian target keeps the requested orientation.
+        // The ControlLoop now uses pose-constrained DLS, so orientation no longer
+        // has to be ignored to avoid the previous strict KDL full-pose failures.
+        target_pose_l_.orientation = eulerToQuatMsg(
+            l_eul[0], l_eul[1], l_eul[2], ik_euler_conv_, ik_angle_unit_);
+        target_pose_r_.orientation = eulerToQuatMsg(
+            r_eul[0], r_eul[1], r_eul[2], ik_euler_conv_, ik_angle_unit_);
+
+        rby1_arm_target_active_ = true;
+
+        // v30 fast-teleop patch: generate and publish one command immediately
+        // instead of waiting for the next timer tick. This reduces perceived
+        // delay for Manus/glove-driven teleoperation.
+        ControlLoop();
+        return;
+    }
 
     std::array<double,3> l_xyz_raw{msg->data[0], msg->data[1], msg->data[2]};
     std::array<double,3> l_eul    {msg->data[3], msg->data[4], msg->data[5]};
@@ -140,19 +275,8 @@ void DualArmForceControl::TargetArmPositionCallback(
         r_offset_applied = true;
     }
 
-    const int n_l = static_cast<int>(q_l_c_.size());
-    const int n_r = static_cast<int>(q_r_c_.size());
-
-    if (n_l <= 0 || n_r <= 0) {
-        RCLCPP_WARN(logger, "[TargetArmPositionCallback] invalid arm state size. L=%d R=%d", n_l, n_r);
-        return;
-    }
-
-    std::vector<double> ql(static_cast<std::size_t>(n_l), 0.0);
-    std::vector<double> qr(static_cast<std::size_t>(n_r), 0.0);
-
-    for (int i = 0; i < n_l; ++i) ql[static_cast<std::size_t>(i)] = q_l_c_(i);
-    for (int i = 0; i < n_r; ++i) qr[static_cast<std::size_t>(i)] = q_r_c_(i);
+    const std::vector<double> ql = eigenToStdVec(q_l_c_);
+    const std::vector<double> qr = eigenToStdVec(q_r_c_);
 
     std::vector<double> rl, rr;
     bool l_ok = arm_ik_l_->solveIK(
@@ -161,82 +285,18 @@ void DualArmForceControl::TargetArmPositionCallback(
     bool r_ok = arm_ik_r_->solveIK(
         qr, r_xyz_ik, r_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rr);
 
-    // ----------------------------------------------------------------------
-    // RBY1-safe fallback:
-    // If strict full-pose KDL IK fails, use weighted 6D DLS fallback.
-    // Translation is tracked strongly while the requested orientation is held
-    // softly around the startup/delta-derived target orientation.
-    // ----------------------------------------------------------------------
-    constexpr int    kDlsMaxIters       = 320;
-    constexpr double kDlsPosTolM        = 5.0e-4;
-    constexpr double kDlsRotTolRad      = 1.0e-2;
-    constexpr double kDlsLambda         = 2.0e-2;
-    constexpr double kDlsAlpha          = 0.30;
-    constexpr double kDlsMaxJointStep   = 1.5e-2;
-    constexpr double kDlsNumericalEps   = 1.0e-5;
-    constexpr double kDlsPosWeight      = 1.0;
-    constexpr double kDlsRotWeight      = 3.0;
-    constexpr double kDlsPostureGain    = 0.08;
-    constexpr double kDlsMaxCartStepM   = 0.002;
-    constexpr double kDlsMaxRotStepRad  = 0.03;
-
-    bool l_used_dls = false;
-    bool r_used_dls = false;
-
-    if (!(l_ok && static_cast<int>(rl.size()) >= n_l)) {
-        std::vector<double> rl_dls;
-        const bool l_dls_ok = arm_ik_l_->solveIKOrientationHoldDLS(
-            ql, l_xyz_ik, l_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rl_dls,
-            kDlsMaxIters, kDlsPosTolM, kDlsRotTolRad, kDlsLambda, kDlsAlpha,
-            kDlsMaxJointStep, kDlsNumericalEps, kDlsPosWeight, kDlsRotWeight,
-            ql, kDlsPostureGain, kDlsMaxCartStepM, kDlsMaxRotStepRad);
-
-        if (l_dls_ok && static_cast<int>(rl_dls.size()) >= n_l) {
-            rl = rl_dls;
-            l_ok = true;
-            l_used_dls = true;
-        }
-    }
-
-    if (!(r_ok && static_cast<int>(rr.size()) >= n_r)) {
-        std::vector<double> rr_dls;
-        const bool r_dls_ok = arm_ik_r_->solveIKOrientationHoldDLS(
-            qr, r_xyz_ik, r_eul, ik_targets_frame_, ik_euler_conv_, ik_angle_unit_, rr_dls,
-            kDlsMaxIters, kDlsPosTolM, kDlsRotTolRad, kDlsLambda, kDlsAlpha,
-            kDlsMaxJointStep, kDlsNumericalEps, kDlsPosWeight, kDlsRotWeight,
-            qr, kDlsPostureGain, kDlsMaxCartStepM, kDlsMaxRotStepRad);
-
-        if (r_dls_ok && static_cast<int>(rr_dls.size()) >= n_r) {
-            rr = rr_dls;
-            r_ok = true;
-            r_used_dls = true;
-        }
-    }
-
-    if (l_ok && static_cast<int>(rl.size()) >= n_l) {
-        for (int i = 0; i < n_l; ++i) q_l_t_(i) = rl[static_cast<std::size_t>(i)];
-        if (l_used_dls) {
-            RCLCPP_INFO_THROTTLE(
-                logger, *node_->get_clock(), 1000,
-                "[IK][L] strict full-pose IK failed; substep orientation-hold DLS fallback succeeded.");
-        }
+    if (l_ok && rl.size() >= static_cast<size_t>(q_l_t_.size())) {
+        for (int i = 0; i < q_l_t_.size(); ++i) q_l_t_(i) = rl[static_cast<size_t>(i)];
     } else {
-        RCLCPP_WARN(logger,
-                    "[IK][L] solveIK failed or invalid output size. ok=%d size=%zu expected=%d",
-                    static_cast<int>(l_ok), rl.size(), n_l);
+        RCLCPP_WARN(logger, "[IK][L] solveIK failed or invalid output size. ok=%d size=%zu expected=%d",
+                    static_cast<int>(l_ok), rl.size(), static_cast<int>(q_l_t_.size()));
     }
 
-    if (r_ok && static_cast<int>(rr.size()) >= n_r) {
-        for (int i = 0; i < n_r; ++i) q_r_t_(i) = rr[static_cast<std::size_t>(i)];
-        if (r_used_dls) {
-            RCLCPP_INFO_THROTTLE(
-                logger, *node_->get_clock(), 1000,
-                "[IK][R] strict full-pose IK failed; substep orientation-hold DLS fallback succeeded.");
-        }
+    if (r_ok && rr.size() >= static_cast<size_t>(q_r_t_.size())) {
+        for (int i = 0; i < q_r_t_.size(); ++i) q_r_t_(i) = rr[static_cast<size_t>(i)];
     } else {
-        RCLCPP_WARN(logger,
-                    "[IK][R] solveIK failed or invalid output size. ok=%d size=%zu expected=%d",
-                    static_cast<int>(r_ok), rr.size(), n_r);
+        RCLCPP_WARN(logger, "[IK][R] solveIK failed or invalid output size. ok=%d size=%zu expected=%d",
+                    static_cast<int>(r_ok), rr.size(), static_cast<int>(q_r_t_.size()));
     }
 
     target_pose_l_.position.x = l_xyz_raw[0];
@@ -325,6 +385,7 @@ void DualArmForceControl::TargetArmPositionCallback(
 
 void DualArmForceControl::TargetHandPositionCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
+    if (!hand_runtime_enabled_) return;
     if (current_hand_control_mode_ != "inverse") return;
     if (!msg) return;
     if (msg->data.size() < 30) return;
@@ -388,6 +449,85 @@ void DualArmForceControl::DeltaArmPositionCallback(
     if (!arm_ik_l_ || !arm_ik_r_) return;
 
     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+    const bool is_rby1 = (kin_cfg_.profile.find("rby1") != std::string::npos);
+
+    if (is_rby1) {
+        auto finite3 = [](const std::array<double,3>& v) {
+            return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+        };
+
+        // RBY1 delta command must be interpreted as:
+        //   target = latched_home_pose + delta
+        // not as an absolute Cartesian target.
+        std::array<double,3> l_dxyz{msg->data[0],  msg->data[1],  msg->data[2]};
+        std::array<double,3> l_deul{msg->data[3],  msg->data[4],  msg->data[5]};
+        std::array<double,3> r_dxyz{msg->data[6],  msg->data[7],  msg->data[8]};
+        std::array<double,3> r_deul{msg->data[9],  msg->data[10], msg->data[11]};
+
+        if (!finite3(l_dxyz) || !finite3(l_deul) || !finite3(r_dxyz) || !finite3(r_deul)) {
+            RCLCPP_WARN(logger, "[DeltaArmPositionCallback][RBY1] Non-finite delta input detected. Ignore.");
+            return;
+        }
+
+        if (!delta_arm_base_pose_initialized_) {
+            RCLCPP_WARN(logger, "[DeltaArmPositionCallback][RBY1] latched home/base pose is not initialized yet.");
+            return;
+        }
+
+        target_pose_l_ = delta_arm_base_pose_l_;
+        target_pose_r_ = delta_arm_base_pose_r_;
+
+        target_pose_l_.position.x = delta_arm_base_pose_l_.position.x + l_dxyz[0];
+        target_pose_l_.position.y = delta_arm_base_pose_l_.position.y + l_dxyz[1];
+        target_pose_l_.position.z = delta_arm_base_pose_l_.position.z + l_dxyz[2];
+
+        target_pose_r_.position.x = delta_arm_base_pose_r_.position.x + r_dxyz[0];
+        target_pose_r_.position.y = delta_arm_base_pose_r_.position.y + r_dxyz[1];
+        target_pose_r_.position.z = delta_arm_base_pose_r_.position.z + r_dxyz[2];
+
+        // RBY1 v32:
+        // Preserve latched home orientation when droll/dpitch/dyaw are zero.
+        // If orientation delta is nonzero, apply it relative to the home pose.
+        // This means xyz-only delta commands move position without letting
+        // the end-effector orientation drift in the redundant 7-DOF null-space.
+        target_pose_l_.orientation = composeDeltaOrientation(
+            delta_arm_base_pose_l_.orientation, l_deul, ik_euler_conv_, ik_angle_unit_);
+        target_pose_r_.orientation = composeDeltaOrientation(
+            delta_arm_base_pose_r_.orientation, r_deul, ik_euler_conv_, ik_angle_unit_);
+
+        rby1_arm_target_active_ = true;
+
+        static int rby1_delta_dbg_decim = 0;
+        if ((rby1_delta_dbg_decim++ % 20) == 0) {
+            RCLCPP_INFO(
+                logger,
+                "[DeltaArmPositionCallback][RBY1] home+delta pose target | "
+                "L home=(%.4f %.4f %.4f) d=(%.4f %.4f %.4f) tgt=(%.4f %.4f %.4f) deul=(%.3f %.3f %.3f) | "
+                "R home=(%.4f %.4f %.4f) d=(%.4f %.4f %.4f) tgt=(%.4f %.4f %.4f) deul=(%.3f %.3f %.3f)",
+                delta_arm_base_pose_l_.position.x,
+                delta_arm_base_pose_l_.position.y,
+                delta_arm_base_pose_l_.position.z,
+                l_dxyz[0], l_dxyz[1], l_dxyz[2],
+                target_pose_l_.position.x,
+                target_pose_l_.position.y,
+                target_pose_l_.position.z,
+                l_deul[0], l_deul[1], l_deul[2],
+                delta_arm_base_pose_r_.position.x,
+                delta_arm_base_pose_r_.position.y,
+                delta_arm_base_pose_r_.position.z,
+                r_dxyz[0], r_dxyz[1], r_dxyz[2],
+                target_pose_r_.position.x,
+                target_pose_r_.position.y,
+                target_pose_r_.position.z,
+                r_deul[0], r_deul[1], r_deul[2]);
+        }
+
+        // v30 fast-teleop patch: publish a first resolved-rate step immediately
+        // on every delta target packet. The periodic ControlLoop continues the
+        // motion afterward.
+        ControlLoop();
+        return;
+    }
 
     auto finite3 = [](const std::array<double,3>& v) {
         return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
@@ -495,6 +635,7 @@ void DualArmForceControl::DeltaArmPositionCallback(
 
     auto abs_msg_ptr = std::make_shared<std_msgs::msg::Float64MultiArray>(abs_msg);
     TargetArmPositionCallback(abs_msg_ptr);
+    ControlLoop();
 }
 
 // ============================================================================
@@ -507,6 +648,7 @@ void DualArmForceControl::DeltaArmPositionCallback(
 void DualArmForceControl::DeltaHandPositionCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
+    if (!hand_runtime_enabled_) return;
     if (current_hand_control_mode_ != "inverse") return;
     if (!msg || msg->data.size() < 5) return;
     if (!hand_fk_l_ || !hand_fk_r_) return;
@@ -608,30 +750,24 @@ void DualArmForceControl::TargetArmJointsCallback(
     if (current_arm_control_mode_ != "forward") return;
     if (!msg) return;
 
-    const int n_l = static_cast<int>(q_l_t_.size());
-    const int n_r = static_cast<int>(q_r_t_.size());
-    const std::size_t required = static_cast<std::size_t>(std::max(0, n_l) + std::max(0, n_r));
-
-    if (n_l <= 0 || n_r <= 0) {
-        auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
-        RCLCPP_WARN(logger, "[TargetArmJointsCallback] invalid arm target size. L=%d R=%d", n_l, n_r);
-        return;
-    }
-
-    if (msg->data.size() < required) {
+    const size_t l_dof = static_cast<size_t>(q_l_t_.size());
+    const size_t r_dof = static_cast<size_t>(q_r_t_.size());
+    if (msg->data.size() < l_dof + r_dof) {
         auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
         RCLCPP_WARN(logger,
-                    "[TargetArmJointsCallback] invalid command length. got=%zu expected>=%zu (L=%d R=%d)",
-                    msg->data.size(), required, n_l, n_r);
+                    "[TargetArmJointsCallback] expected %zu values (=L%zu+R%zu), got %zu",
+                    l_dof + r_dof, l_dof, r_dof, msg->data.size());
         return;
     }
 
-    for (int i = 0; i < n_l; ++i) {
-        q_l_t_(i) = msg->data[static_cast<std::size_t>(i)];
+    for (int i = 0; i < q_l_t_.size(); ++i) {
+        q_l_t_(i) = msg->data[static_cast<size_t>(i)];
     }
-    for (int i = 0; i < n_r; ++i) {
-        q_r_t_(i) = msg->data[static_cast<std::size_t>(n_l + i)];
+    for (int i = 0; i < q_r_t_.size(); ++i) {
+        q_r_t_(i) = msg->data[l_dof + static_cast<size_t>(i)];
     }
+
+    ControlLoop();
 }
 
 // --------------------
@@ -644,10 +780,18 @@ void DualArmForceControl::TargetArmJointsCallback(
 void DualArmForceControl::TargetHandJointsCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
+    // v31 admittance rollback patch:
+    // The forward topic writes only q_h_motion_t_. When hand_runtime_enabled_ is
+    // true, ControlLoop runs the old v25-style unified hand pipeline:
+    //   q_h_motion_t_ -> FK -> x_d -> admittance/IK -> q_h_t_.
+    // If hand_runtime_enabled_ is false, ControlLoop falls back to safe joint
+    // pass-through for forward mode.
     if (current_hand_control_mode_ != "forward") return;
     if (!msg) return;
 
     const size_t n = msg->data.size();
+    const bool is_rby1 = (kin_cfg_.profile.find("rby1") != std::string::npos);
+    const bool enforce_mimic_for_this_profile = !is_rby1;
 
     auto enforce_mimic_q4_eq_q3 = [&](Eigen::VectorXd& qh20) {
         if (qh20.size() < 20) return;
@@ -673,7 +817,7 @@ void DualArmForceControl::TargetHandJointsCallback(
     auto assign_hand20_to_qh20 = [&](Eigen::VectorXd& qh20, const size_t offset) {
         if (qh20.size() < 20) return;
         for (int i = 0; i < 20; ++i) qh20(i) = msg->data[offset + i];
-        enforce_mimic_q4_eq_q3(qh20);
+        if (enforce_mimic_for_this_profile) enforce_mimic_q4_eq_q3(qh20);
     };
 
     // NOTE:
@@ -722,6 +866,71 @@ void DualArmForceControl::TargetHandJointsCallback(
             x_r_hand_d_,
             t_f_r_thumb_, t_f_r_index_, t_f_r_middle_, t_f_r_ring_, t_f_r_baby_);
     }
+
+    // Keep the old v25 semantics: the callback only updates the motion
+    // reference. The final q_l_h_t_ / q_r_h_t_ command is generated by
+    // ControlLoop through the unified hand admittance pipeline. If the hand
+    // runtime is unavailable, ControlLoop will use safe forward pass-through.
+    ControlLoop();
+}
+
+// ============================================================================
+// TargetAuxJointsCallback
+// msg: JointState command for RBY1 non-arm joints.
+//   - name + position controls torso_* joints as absolute position targets.
+//   - name + velocity controls left_wheel/right_wheel as velocity targets.
+// ============================================================================
+void DualArmForceControl::TargetAuxJointsCallback(
+    const sensor_msgs::msg::JointState::SharedPtr msg)
+{
+    if (!msg) return;
+
+    auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+
+    auto starts_with = [](const std::string& s, const std::string& prefix) -> bool {
+        return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+    };
+    auto is_wheel = [](const std::string& n) -> bool {
+        return n == "left_wheel" || n == "right_wheel";
+    };
+    auto is_torso = [&](const std::string& n) -> bool {
+        return starts_with(n, "torso_");
+    };
+
+    const std::size_t n_pos = std::min(msg->name.size(), msg->position.size());
+    for (std::size_t i = 0; i < n_pos; ++i) {
+        const std::string& n = msg->name[i];
+        const double p = msg->position[i];
+        if (!std::isfinite(p)) continue;
+
+        if (is_torso(n)) {
+            aux_joint_position_command_[n] = p;
+        }
+    }
+
+    bool got_wheel_velocity = false;
+    const std::size_t n_vel = std::min(msg->name.size(), msg->velocity.size());
+    for (std::size_t i = 0; i < n_vel; ++i) {
+        const std::string& n = msg->name[i];
+        const double v = msg->velocity[i];
+        if (!std::isfinite(v)) continue;
+
+        if (is_wheel(n)) {
+            aux_joint_velocity_command_[n] = v;
+            got_wheel_velocity = true;
+        }
+    }
+
+    if (got_wheel_velocity) {
+        aux_joint_velocity_stamp_ = node_->now();
+    }
+
+    if (n_pos == 0 && n_vel == 0) {
+        RCLCPP_WARN(logger, "[TargetAuxJointsCallback] Empty position/velocity command. Ignore.");
+        return;
+    }
+
+    ControlLoop();
 }
 
 // ============================================================================
@@ -735,6 +944,11 @@ void DualArmForceControl::TargetHandJointsCallback(
 // ============================================================================
 void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
+    if (!hand_runtime_enabled_) {
+        auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+        RCLCPP_WARN(logger, "[TargetHandForceCallback] hand runtime FK/IK is disabled; cannot run admittance.");
+        return;
+    }
     if (current_hand_control_mode_ == "idle") return;
     if (!msg) return;
     if (msg->data.size() < 5) return;
