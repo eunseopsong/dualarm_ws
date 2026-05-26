@@ -563,7 +563,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     double wheel_base_default = 0.53;
     double max_wheel_speed_default = 10.0;
     bool invert_wheel_velocity_command_default = true;
-    double torso_position_max_speed_default = 1.5;
+    double torso_position_max_speed_default = 2.0;
     bool torso_upright_hold_enabled_default = true;
     bool torso_upright_hold_during_wheel_only_default = true;
     std::vector<std::string> torso_upright_joint_names_default{
@@ -645,7 +645,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         max_wheel_speed_rad_s_ = 10.0;
     }
     if (torso_position_max_speed_rad_s_ <= 0.0 || !std::isfinite(torso_position_max_speed_rad_s_)) {
-        torso_position_max_speed_rad_s_ = 1.5;
+        torso_position_max_speed_rad_s_ = 2.0;
     }
     torso_upright_position_command_.clear();
     const std::size_t torso_upright_size =

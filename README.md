@@ -436,21 +436,21 @@ Turn waist 90 degrees left:
 
 ```bash
 ros2 topic pub --once /forward_aux_joint_targets sensor_msgs/msg/JointState \
-"{name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'], position: [0.0, 0.0875, 0.0883, -0.1739, 0.0, 1.5708], velocity: [1.5, 1.5, 1.5, 1.5, 1.5, 1.5]}"
+"{name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'], position: [0.0, 0.0875, 0.0883, -0.1739, 0.0, 1.5708], velocity: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]}"
 ```
 
 Turn waist 90 degrees right:
 
 ```bash
 ros2 topic pub --once /forward_aux_joint_targets sensor_msgs/msg/JointState \
-"{name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'], position: [0.0, 0.0875, 0.0883, -0.1739, 0.0, -1.5708], velocity: [1.5, 1.5, 1.5, 1.5, 1.5, 1.5]}"
+"{name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'], position: [0.0, 0.0875, 0.0883, -0.1739, 0.0, -1.5708], velocity: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]}"
 ```
 
 Return waist to center:
 
 ```bash
 ros2 topic pub --once /forward_aux_joint_targets sensor_msgs/msg/JointState \
-"{name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'], position: [0.0, 0.0875, 0.0883, -0.1739, 0.0, 0.0], velocity: [1.5, 1.5, 1.5, 1.5, 1.5, 1.5]}"
+"{name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'], position: [0.0, 0.0875, 0.0883, -0.1739, 0.0, 0.0], velocity: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]}"
 ```
 
 Notes:

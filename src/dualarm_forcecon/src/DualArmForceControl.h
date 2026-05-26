@@ -201,7 +201,7 @@ private:
     double wheel_radius_m_ = 0.1;
     double wheel_base_m_ = 0.53;
     double max_wheel_speed_rad_s_ = 10.0;
-    double torso_position_max_speed_rad_s_ = 1.5;
+    double torso_position_max_speed_rad_s_ = 2.0;
     bool invert_wheel_velocity_command_ = true;
     bool torso_upright_hold_enabled_ = true;
     bool torso_upright_hold_during_wheel_only_ = true;
