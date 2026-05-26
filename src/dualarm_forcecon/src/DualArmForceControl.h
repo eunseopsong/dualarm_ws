@@ -199,6 +199,9 @@ private:
     double wheel_radius_m_ = 0.1;
     double wheel_base_m_ = 0.53;
     double max_wheel_speed_rad_s_ = 10.0;
+    bool torso_upright_hold_enabled_ = true;
+    bool torso_upright_hold_during_wheel_only_ = true;
+    std::unordered_map<std::string, double> torso_upright_position_command_;
 
     // ------------------------------------------------------------------------
     // Mode / init

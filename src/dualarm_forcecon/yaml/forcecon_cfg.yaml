@@ -92,6 +92,22 @@ mobile_base:
   max_wheel_speed_rad_s: 10.0
   cmd_vel_timeout_sec: 0.3
   aux_joint_velocity_timeout_sec: 0.5
+  torso_upright_hold_enabled: true
+  torso_upright_hold_during_wheel_only: true
+  torso_upright_joint_names:
+    - torso_0
+    - torso_1
+    - torso_2
+    - torso_3
+    - torso_4
+    - torso_5
+  torso_upright_positions:
+    - 0.0
+    - 0.0875
+    - 0.0883
+    - -0.1739
+    - 0.0
+    - 0.0
 
 hand_admittance:
   # --------------------------------------------------------------------------

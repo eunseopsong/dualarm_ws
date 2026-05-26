@@ -562,6 +562,14 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     double wheel_radius_default = 0.1;
     double wheel_base_default = 0.53;
     double max_wheel_speed_default = 10.0;
+    bool torso_upright_hold_enabled_default = true;
+    bool torso_upright_hold_during_wheel_only_default = true;
+    std::vector<std::string> torso_upright_joint_names_default{
+        "torso_0", "torso_1", "torso_2", "torso_3", "torso_4", "torso_5"
+    };
+    std::vector<double> torso_upright_positions_default{
+        0.0, 0.0875, 0.0883, -0.1739, 0.0, 0.0
+    };
 
     if (root && root["mobile_base"]) {
         const YAML::Node base_node = root["mobile_base"];
@@ -570,6 +578,20 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         readScalar(base_node, "wheel_radius_m", wheel_radius_default);
         readScalar(base_node, "wheel_base_m", wheel_base_default);
         readScalar(base_node, "max_wheel_speed_rad_s", max_wheel_speed_default);
+        readScalar(base_node, "torso_upright_hold_enabled", torso_upright_hold_enabled_default);
+        readScalar(base_node, "torso_upright_hold_during_wheel_only", torso_upright_hold_during_wheel_only_default);
+        if (base_node["torso_upright_joint_names"] && base_node["torso_upright_joint_names"].IsSequence()) {
+            torso_upright_joint_names_default.clear();
+            for (const auto& item : base_node["torso_upright_joint_names"]) {
+                torso_upright_joint_names_default.push_back(item.as<std::string>());
+            }
+        }
+        if (base_node["torso_upright_positions"] && base_node["torso_upright_positions"].IsSequence()) {
+            torso_upright_positions_default.clear();
+            for (const auto& item : base_node["torso_upright_positions"]) {
+                torso_upright_positions_default.push_back(item.as<double>());
+            }
+        }
     }
 
     aux_joint_velocity_timeout_sec_ = node_->declare_parameter<double>(
@@ -582,6 +604,16 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "wheel_base_m", wheel_base_default);
     max_wheel_speed_rad_s_ = node_->declare_parameter<double>(
         "max_wheel_speed_rad_s", max_wheel_speed_default);
+    torso_upright_hold_enabled_ = node_->declare_parameter<bool>(
+        "torso_upright_hold_enabled", torso_upright_hold_enabled_default);
+    torso_upright_hold_during_wheel_only_ = node_->declare_parameter<bool>(
+        "torso_upright_hold_during_wheel_only", torso_upright_hold_during_wheel_only_default);
+    const std::vector<std::string> torso_upright_joint_names =
+        node_->declare_parameter<std::vector<std::string>>(
+            "torso_upright_joint_names", torso_upright_joint_names_default);
+    const std::vector<double> torso_upright_positions =
+        node_->declare_parameter<std::vector<double>>(
+            "torso_upright_positions", torso_upright_positions_default);
 
     if (rby1_arm_max_cmd_step_rad_ <= 0.0 || !std::isfinite(rby1_arm_max_cmd_step_rad_)) {
         rby1_arm_max_cmd_step_rad_ = 0.015;
@@ -603,6 +635,15 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     }
     if (max_wheel_speed_rad_s_ <= 0.0 || !std::isfinite(max_wheel_speed_rad_s_)) {
         max_wheel_speed_rad_s_ = 10.0;
+    }
+    torso_upright_position_command_.clear();
+    const std::size_t torso_upright_size =
+        std::min(torso_upright_joint_names.size(), torso_upright_positions.size());
+    for (std::size_t i = 0; i < torso_upright_size; ++i) {
+        if (std::isfinite(torso_upright_positions[i])) {
+            torso_upright_position_command_[torso_upright_joint_names[i]] =
+                torso_upright_positions[i];
+        }
     }
     rby1_arm_cmd_slew_initialized_ = false;
 
@@ -748,7 +789,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     RCLCPP_INFO(
         node_->get_logger(),
-        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d hand_runtime_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms wheel_radius=%.3f m wheel_base=%.3f m max_wheel=%.2f rad/s",
+        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d hand_runtime_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms wheel_radius=%.3f m wheel_base=%.3f m max_wheel=%.2f rad/s torso_upright_hold=%d torso_joints=%zu",
         static_cast<int>(startup_fixed_joint_hold_enabled_),
         static_cast<int>(startup_fixed_hand_hold_enabled_),
         static_cast<int>(startup_arm_home_hold_enabled_),
@@ -759,7 +800,9 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         safe_control_loop_period_ms,
         wheel_radius_m_,
         wheel_base_m_,
-        max_wheel_speed_rad_s_);
+        max_wheel_speed_rad_s_,
+        static_cast<int>(torso_upright_hold_enabled_),
+        torso_upright_position_command_.size());
 }
 
 DualArmForceControl::~DualArmForceControl() {}
@@ -1119,8 +1162,14 @@ void DualArmForceControl::ControlLoop()
     // ------------------------------------------------------------------------
     // Publish consolidated joint command
     // ------------------------------------------------------------------------
+    auto starts_with = [](const std::string& s, const std::string& prefix) -> bool {
+        return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+    };
     auto is_wheel_joint = [](const std::string& n) -> bool {
         return n == "left_wheel" || n == "right_wheel";
+    };
+    auto is_torso_joint = [&](const std::string& n) -> bool {
+        return starts_with(n, "torso_");
     };
     auto has_active_wheel_velocity_command = [&]() -> bool {
         if (aux_joint_velocity_command_.empty()) return false;
@@ -1205,6 +1254,17 @@ void DualArmForceControl::ControlLoop()
         if (it_aux_pos != aux_joint_position_command_.end()) {
             cmd.position.push_back(it_aux_pos->second);
             continue;
+        }
+
+        const bool use_torso_upright_hold =
+            torso_upright_hold_enabled_ &&
+            (!torso_upright_hold_during_wheel_only_ || active_wheel_velocity_command);
+        if (use_torso_upright_hold && is_torso_joint(n)) {
+            const auto it_torso = torso_upright_position_command_.find(n);
+            if (it_torso != torso_upright_position_command_.end()) {
+                cmd.position.push_back(it_torso->second);
+                continue;
+            }
         }
 
         if (startup_fixed_joint_hold_enabled_ && startup_fixed_joint_hold_latched_) {
