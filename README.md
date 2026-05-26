@@ -173,7 +173,7 @@ left tip  : ee_left
 right tip : ee_right
 ```
 
-The RBY1 fixed joints remain held at startup values:
+By default, the RBY1 non-arm joints remain held at startup values:
 
 ```text
 left_wheel
@@ -185,7 +185,9 @@ head_*
 The intended v31 behavior is:
 
 ```text
-wheel / torso / head : startup hold
+wheel joints         : startup hold, or velocity override from /forward_aux_joint_targets
+torso joints         : startup hold, or position override from /forward_aux_joint_targets
+head joints          : startup hold
 arm joints           : inverse control
 hand joints          : forward or inverse hand control
 selected finger      : optional admittance correction
@@ -389,7 +391,50 @@ joint4 is treated as mimic of joint3 where needed
 
 ---
 
-### 3.6 Hand target force
+### 3.6 RBY1 wheel / torso auxiliary joint target
+
+```text
+/forward_aux_joint_targets
+```
+
+Type:
+
+```text
+sensor_msgs/msg/JointState
+```
+
+Wheel velocity command:
+
+```bash
+ros2 topic pub /forward_aux_joint_targets sensor_msgs/msg/JointState "{
+  name: ['left_wheel', 'right_wheel'],
+  velocity: [10.0, 10.0],
+  position: [],
+  effort: []
+}"
+```
+
+Torso position command:
+
+```bash
+ros2 topic pub --once /forward_aux_joint_targets sensor_msgs/msg/JointState "{
+  name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'],
+  position: [0.0, 0.2, -0.4, 0.3, 0.0, 0.0],
+  velocity: [],
+  effort: []
+}"
+```
+
+Notes:
+
+```text
+wheel velocity overrides timeout after aux_joint_velocity_timeout_sec.
+torso position overrides are latched until a new torso command is received.
+```
+
+---
+
+### 3.7 Hand target force
 
 ```text
 /target_hand_force

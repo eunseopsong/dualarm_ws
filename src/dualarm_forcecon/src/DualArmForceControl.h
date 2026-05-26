@@ -54,6 +54,7 @@ public:
     // ------------------------------------------------------------------------
     void TargetArmJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetHandJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+    void TargetAuxJointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
 
     // ------------------------------------------------------------------------
     // Measured contact force callback (Isaac)
@@ -106,6 +107,7 @@ private:
     // Forward joint targets
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_joint_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_joint_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr target_aux_joint_sub_;
 
     // Desired-force reference topic
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_force_sub_;
@@ -174,6 +176,15 @@ private:
     Eigen::VectorXd q_l_arm_cmd_prev_, q_r_arm_cmd_prev_;
     double rby1_arm_max_cmd_step_rad_ = 0.006;
     double rby1_arm_servo_max_cart_step_m_ = 0.0008;
+
+    // RBY1 non-arm command extension.
+    // /forward_aux_joint_targets accepts JointState commands:
+    // - wheel joints use velocity
+    // - torso joints use position
+    std::unordered_map<std::string, double> aux_joint_position_command_;
+    std::unordered_map<std::string, double> aux_joint_velocity_command_;
+    rclcpp::Time aux_joint_velocity_stamp_;
+    double aux_joint_velocity_timeout_sec_ = 0.5;
 
     // ------------------------------------------------------------------------
     // Mode / init

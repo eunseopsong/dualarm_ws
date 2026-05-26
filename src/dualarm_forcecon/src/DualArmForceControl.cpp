@@ -452,6 +452,10 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "/forward_hand_joint_targets", qos,
         std::bind(&DualArmForceControl::TargetHandJointsCallback, this, std::placeholders::_1));
 
+    target_aux_joint_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
+        "/forward_aux_joint_targets", qos,
+        std::bind(&DualArmForceControl::TargetAuxJointsCallback, this, std::placeholders::_1));
+
     target_hand_force_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/target_hand_force", qos,
         std::bind(&DualArmForceControl::TargetHandForceCallback, this, std::placeholders::_1));
@@ -547,12 +551,17 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "rby1_arm_max_cmd_step_rad", 0.015);
     rby1_arm_servo_max_cart_step_m_ = node_->declare_parameter<double>(
         "rby1_arm_servo_max_cart_step_m", 0.0025);
+    aux_joint_velocity_timeout_sec_ = node_->declare_parameter<double>(
+        "aux_joint_velocity_timeout_sec", 0.5);
 
     if (rby1_arm_max_cmd_step_rad_ <= 0.0 || !std::isfinite(rby1_arm_max_cmd_step_rad_)) {
         rby1_arm_max_cmd_step_rad_ = 0.015;
     }
     if (rby1_arm_servo_max_cart_step_m_ <= 0.0 || !std::isfinite(rby1_arm_servo_max_cart_step_m_)) {
         rby1_arm_servo_max_cart_step_m_ = 0.0025;
+    }
+    if (!std::isfinite(aux_joint_velocity_timeout_sec_)) {
+        aux_joint_velocity_timeout_sec_ = 0.5;
     }
     rby1_arm_cmd_slew_initialized_ = false;
 
@@ -1066,14 +1075,33 @@ void DualArmForceControl::ControlLoop()
     // ------------------------------------------------------------------------
     // Publish consolidated joint command
     // ------------------------------------------------------------------------
+    auto is_wheel_joint = [](const std::string& n) -> bool {
+        return n == "left_wheel" || n == "right_wheel";
+    };
+    auto has_active_wheel_velocity_command = [&]() -> bool {
+        if (aux_joint_velocity_command_.empty()) return false;
+        if (aux_joint_velocity_timeout_sec_ <= 0.0) return true;
+        if (aux_joint_velocity_stamp_.nanoseconds() == 0) return false;
+
+        const double age_sec = (node_->now() - aux_joint_velocity_stamp_).seconds();
+        return std::isfinite(age_sec) && age_sec <= aux_joint_velocity_timeout_sec_;
+    };
+
+    const bool active_wheel_velocity_command = has_active_wheel_velocity_command();
+
     sensor_msgs::msg::JointState cmd;
     cmd.header.stamp = node_->now();
-    cmd.name = joint_names_;
     cmd.position.reserve(joint_names_.size());
 
     for (const auto& n : joint_names_) {
+        if (active_wheel_velocity_command && is_wheel_joint(n)) {
+            continue;
+        }
+
         const int li = kin_cfg_.findLeftArmJointIndex(n);
         const int ri = kin_cfg_.findRightArmJointIndex(n);
+
+        cmd.name.push_back(n);
 
         if (li >= 0 && li < q_l_t_.size()) {
             cmd.position.push_back(q_l_t_(li));
@@ -1110,6 +1138,12 @@ void DualArmForceControl::ControlLoop()
             }
         }
 
+        const auto it_aux_pos = aux_joint_position_command_.find(n);
+        if (it_aux_pos != aux_joint_position_command_.end()) {
+            cmd.position.push_back(it_aux_pos->second);
+            continue;
+        }
+
         if (startup_fixed_joint_hold_enabled_ && startup_fixed_joint_hold_latched_) {
             const auto it_fixed = startup_fixed_joint_position_.find(n);
             if (it_fixed != startup_fixed_joint_position_.end()) {
@@ -1124,4 +1158,22 @@ void DualArmForceControl::ControlLoop()
 
     PublishHandForceMonitor();
     joint_command_pub_->publish(cmd);
+
+    if (active_wheel_velocity_command) {
+        sensor_msgs::msg::JointState wheel_cmd;
+        wheel_cmd.header.stamp = cmd.header.stamp;
+
+        for (const auto& n : joint_names_) {
+            if (!is_wheel_joint(n)) continue;
+
+            const auto it_vel = aux_joint_velocity_command_.find(n);
+            wheel_cmd.name.push_back(n);
+            wheel_cmd.velocity.push_back(
+                it_vel != aux_joint_velocity_command_.end() ? it_vel->second : 0.0);
+        }
+
+        if (!wheel_cmd.name.empty()) {
+            joint_command_pub_->publish(wheel_cmd);
+        }
+    }
 }

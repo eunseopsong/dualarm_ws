@@ -875,6 +875,65 @@ void DualArmForceControl::TargetHandJointsCallback(
 }
 
 // ============================================================================
+// TargetAuxJointsCallback
+// msg: JointState command for RBY1 non-arm joints.
+//   - name + position controls torso_* joints as absolute position targets.
+//   - name + velocity controls left_wheel/right_wheel as velocity targets.
+// ============================================================================
+void DualArmForceControl::TargetAuxJointsCallback(
+    const sensor_msgs::msg::JointState::SharedPtr msg)
+{
+    if (!msg) return;
+
+    auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+
+    auto starts_with = [](const std::string& s, const std::string& prefix) -> bool {
+        return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+    };
+    auto is_wheel = [](const std::string& n) -> bool {
+        return n == "left_wheel" || n == "right_wheel";
+    };
+    auto is_torso = [&](const std::string& n) -> bool {
+        return starts_with(n, "torso_");
+    };
+
+    const std::size_t n_pos = std::min(msg->name.size(), msg->position.size());
+    for (std::size_t i = 0; i < n_pos; ++i) {
+        const std::string& n = msg->name[i];
+        const double p = msg->position[i];
+        if (!std::isfinite(p)) continue;
+
+        if (is_torso(n)) {
+            aux_joint_position_command_[n] = p;
+        }
+    }
+
+    bool got_wheel_velocity = false;
+    const std::size_t n_vel = std::min(msg->name.size(), msg->velocity.size());
+    for (std::size_t i = 0; i < n_vel; ++i) {
+        const std::string& n = msg->name[i];
+        const double v = msg->velocity[i];
+        if (!std::isfinite(v)) continue;
+
+        if (is_wheel(n)) {
+            aux_joint_velocity_command_[n] = v;
+            got_wheel_velocity = true;
+        }
+    }
+
+    if (got_wheel_velocity) {
+        aux_joint_velocity_stamp_ = node_->now();
+    }
+
+    if (n_pos == 0 && n_vel == 0) {
+        RCLCPP_WARN(logger, "[TargetAuxJointsCallback] Empty position/velocity command. Ignore.");
+        return;
+    }
+
+    ControlLoop();
+}
+
+// ============================================================================
 // TargetHandForceCallback
 //   v25-style patch:
 //   - no separate forcecon mode
