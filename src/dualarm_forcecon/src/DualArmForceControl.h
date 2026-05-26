@@ -9,6 +9,7 @@
 
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/point.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 
 #include <Eigen/Dense>
 
@@ -55,6 +56,7 @@ public:
     void TargetArmJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetHandJointsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void TargetAuxJointsCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
+    void TargetBaseVelocityCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
 
     // ------------------------------------------------------------------------
     // Measured contact force callback (Isaac)
@@ -108,6 +110,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_arm_joint_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_joint_sub_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr target_aux_joint_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr target_base_velocity_sub_;
 
     // Desired-force reference topic
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_force_sub_;
@@ -185,6 +188,17 @@ private:
     std::unordered_map<std::string, double> aux_joint_velocity_command_;
     rclcpp::Time aux_joint_velocity_stamp_;
     double aux_joint_velocity_timeout_sec_ = 0.5;
+
+    // RBY1 mobile-base command extension.
+    // /cmd_vel is converted to left_wheel/right_wheel velocity commands while
+    // the normal consolidated command continues holding torso/head/arms/hands.
+    double cmd_vel_linear_x_ = 0.0;
+    double cmd_vel_angular_z_ = 0.0;
+    rclcpp::Time cmd_vel_stamp_;
+    double cmd_vel_timeout_sec_ = 0.3;
+    double wheel_radius_m_ = 0.1;
+    double wheel_base_m_ = 0.53;
+    double max_wheel_speed_rad_s_ = 10.0;
 
     // ------------------------------------------------------------------------
     // Mode / init

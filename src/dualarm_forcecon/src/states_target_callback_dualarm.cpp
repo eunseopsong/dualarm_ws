@@ -934,6 +934,35 @@ void DualArmForceControl::TargetAuxJointsCallback(
 }
 
 // ============================================================================
+// TargetBaseVelocityCallback
+// msg: RBY1 mobile-base velocity command.
+//   - linear.x  [m/s]
+//   - angular.z [rad/s]
+// Converted to wheel angular velocities and published by ControlLoop together
+// with the normal full-body hold/arm/hand command stream.
+// ============================================================================
+void DualArmForceControl::TargetBaseVelocityCallback(
+    const geometry_msgs::msg::Twist::SharedPtr msg)
+{
+    if (!msg) return;
+
+    const double linear_x = msg->linear.x;
+    const double angular_z = msg->angular.z;
+
+    if (!std::isfinite(linear_x) || !std::isfinite(angular_z)) {
+        auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
+        RCLCPP_WARN(logger, "[TargetBaseVelocityCallback] Non-finite /cmd_vel. Ignore.");
+        return;
+    }
+
+    cmd_vel_linear_x_ = linear_x;
+    cmd_vel_angular_z_ = angular_z;
+    cmd_vel_stamp_ = node_->now();
+
+    ControlLoop();
+}
+
+// ============================================================================
 // TargetHandForceCallback
 //   v25-style patch:
 //   - no separate forcecon mode

@@ -2,6 +2,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include <yaml-cpp/yaml.h>
 
 using namespace std::chrono_literals;
@@ -457,6 +458,10 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "/forward_aux_joint_targets", qos,
         std::bind(&DualArmForceControl::TargetAuxJointsCallback, this, std::placeholders::_1));
 
+    target_base_velocity_sub_ = node_->create_subscription<geometry_msgs::msg::Twist>(
+        "/cmd_vel", qos,
+        std::bind(&DualArmForceControl::TargetBaseVelocityCallback, this, std::placeholders::_1));
+
     target_hand_force_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
         "/target_hand_force", qos,
         std::bind(&DualArmForceControl::TargetHandForceCallback, this, std::placeholders::_1));
@@ -552,8 +557,31 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "rby1_arm_max_cmd_step_rad", 0.015);
     rby1_arm_servo_max_cart_step_m_ = node_->declare_parameter<double>(
         "rby1_arm_servo_max_cart_step_m", 0.0025);
+    double aux_joint_velocity_timeout_default = 0.5;
+    double cmd_vel_timeout_default = 0.3;
+    double wheel_radius_default = 0.1;
+    double wheel_base_default = 0.53;
+    double max_wheel_speed_default = 10.0;
+
+    if (root && root["mobile_base"]) {
+        const YAML::Node base_node = root["mobile_base"];
+        readScalar(base_node, "aux_joint_velocity_timeout_sec", aux_joint_velocity_timeout_default);
+        readScalar(base_node, "cmd_vel_timeout_sec", cmd_vel_timeout_default);
+        readScalar(base_node, "wheel_radius_m", wheel_radius_default);
+        readScalar(base_node, "wheel_base_m", wheel_base_default);
+        readScalar(base_node, "max_wheel_speed_rad_s", max_wheel_speed_default);
+    }
+
     aux_joint_velocity_timeout_sec_ = node_->declare_parameter<double>(
-        "aux_joint_velocity_timeout_sec", 0.5);
+        "aux_joint_velocity_timeout_sec", aux_joint_velocity_timeout_default);
+    cmd_vel_timeout_sec_ = node_->declare_parameter<double>(
+        "cmd_vel_timeout_sec", cmd_vel_timeout_default);
+    wheel_radius_m_ = node_->declare_parameter<double>(
+        "wheel_radius_m", wheel_radius_default);
+    wheel_base_m_ = node_->declare_parameter<double>(
+        "wheel_base_m", wheel_base_default);
+    max_wheel_speed_rad_s_ = node_->declare_parameter<double>(
+        "max_wheel_speed_rad_s", max_wheel_speed_default);
 
     if (rby1_arm_max_cmd_step_rad_ <= 0.0 || !std::isfinite(rby1_arm_max_cmd_step_rad_)) {
         rby1_arm_max_cmd_step_rad_ = 0.015;
@@ -563,6 +591,18 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     }
     if (!std::isfinite(aux_joint_velocity_timeout_sec_)) {
         aux_joint_velocity_timeout_sec_ = 0.5;
+    }
+    if (!std::isfinite(cmd_vel_timeout_sec_)) {
+        cmd_vel_timeout_sec_ = 0.3;
+    }
+    if (wheel_radius_m_ <= 0.0 || !std::isfinite(wheel_radius_m_)) {
+        wheel_radius_m_ = 0.1;
+    }
+    if (wheel_base_m_ <= 0.0 || !std::isfinite(wheel_base_m_)) {
+        wheel_base_m_ = 0.53;
+    }
+    if (max_wheel_speed_rad_s_ <= 0.0 || !std::isfinite(max_wheel_speed_rad_s_)) {
+        max_wheel_speed_rad_s_ = 10.0;
     }
     rby1_arm_cmd_slew_initialized_ = false;
 
@@ -708,7 +748,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     RCLCPP_INFO(
         node_->get_logger(),
-        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d hand_runtime_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms",
+        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d hand_runtime_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms wheel_radius=%.3f m wheel_base=%.3f m max_wheel=%.2f rad/s",
         static_cast<int>(startup_fixed_joint_hold_enabled_),
         static_cast<int>(startup_fixed_hand_hold_enabled_),
         static_cast<int>(startup_arm_home_hold_enabled_),
@@ -716,7 +756,10 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         kin_cfg_.profile.c_str(),
         rby1_arm_max_cmd_step_rad_,
         rby1_arm_servo_max_cart_step_m_,
-        safe_control_loop_period_ms);
+        safe_control_loop_period_ms,
+        wheel_radius_m_,
+        wheel_base_m_,
+        max_wheel_speed_rad_s_);
 }
 
 DualArmForceControl::~DualArmForceControl() {}
@@ -1087,8 +1130,27 @@ void DualArmForceControl::ControlLoop()
         const double age_sec = (node_->now() - aux_joint_velocity_stamp_).seconds();
         return std::isfinite(age_sec) && age_sec <= aux_joint_velocity_timeout_sec_;
     };
+    auto has_active_cmd_vel_command = [&]() -> bool {
+        if (cmd_vel_stamp_.nanoseconds() == 0) return false;
+        if (cmd_vel_timeout_sec_ <= 0.0) return true;
 
-    const bool active_wheel_velocity_command = has_active_wheel_velocity_command();
+        const double age_sec = (node_->now() - cmd_vel_stamp_).seconds();
+        return std::isfinite(age_sec) && age_sec <= cmd_vel_timeout_sec_;
+    };
+    auto cmd_vel_to_wheel_velocity = [&]() -> std::pair<double, double> {
+        const double half_track = 0.5 * wheel_base_m_;
+        double left = (cmd_vel_linear_x_ - half_track * cmd_vel_angular_z_) / wheel_radius_m_;
+        double right = (cmd_vel_linear_x_ + half_track * cmd_vel_angular_z_) / wheel_radius_m_;
+
+        left = std::clamp(left, -max_wheel_speed_rad_s_, max_wheel_speed_rad_s_);
+        right = std::clamp(right, -max_wheel_speed_rad_s_, max_wheel_speed_rad_s_);
+        return {left, right};
+    };
+
+    const bool active_aux_wheel_velocity_command = has_active_wheel_velocity_command();
+    const bool active_cmd_vel_command = has_active_cmd_vel_command();
+    const bool active_wheel_velocity_command =
+        active_aux_wheel_velocity_command || active_cmd_vel_command;
 
     sensor_msgs::msg::JointState cmd;
     cmd.header.stamp = node_->now();
@@ -1164,13 +1226,23 @@ void DualArmForceControl::ControlLoop()
         sensor_msgs::msg::JointState wheel_cmd;
         wheel_cmd.header.stamp = cmd.header.stamp;
 
+        const auto cmd_vel_wheel_velocity = cmd_vel_to_wheel_velocity();
+
         for (const auto& n : joint_names_) {
             if (!is_wheel_joint(n)) continue;
 
-            const auto it_vel = aux_joint_velocity_command_.find(n);
+            double velocity = 0.0;
+            if (active_aux_wheel_velocity_command) {
+                const auto it_vel = aux_joint_velocity_command_.find(n);
+                velocity = it_vel != aux_joint_velocity_command_.end() ? it_vel->second : 0.0;
+            } else if (n == "left_wheel") {
+                velocity = cmd_vel_wheel_velocity.first;
+            } else if (n == "right_wheel") {
+                velocity = cmd_vel_wheel_velocity.second;
+            }
+
             wheel_cmd.name.push_back(n);
-            wheel_cmd.velocity.push_back(
-                it_vel != aux_joint_velocity_command_.end() ? it_vel->second : 0.0);
+            wheel_cmd.velocity.push_back(velocity);
         }
 
         if (!wheel_cmd.name.empty()) {
