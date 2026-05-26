@@ -91,7 +91,7 @@ mobile_base:
   wheel_base_m: 0.53
   max_wheel_speed_rad_s: 10.0
   invert_wheel_velocity_command: true
-  torso_position_max_speed_rad_s: 0.5
+  torso_position_max_speed_rad_s: 1.5
   cmd_vel_timeout_sec: 0.3
   aux_joint_velocity_timeout_sec: 0.5
   torso_upright_hold_enabled: true
