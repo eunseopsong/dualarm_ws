@@ -626,64 +626,64 @@ ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray
 
 ### Command 5: close both hands strongly
 
-Use this only after confirming joint directions and limits.
+Thumbs bend strongly; all other fingers bend to the same angle.
 
 ```bash
 ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
 "{data: [
-  0.3, 0.5, 0.5, 0.5,
-  0.5, 0.8, 0.8, 0.8,
-  0.5, 0.8, 0.8, 0.8,
-  0.5, 0.8, 0.8, 0.8,
-  0.5, 0.8, 0.8, 0.8,
+  1.0, 1.0, 1.0, 1.0,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8,
 
-  0.3, 0.5, 0.5, 0.5,
-  0.5, 0.8, 0.8, 0.8,
-  0.5, 0.8, 0.8, 0.8,
-  0.5, 0.8, 0.8, 0.8,
-  0.5, 0.8, 0.8, 0.8
+  1.0, 1.0, 1.0, 1.0,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8
 ]}"
 ```
 
 ---
 
-### Command 6: left hand close, right hand open
+### Command 6: right hand close strongly, left hand open
 
 ```bash
 ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
 "{data: [
-  0.2, 0.3, 0.3, 0.3,
-  0.3, 0.5, 0.5, 0.5,
-  0.3, 0.5, 0.5, 0.5,
-  0.3, 0.5, 0.5, 0.5,
-  0.3, 0.5, 0.5, 0.5,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+
+  1.0, 1.0, 1.0, 1.0,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8
+]}"
+```
+
+---
+
+### Command 7: left hand close strongly, right hand open
+
+```bash
+ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
+"{data: [
+  1.0, 1.0, 1.0, 1.0,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8,
+  0.8, 0.8, 0.8, 0.8,
 
   0.0, 0.0, 0.0, 0.0,
   0.0, 0.0, 0.0, 0.0,
   0.0, 0.0, 0.0, 0.0,
   0.0, 0.0, 0.0, 0.0,
   0.0, 0.0, 0.0, 0.0
-]}"
-```
-
----
-
-### Command 7: left hand open, right hand close
-
-```bash
-ros2 topic pub --once /forward_hand_joint_targets std_msgs/msg/Float64MultiArray \
-"{data: [
-  0.0, 0.0, 0.0, 0.0,
-  0.0, 0.0, 0.0, 0.0,
-  0.0, 0.0, 0.0, 0.0,
-  0.0, 0.0, 0.0, 0.0,
-  0.0, 0.0, 0.0, 0.0,
-
-  0.2, 0.3, 0.3, 0.3,
-  0.3, 0.5, 0.5, 0.5,
-  0.3, 0.5, 0.5, 0.5,
-  0.3, 0.5, 0.5, 0.5,
-  0.3, 0.5, 0.5, 0.5
 ]}"
 ```
 
