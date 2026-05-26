@@ -19,14 +19,14 @@ ros2 run dualarm_forcecon dualarm_forcecon_node
 Forward:
 
 ```bash
-ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
 "{linear: {x: 0.3}, angular: {z: 0.0}}"
 ```
 
 Backward:
 
 ```bash
-ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
 "{linear: {x: -0.3}, angular: {z: 0.0}}"
 ```
 
