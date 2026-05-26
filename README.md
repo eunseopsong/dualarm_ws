@@ -391,45 +391,61 @@ joint4 is treated as mimic of joint3 where needed
 
 ---
 
-### 3.6 RBY1 wheel / torso auxiliary joint target
+### 3.6 RBY1 wheel / torso upright driving
 
 ```text
-/forward_aux_joint_targets
+/cmd_vel
 ```
 
 Type:
 
 ```text
-sensor_msgs/msg/JointState
+geometry_msgs/msg/Twist
 ```
 
-Wheel velocity command:
+Run the controller first:
 
 ```bash
-ros2 topic pub /forward_aux_joint_targets sensor_msgs/msg/JointState "{
-  name: ['left_wheel', 'right_wheel'],
-  velocity: [10.0, 10.0],
-  position: [],
-  effort: []
-}"
+cd ~/dualarm_ws
+source install/setup.bash
+ros2 run dualarm_forcecon dualarm_forcecon_node
 ```
 
-Torso position command:
+Forward:
 
 ```bash
-ros2 topic pub --once /forward_aux_joint_targets sensor_msgs/msg/JointState "{
-  name: ['torso_0', 'torso_1', 'torso_2', 'torso_3', 'torso_4', 'torso_5'],
-  position: [0.0, 0.2, -0.4, 0.3, 0.0, 0.0],
-  velocity: [],
-  effort: []
-}"
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+"{linear: {x: 0.3}, angular: {z: 0.0}}"
+```
+
+Backward:
+
+```bash
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+"{linear: {x: -0.3}, angular: {z: 0.0}}"
+```
+
+Stop:
+
+```bash
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
+"{linear: {x: 0.0}, angular: {z: 0.0}}"
 ```
 
 Notes:
 
 ```text
-wheel velocity overrides timeout after aux_joint_velocity_timeout_sec.
-torso position overrides are latched until a new torso command is received.
+Do not publish wheel-only commands directly to /isaac_joint_command.
+
+While /cmd_vel is active, dualarm_forcecon also publishes the configured
+torso_* upright position targets so the torso stays vertical during driving.
+
+In the current Isaac setup, positive /cmd_vel.linear.x is forward because
+mobile_base.invert_wheel_velocity_command is true in forcecon_cfg.yaml.
+
+The torso upright target is configured by:
+mobile_base.torso_upright_joint_names
+mobile_base.torso_upright_positions
 ```
 
 ---
