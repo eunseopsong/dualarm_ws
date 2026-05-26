@@ -100,6 +100,7 @@ inline void applyFingerCmd(Eigen::VectorXd& qh20,
     qh20(b + 3) = out_step.q_cmd_4_mimic;
 }
 
+
 void applyYamlToHandCfg(const YAML::Node& n, dualarm_forcecon::HandAdmittanceControl::Config& cfg) {
     readArrayDouble<3>(n, "mass", cfg.mass);
     readArrayDouble<3>(n, "damping", cfg.damping);
