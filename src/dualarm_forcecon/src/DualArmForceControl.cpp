@@ -562,6 +562,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     double wheel_radius_default = 0.1;
     double wheel_base_default = 0.53;
     double max_wheel_speed_default = 10.0;
+    bool invert_wheel_velocity_command_default = true;
     bool torso_upright_hold_enabled_default = true;
     bool torso_upright_hold_during_wheel_only_default = true;
     std::vector<std::string> torso_upright_joint_names_default{
@@ -578,6 +579,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         readScalar(base_node, "wheel_radius_m", wheel_radius_default);
         readScalar(base_node, "wheel_base_m", wheel_base_default);
         readScalar(base_node, "max_wheel_speed_rad_s", max_wheel_speed_default);
+        readScalar(base_node, "invert_wheel_velocity_command", invert_wheel_velocity_command_default);
         readScalar(base_node, "torso_upright_hold_enabled", torso_upright_hold_enabled_default);
         readScalar(base_node, "torso_upright_hold_during_wheel_only", torso_upright_hold_during_wheel_only_default);
         if (base_node["torso_upright_joint_names"] && base_node["torso_upright_joint_names"].IsSequence()) {
@@ -604,6 +606,8 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         "wheel_base_m", wheel_base_default);
     max_wheel_speed_rad_s_ = node_->declare_parameter<double>(
         "max_wheel_speed_rad_s", max_wheel_speed_default);
+    invert_wheel_velocity_command_ = node_->declare_parameter<bool>(
+        "invert_wheel_velocity_command", invert_wheel_velocity_command_default);
     torso_upright_hold_enabled_ = node_->declare_parameter<bool>(
         "torso_upright_hold_enabled", torso_upright_hold_enabled_default);
     torso_upright_hold_during_wheel_only_ = node_->declare_parameter<bool>(
@@ -1190,6 +1194,11 @@ void DualArmForceControl::ControlLoop()
         const double half_track = 0.5 * wheel_base_m_;
         double left = (cmd_vel_linear_x_ - half_track * cmd_vel_angular_z_) / wheel_radius_m_;
         double right = (cmd_vel_linear_x_ + half_track * cmd_vel_angular_z_) / wheel_radius_m_;
+
+        if (invert_wheel_velocity_command_) {
+            left *= -1.0;
+            right *= -1.0;
+        }
 
         left = std::clamp(left, -max_wheel_speed_rad_s_, max_wheel_speed_rad_s_);
         right = std::clamp(right, -max_wheel_speed_rad_s_, max_wheel_speed_rad_s_);
