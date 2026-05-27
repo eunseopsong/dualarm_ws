@@ -554,6 +554,23 @@ Compact format:
 [hand_id, finger_id, fx, fy, fz]
 ```
 
+Full array format:
+
+```text
+[
+  left_thumb_fx,   left_thumb_fy,   left_thumb_fz,
+  left_index_fx,   left_index_fy,   left_index_fz,
+  left_middle_fx,  left_middle_fy,  left_middle_fz,
+  left_ring_fx,    left_ring_fy,    left_ring_fz,
+  left_baby_fx,    left_baby_fy,    left_baby_fz,
+  right_thumb_fx,  right_thumb_fy,  right_thumb_fz,
+  right_index_fx,  right_index_fy,  right_index_fz,
+  right_middle_fx, right_middle_fy, right_middle_fz,
+  right_ring_fx,   right_ring_fy,   right_ring_fz,
+  right_baby_fx,   right_baby_fy,   right_baby_fz
+]
+```
+
 Legacy-compatible format:
 
 ```text
@@ -606,6 +623,9 @@ Important:
 /target_hand_force does not replace hand motion target.
 For stable admittance behavior, publish a valid hand motion target first.
 Then publish /target_hand_force.
+
+Compact and legacy-compatible commands select one active fingertip force target.
+Full array commands update all left/right fingertip force targets at once.
 ```
 
 ---
@@ -1103,6 +1123,57 @@ Meaning:
 ```
 
 The position part is legacy-compatible and is ignored in the current desired-force usage.
+
+---
+
+### Force command 16: full array, left ring + right index
+
+This updates all ten fingertip force targets at once. Values not listed as
+nonzero are explicitly commanded to zero.
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 5.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 3.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0
+]}"
+```
+
+Meaning:
+
+```text
+left ring  force = (0, 0, +5) N
+right index force = (0, 0, +3) N
+all other fingertip force targets = 0 N
+```
+
+---
+
+### Force command 17: release all force targets
+
+```bash
+ros2 topic pub --once /target_hand_force std_msgs/msg/Float64MultiArray \
+"{data: [
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0
+]}"
+```
 
 ---
 

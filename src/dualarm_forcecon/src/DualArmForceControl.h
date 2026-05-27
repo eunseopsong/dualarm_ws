@@ -68,6 +68,9 @@ public:
     // Desired-force reference callback for unified hand admittance
     //
     // Supported:
+    //   30 values:
+    //     left thumb/index/middle/ring/baby xyz,
+    //     then right thumb/index/middle/ring/baby xyz
     //   [hand_id, finger_id, fx, fy, fz]
     //   [hand_id, finger_id, px, py, pz, fx, fy, fz]  // legacy, p ignored
     //

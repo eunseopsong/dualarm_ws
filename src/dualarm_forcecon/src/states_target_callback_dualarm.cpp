@@ -987,6 +987,75 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
 
     auto logger = node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon");
 
+    auto reset_admittance_state = [&](bool is_left, int finger_id) {
+        auto& adm_arr = is_left ? hand_adm_l_ : hand_adm_r_;
+        if (!adm_arr[static_cast<std::size_t>(finger_id)]) {
+            return;
+        }
+
+        Eigen::Vector3d p_init = Eigen::Vector3d::Zero();
+        if (is_left) {
+            switch (finger_id) {
+                case 0: p_init = pointToVec(f_l_thumb_);  break;
+                case 1: p_init = pointToVec(f_l_index_);  break;
+                case 2: p_init = pointToVec(f_l_middle_); break;
+                case 3: p_init = pointToVec(f_l_ring_);   break;
+                case 4: p_init = pointToVec(f_l_baby_);   break;
+            }
+        } else {
+            switch (finger_id) {
+                case 0: p_init = pointToVec(f_r_thumb_);  break;
+                case 1: p_init = pointToVec(f_r_index_);  break;
+                case 2: p_init = pointToVec(f_r_middle_); break;
+                case 3: p_init = pointToVec(f_r_ring_);   break;
+                case 4: p_init = pointToVec(f_r_baby_);   break;
+            }
+        }
+        adm_arr[static_cast<std::size_t>(finger_id)]->resetState(p_init);
+    };
+
+    if (msg->data.size() == 30) {
+        Eigen::Matrix<double,5,3> f_l_new;
+        Eigen::Matrix<double,5,3> f_r_new;
+        f_l_new.setZero();
+        f_r_new.setZero();
+
+        auto read_one_hand = [&](Eigen::Matrix<double,5,3>& dst, int offset) -> bool {
+            for (int finger = 0; finger < 5; ++finger) {
+                Eigen::Vector3d f_des;
+                for (int axis = 0; axis < 3; ++axis) {
+                    const double v = msg->data[static_cast<std::size_t>(offset + finger * 3 + axis)];
+                    if (!std::isfinite(v)) {
+                        return false;
+                    }
+                    f_des(axis) = v;
+                }
+                dst.row(finger) = f_des.transpose();
+            }
+            return true;
+        };
+
+        if (!read_one_hand(f_l_new, 0) || !read_one_hand(f_r_new, 15)) {
+            RCLCPP_WARN(logger, "[TargetHandForceCallback] non-finite 30-value desired force array");
+            return;
+        }
+
+        f_l_hand_t_ = f_l_new;
+        f_r_hand_t_ = f_r_new;
+
+        hand_force_cmd_valid_ = false;
+        hand_force_cmd_hand_id_ = 0;
+        hand_force_cmd_finger_id_ = 0;
+        hand_force_cmd_f_des_base_.setZero();
+        hand_force_cmd_stamp_ns_ = node_ ? node_->get_clock()->now().nanoseconds() : 0;
+
+        for (int finger = 0; finger < 5; ++finger) {
+            reset_admittance_state(true, finger);
+            reset_admittance_state(false, finger);
+        }
+        return;
+    }
+
     const double hand_id_d   = msg->data[0];
     const double finger_id_d = msg->data[1];
 
@@ -1040,28 +1109,7 @@ void DualArmForceControl::TargetHandForceCallback(const std_msgs::msg::Float64Mu
 
     // reset only the targeted admittance controller state so the next control
     // loop iteration starts from the current fingertip pose cleanly.
-    auto& adm_arr = is_left ? hand_adm_l_ : hand_adm_r_;
-    if (adm_arr[static_cast<std::size_t>(finger_id)]) {
-        Eigen::Vector3d p_init = Eigen::Vector3d::Zero();
-        if (is_left) {
-            switch (finger_id) {
-                case 0: p_init = pointToVec(f_l_thumb_);  break;
-                case 1: p_init = pointToVec(f_l_index_);  break;
-                case 2: p_init = pointToVec(f_l_middle_); break;
-                case 3: p_init = pointToVec(f_l_ring_);   break;
-                case 4: p_init = pointToVec(f_l_baby_);   break;
-            }
-        } else {
-            switch (finger_id) {
-                case 0: p_init = pointToVec(f_r_thumb_);  break;
-                case 1: p_init = pointToVec(f_r_index_);  break;
-                case 2: p_init = pointToVec(f_r_middle_); break;
-                case 3: p_init = pointToVec(f_r_ring_);   break;
-                case 4: p_init = pointToVec(f_r_baby_);   break;
-            }
-        }
-        adm_arr[static_cast<std::size_t>(finger_id)]->resetState(p_init);
-    }
+    reset_admittance_state(is_left, finger_id);
 
     static int dbg_decim = 0;
     if ((dbg_decim++ % 20) == 0) {
