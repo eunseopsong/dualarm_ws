@@ -60,7 +60,7 @@ public:
     void TargetBaseVelocityCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
 
     // ------------------------------------------------------------------------
-    // Measured contact force callback (Isaac)
+    // Measured hand force callback (Isaac)
     // ------------------------------------------------------------------------
     void HandContactForceCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
 
@@ -116,8 +116,9 @@ private:
     // Desired-force reference topic
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_hand_force_sub_;
 
-    // Contact states topic from Isaac
-    rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr contact_force_sub_;
+    // AIDIN hand force topic from Isaac: left 5 fingers then right 5 fingers,
+    // each finger ordered Fx, Fy, Fz.
+    rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr hand_force_xyz_sub_;
 
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
 

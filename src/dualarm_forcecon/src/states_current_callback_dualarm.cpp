@@ -736,63 +736,35 @@ void DualArmForceControl::HandContactForceCallback(
     };
     reset_current_force_buffers_only();
 
-    if (msg->data.size() < 10) {
+    if (msg->data.size() < 30) {
+        RCLCPP_WARN(
+            node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon"),
+            "[HandForce] /aidin_hand/force_xyz expects 30 values, got %zu",
+            msg->data.size());
         return;
     }
-
-    if (!hand_fk_l_ || !hand_fk_r_) {
-        return;
-    }
-
-    const std::vector<double> hl15 = compress20to15(q_l_h_c_);
-    const std::vector<double> hr15 = compress20to15(q_r_h_c_);
-
-    const std::vector<Eigen::Matrix3d> Rl_base_tip = hand_fk_l_->computeTipRotationsBase(hl15);
-    const std::vector<Eigen::Matrix3d> Rr_base_tip = hand_fk_r_->computeTipRotationsBase(hr15);
-
-    for (int i = 0; i < 5; ++i) {
-        R_l_base_tip_c_[static_cast<std::size_t>(i)] = safeGetRot(Rl_base_tip, i);
-        R_r_base_tip_c_[static_cast<std::size_t>(i)] = safeGetRot(Rr_base_tip, i);
-    }
-
-    const Eigen::Matrix3d R_tip_sensor = Eigen::Matrix3d::Identity();
-
-    Eigen::Matrix3d R_wrist_output_calib;
-    R_wrist_output_calib <<  0.0, 0.0, 1.0,
-                             0.0, 1.0, 0.0,
-                            -1.0, 0.0, 0.0;
-
-    // incoming observed order was [BABY, RING, MIDL, INDX, THMB]
-    // internal canonical row order is [THMB, INDX, MIDL, RING, BABY]
-    const std::array<int,5> msg_to_row = {4, 3, 2, 1, 0};
 
     auto assign_one_hand = [&](Eigen::Matrix<double,5,1>& raw_contact_mat,
                                Eigen::Matrix<double,5,3>& F_sensor_mat,
                                Eigen::Matrix<double,5,3>& F_wrist_mat,
                                Eigen::Matrix<double,5,3>& F_hand_cur,
-                               const std::vector<Eigen::Matrix3d>& R_base_tip_all,
                                int msg_offset)
     {
-        for (int k = 0; k < 5; ++k) {
-            const int row = msg_to_row[k];
-            const double s = static_cast<double>(msg->data[msg_offset + k]);
-
-            raw_contact_mat(row, 0) = s;
-
-            const Eigen::Vector3d f_sensor(s, 0.0, 0.0);
-            F_sensor_mat.row(row) = f_sensor.transpose();
-
-            const Eigen::Vector3d f_tip = R_tip_sensor * f_sensor;
-            const Eigen::Matrix3d R_base_tip = safeGetRot(R_base_tip_all, row);
-            const Eigen::Vector3d f_wrist_raw = R_base_tip * f_tip;
-            Eigen::Vector3d f_wrist = R_wrist_output_calib * f_wrist_raw;
-
-            for (int i = 0; i < 3; ++i) {
-                if (std::fabs(f_wrist(i)) < 1e-9) f_wrist(i) = 0.0;
+        for (int finger = 0; finger < 5; ++finger) {
+            Eigen::Vector3d f_xyz;
+            for (int axis = 0; axis < 3; ++axis) {
+                const std::size_t idx = static_cast<std::size_t>(msg_offset + finger * 3 + axis);
+                double v = static_cast<double>(msg->data[idx]);
+                if (!std::isfinite(v) || std::fabs(v) < 1e-9) {
+                    v = 0.0;
+                }
+                f_xyz(axis) = v;
             }
 
-            F_wrist_mat.row(row) = f_wrist.transpose();
-            F_hand_cur.row(row)  = f_wrist.transpose();
+            raw_contact_mat(finger, 0) = f_xyz.norm();
+            F_sensor_mat.row(finger) = f_xyz.transpose();
+            F_wrist_mat.row(finger) = f_xyz.transpose();
+            F_hand_cur.row(finger) = f_xyz.transpose();
         }
     };
 
@@ -800,15 +772,13 @@ void DualArmForceControl::HandContactForceCallback(
                     f_l_hand_sensor_c_,
                     f_l_hand_wrist_c_,
                     f_l_hand_c_,
-                    Rl_base_tip,
                     0);
 
     assign_one_hand(raw_r_hand_contact_,
                     f_r_hand_sensor_c_,
                     f_r_hand_wrist_c_,
                     f_r_hand_c_,
-                    Rr_base_tip,
-                    5);
+                    15);
 }
 
 void DualArmForceControl::PublishHandForceMonitor()
