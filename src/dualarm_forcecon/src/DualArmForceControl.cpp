@@ -4,6 +4,7 @@
 #include <cmath>
 #include <utility>
 #include <yaml-cpp/yaml.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 using namespace std::chrono_literals;
 
@@ -85,6 +86,34 @@ inline Eigen::Vector3d safeGetTip(const std::vector<Eigen::Vector3d>& tips, int 
         return Eigen::Vector3d::Zero();
     }
     return p;
+}
+
+std::string resolvePackagePath(const std::string& path)
+{
+    const std::string prefix = "package://";
+    if (path.rfind(prefix, 0) != 0) {
+        return path;
+    }
+
+    const std::string package_and_path = path.substr(prefix.size());
+    const std::size_t slash = package_and_path.find('/');
+    const std::string package_name = package_and_path.substr(0, slash);
+    const std::string relative_path =
+        slash == std::string::npos ? "" : package_and_path.substr(slash + 1);
+
+    if (package_name.empty()) {
+        return path;
+    }
+
+    try {
+        std::string resolved = ament_index_cpp::get_package_share_directory(package_name);
+        if (!relative_path.empty()) {
+            resolved += "/" + relative_path;
+        }
+        return resolved;
+    } catch (const std::exception&) {
+        return path;
+    }
 }
 
 inline void applyFingerCmd(Eigen::VectorXd& qh20,
@@ -189,17 +218,18 @@ inline std::string resolveKinematicsConfigYaml(
     // Priority 1: explicit kinematics YAML override from ROS parameter
     //
     // Example:
-    //   -p kinematics_cfg_yaml:=/absolute/path/to/rby1_kinematics.yaml
+    //   -p kinematics_cfg_yaml:=package://dualarm_kinematics/config/rby1_kinematics.yaml
     // ----------------------------------------------------------------------
     const std::string override_yaml =
         node->declare_parameter<std::string>("kinematics_cfg_yaml", "");
 
     if (!override_yaml.empty()) {
+        const std::string resolved_yaml = resolvePackagePath(override_yaml);
         RCLCPP_INFO(
             logger,
             "[KinematicsConfig] using ROS parameter override kinematics_cfg_yaml=%s",
-            override_yaml.c_str());
-        return override_yaml;
+            resolved_yaml.c_str());
+        return resolved_yaml;
     }
 
     const YAML::Node kin_node = root ? root["kinematics"] : YAML::Node();
@@ -266,7 +296,7 @@ inline std::string resolveKinematicsConfigYaml(
                     profile["name"] ? profile["name"].as<std::string>() : "unnamed";
 
                 const std::string config_yaml =
-                    profile["config_yaml"].as<std::string>();
+                    resolvePackagePath(profile["config_yaml"].as<std::string>());
 
                 RCLCPP_INFO(
                     logger,
@@ -298,7 +328,8 @@ inline std::string resolveKinematicsConfigYaml(
     // ----------------------------------------------------------------------
     try {
         if (kin_node["config_yaml"]) {
-            const std::string config_yaml = kin_node["config_yaml"].as<std::string>();
+            const std::string config_yaml =
+                resolvePackagePath(kin_node["config_yaml"].as<std::string>());
             RCLCPP_INFO(
                 logger,
                 "[KinematicsConfig] fallback to kinematics.config_yaml=%s",
@@ -331,8 +362,9 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     urdf_path_ = node_->declare_parameter<std::string>(
         "urdf_path",
-        "/home/eunseop/isaac/isaac_save/dualarm/dualarm_description/urdf/aidin_dsr_dualarm.urdf"
+        "package://dualarm_kinematics/urdf/aidin_dsr_dualarm.urdf"
     );
+    urdf_path_ = resolvePackagePath(urdf_path_);
 
     auto world_base_xyz_vec = node_->declare_parameter<std::vector<double>>(
         "world_base_xyz", std::vector<double>{0.0, 0.0, 0.306}
@@ -355,11 +387,12 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     const std::string cfg_yaml_path = node_->declare_parameter<std::string>(
         "forcecon_cfg_yaml",
-        "/home/eunseop/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml"
+        "package://dualarm_forcecon/yaml/forcecon_cfg.yaml"
     );
+    const std::string resolved_cfg_yaml_path = resolvePackagePath(cfg_yaml_path);
 
     const std::string default_kinematics_cfg_yaml_path =
-        "/home/eunseop/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml";
+        resolvePackagePath("package://dualarm_kinematics/config/doosan_dualarm_kinematics.yaml");
 
     // -------------------------
     // Load YAML cfg early
@@ -367,7 +400,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     //   - selected robot kinematics profile is resolved from:
     //
     //       1) ROS parameter:
-    //            -p kinematics_cfg_yaml:=/absolute/path/to/robot_kinematics.yaml
+    //            -p kinematics_cfg_yaml:=package://dualarm_kinematics/config/rby1_kinematics.yaml
     //
     //       2) ROS parameter:
     //            -p robot_profile_id:=1
@@ -380,12 +413,12 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     // -------------------------
     YAML::Node root;
     try {
-        root = YAML::LoadFile(cfg_yaml_path);
-        RCLCPP_INFO(node_->get_logger(), "[forcecon_cfg] loaded: %s", cfg_yaml_path.c_str());
+        root = YAML::LoadFile(resolved_cfg_yaml_path);
+        RCLCPP_INFO(node_->get_logger(), "[forcecon_cfg] loaded: %s", resolved_cfg_yaml_path.c_str());
     } catch (const std::exception& e) {
         RCLCPP_WARN(node_->get_logger(),
                     "[forcecon_cfg] failed to load %s (%s). Use defaults.",
-                    cfg_yaml_path.c_str(), e.what());
+                    resolved_cfg_yaml_path.c_str(), e.what());
         root = YAML::Node();
     }
 
@@ -405,7 +438,8 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
     }
 
     kin_cfg_ = dualarm_forcecon::DualArmKinematicsConfig::fromYaml(kin_root, urdf_path_);
-    urdf_path_ = kin_cfg_.urdf_path;
+    urdf_path_ = resolvePackagePath(kin_cfg_.urdf_path);
+    kin_cfg_.urdf_path = urdf_path_;
 
     RCLCPP_INFO(node_->get_logger(),
                 "[KinematicsConfig] source=%s",

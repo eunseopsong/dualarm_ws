@@ -3,7 +3,7 @@
 # ============================================================================
 robot_kinematics:
   profile: generic_dualarm
-  urdf_path: /absolute/path/to/robot.urdf
+  urdf_path: package://your_robot_description/urdf/robot.urdf
 
   arm:
     base_link: base_link

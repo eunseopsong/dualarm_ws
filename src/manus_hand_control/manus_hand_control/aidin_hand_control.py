@@ -49,22 +49,21 @@ ERG_ORDER = [
 
 NAME2IDX = {name: idx for idx, name in enumerate(ERG_ORDER)}
 
-# Output order before dualarm_forcecon reordering:
-# [thumb1..3, ring1..3, middle1..3, index1..3, pinky1..3]
+# Output order: [thumb1..3, index1..3, middle1..3, ring1..3, pinky1..3]
 MANUS2AIDIN = np.asarray(
     [
         NAME2IDX["ThumbMCPSpread"],
         NAME2IDX["ThumbMCPStretch"],
         NAME2IDX["ThumbPIPStretch"],
-        NAME2IDX["RingSpread"],
-        NAME2IDX["RingMCPStretch"],
-        NAME2IDX["RingPIPStretch"],
-        NAME2IDX["MiddleSpread"],
-        NAME2IDX["MiddleMCPStretch"],
-        NAME2IDX["MiddlePIPStretch"],
         NAME2IDX["IndexSpread"],
         NAME2IDX["IndexMCPStretch"],
         NAME2IDX["IndexPIPStretch"],
+        NAME2IDX["MiddleSpread"],
+        NAME2IDX["MiddleMCPStretch"],
+        NAME2IDX["MiddlePIPStretch"],
+        NAME2IDX["RingSpread"],
+        NAME2IDX["RingMCPStretch"],
+        NAME2IDX["RingPIPStretch"],
         NAME2IDX["PinkySpread"],
         NAME2IDX["PinkyMCPStretch"],
         NAME2IDX["PinkyPIPStretch"],
@@ -166,8 +165,8 @@ RIGHT_MASKING = np.array(
     dtype=np.float64,
 )
 
-REORDER_THUMB_RING_MIDDLE_INDEX_PINKY_TO_FORCECON = np.array(
-    [12, 13, 14, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2],
+REORDER_THUMB_INDEX_MIDDLE_RING_PINKY_TO_LEGACY_REVERSE = np.array(
+    [12, 13, 14, 9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2],
     dtype=np.int64,
 )
 
@@ -221,6 +220,9 @@ class AidinHandControl(Node):
         self.publish_rate_hz = _float_param(self, "publish_rate_hz", 200.0)
         self.min_non_spread_position = _float_param(self, "min_non_spread_position", 0.01)
         self.debug_print = _bool_param(self, "debug_print", False)
+        self.print_manus_input = _bool_param(self, "print_manus_input", False)
+        self.print_interval_s = _float_param(self, "print_interval_s", 0.5)
+        self.legacy_reverse_finger_order = _bool_param(self, "legacy_reverse_finger_order", False)
 
         self.auto_set_forcecon_mode = _bool_param(self, "auto_set_forcecon_mode", False)
         self.forcecon_mode_service = _string_param(self, "forcecon_mode_service", "/change_control_mode")
@@ -231,9 +233,28 @@ class AidinHandControl(Node):
         self.right_manus_data = np.zeros(len(ERG_ORDER), dtype=np.float64)
         self.left_seen = False
         self.right_seen = False
+        self.left_msg_count = 0
+        self.right_msg_count = 0
+        self.left_last_msg_ns = 0
+        self.right_last_msg_ns = 0
+        self.left_battery_percentage = None
+        self.right_battery_percentage = None
+        self.left_transmission_strength = None
+        self.right_transmission_strength = None
+        self.last_print_ns = 0
 
-        self.create_subscription(ManusGlove, self.left_glove_topic, self._left_hand_callback, 1)
-        self.create_subscription(ManusGlove, self.right_glove_topic, self._right_hand_callback, 1)
+        self.left_subscription = self.create_subscription(
+            ManusGlove,
+            self.left_glove_topic,
+            self._left_hand_callback,
+            1,
+        )
+        self.right_subscription = self.create_subscription(
+            ManusGlove,
+            self.right_glove_topic,
+            self._right_hand_callback,
+            1,
+        )
         self.publisher = self.create_publisher(Float64MultiArray, self.output_topic, 10)
 
         period_s = 1.0 / max(self.publish_rate_hz, 1.0)
@@ -250,10 +271,18 @@ class AidinHandControl(Node):
     def _left_hand_callback(self, msg: ManusGlove) -> None:
         self._store_ergonomics(msg.ergonomics, self.left_manus_data)
         self.left_seen = True
+        self.left_msg_count += 1
+        self.left_last_msg_ns = self.get_clock().now().nanoseconds
+        self.left_battery_percentage = self._optional_int_field(msg, "battery_percentage")
+        self.left_transmission_strength = self._optional_int_field(msg, "transmission_strength")
 
     def _right_hand_callback(self, msg: ManusGlove) -> None:
         self._store_ergonomics(msg.ergonomics, self.right_manus_data)
         self.right_seen = True
+        self.right_msg_count += 1
+        self.right_last_msg_ns = self.get_clock().now().nanoseconds
+        self.right_battery_percentage = self._optional_int_field(msg, "battery_percentage")
+        self.right_transmission_strength = self._optional_int_field(msg, "transmission_strength")
 
     @staticmethod
     def _store_ergonomics(ergonomics: Iterable, out: np.ndarray) -> None:
@@ -289,6 +318,52 @@ class AidinHandControl(Node):
                 f"R={right.reshape(5, 3)}"
             )
 
+        if self.print_manus_input:
+            self._maybe_print_manus_input()
+
+    def _maybe_print_manus_input(self) -> None:
+        now_ns = self.get_clock().now().nanoseconds
+        interval_ns = int(max(self.print_interval_s, 0.05) * 1e9)
+        if now_ns - self.last_print_ns < interval_ns:
+            return
+
+        self.last_print_ns = now_ns
+        np.set_printoptions(precision=2, suppress=True)
+        left_age_s = self._age_s(now_ns, self.left_last_msg_ns)
+        right_age_s = self._age_s(now_ns, self.right_last_msg_ns)
+        left_publishers = self.count_publishers(self.left_glove_topic)
+        right_publishers = self.count_publishers(self.right_glove_topic)
+        self.get_logger().info(
+            "MANUS ergonomics deg "
+            "(rows: thumb/index/middle/ring/pinky, cols: spread/mcp/pip/dip)\n"
+            f"L topic={self.left_glove_topic} publishers={left_publishers} "
+            f"seen={self.left_seen} count={self.left_msg_count} age_s={left_age_s:.2f} "
+            f"battery={self._fmt_optional(self.left_battery_percentage, '%')} "
+            f"rssi={self._fmt_optional(self.left_transmission_strength, '')}:\n"
+            f"{self.left_manus_data.reshape(5, 4)}\n"
+            f"R topic={self.right_glove_topic} publishers={right_publishers} "
+            f"seen={self.right_seen} count={self.right_msg_count} age_s={right_age_s:.2f} "
+            f"battery={self._fmt_optional(self.right_battery_percentage, '%')} "
+            f"rssi={self._fmt_optional(self.right_transmission_strength, '')}:\n"
+            f"{self.right_manus_data.reshape(5, 4)}"
+        )
+
+    @staticmethod
+    def _optional_int_field(msg, field_name: str):
+        return int(getattr(msg, field_name)) if hasattr(msg, field_name) else None
+
+    @staticmethod
+    def _fmt_optional(value, suffix: str) -> str:
+        if value is None:
+            return "n/a"
+        return f"{value}{suffix}"
+
+    @staticmethod
+    def _age_s(now_ns: int, last_ns: int) -> float:
+        if last_ns <= 0:
+            return math.inf
+        return max(0.0, (now_ns - last_ns) * 1e-9)
+
     def _manus_to_forcecon_hand(
         self,
         manus20_deg: np.ndarray,
@@ -298,7 +373,9 @@ class AidinHandControl(Node):
     ) -> np.ndarray:
         aidin15_rad = manus20_deg[MANUS2AIDIN] * np.pi / 180.0
         aidin15 = (aidin15_rad * scale + offset) * mask
-        forcecon_order = aidin15[REORDER_THUMB_RING_MIDDLE_INDEX_PINKY_TO_FORCECON].copy()
+        forcecon_order = aidin15.copy()
+        if self.legacy_reverse_finger_order:
+            forcecon_order = forcecon_order[REORDER_THUMB_INDEX_MIDDLE_RING_PINKY_TO_LEGACY_REVERSE].copy()
         idx = NON_SPREAD_INDICES_PER_HAND
         forcecon_order[idx] = np.maximum(forcecon_order[idx], self.min_non_spread_position)
         return forcecon_order

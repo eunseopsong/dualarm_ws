@@ -17,6 +17,7 @@
 
   <depend>dualarm_forcecon_interfaces</depend>
   <depend>dualarm_kinematics</depend>
+  <depend>ament_index_cpp</depend>
 
   <depend>eigen</depend>
   <depend>yaml-cpp</depend>

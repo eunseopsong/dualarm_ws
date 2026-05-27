@@ -3,7 +3,7 @@
 # ============================================================================
 robot_kinematics:
   profile: doosan_aidin
-  urdf_path: /home/eunseop/isaac/isaac_save/dualarm/dualarm_description/urdf/aidin_dsr_dualarm.urdf
+  urdf_path: package://dualarm_kinematics/urdf/aidin_dsr_dualarm.urdf
 
   arm:
     base_link: base_link

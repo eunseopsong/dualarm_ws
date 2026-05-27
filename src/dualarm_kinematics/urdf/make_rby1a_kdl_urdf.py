@@ -2,8 +2,9 @@
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
-SRC = Path("/home/eunseop/dualarm_ws/src/dualarm_kinematics/urdf/rby1a_official_raw.urdf")
-DST = Path("/home/eunseop/dualarm_ws/src/dualarm_kinematics/urdf/rby1a_kdl.urdf")
+URDF_DIR = Path(__file__).resolve().parent
+SRC = URDF_DIR / "rby1a_official_raw.urdf"
+DST = URDF_DIR / "rby1a_kdl.urdf"
 
 tree = ET.parse(SRC)
 root = tree.getroot()

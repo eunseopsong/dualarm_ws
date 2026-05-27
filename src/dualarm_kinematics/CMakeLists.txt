@@ -63,6 +63,13 @@ install(
 )
 
 install(
+  FILES
+    urdf/rby1a_kdl.urdf
+    urdf/aidin_dsr_dualarm.urdf
+  DESTINATION share/${PROJECT_NAME}/urdf
+)
+
+install(
   TARGETS ${PROJECT_NAME}
   EXPORT export_${PROJECT_NAME}
 )

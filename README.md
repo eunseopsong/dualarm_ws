@@ -2,19 +2,22 @@
 
 ## Quick Start Example Commands
 
+Path assumption for all commands:
+
+```text
+dualarm workspace: ~/dualarm_ws
+MANUS workspace  : ~/manus_ws
+```
+
+All package data paths use `package://...` and are resolved from the sourced
+ROS workspace, so the commands are independent of the Linux username or PC name.
+
 ### 1. Build
 
 ```bash
 cd ~/dualarm_ws
 colcon build --symlink-install
 source install/setup.bash
-```
-
-If using the custom alias:
-
-```bash
-cd ~/dualarm_ws
-cb
 ```
 
 ---
@@ -26,11 +29,12 @@ cb
 Use this when running RBY1 arm teleoperation with Manus glove hand command and selected-finger admittance correction.
 
 ```bash
-source ~/dualarm_ws/install/setup.bash
+cd ~/dualarm_ws
+source install/setup.bash
 
 ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
-  -p forcecon_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml \
-  -p kinematics_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml \
+  -p forcecon_cfg_yaml:=package://dualarm_forcecon/yaml/forcecon_cfg.yaml \
+  -p kinematics_cfg_yaml:=package://dualarm_kinematics/config/rby1_kinematics.yaml \
   -p control_loop_period_ms:=5.0 \
   -p rby1_arm_max_cmd_step_rad:=0.015 \
   -p rby1_arm_servo_max_cart_step_m:=0.0025 \
@@ -42,9 +46,12 @@ ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
 If the robot moves too aggressively:
 
 ```bash
+cd ~/dualarm_ws
+source install/setup.bash
+
 ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
-  -p forcecon_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_forcecon/yaml/forcecon_cfg.yaml \
-  -p kinematics_cfg_yaml:=/home/vision/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml \
+  -p forcecon_cfg_yaml:=package://dualarm_forcecon/yaml/forcecon_cfg.yaml \
+  -p kinematics_cfg_yaml:=package://dualarm_kinematics/config/rby1_kinematics.yaml \
   -p control_loop_period_ms:=10.0 \
   -p rby1_arm_max_cmd_step_rad:=0.008 \
   -p rby1_arm_servo_max_cart_step_m:=0.0012 \
@@ -53,11 +60,63 @@ ros2 run dualarm_forcecon dualarm_forcecon_node --ros-args \
   -p fallback_right_hand_base_link:=right_joint_6
 ```
 
-If the PC username is `eunseop`, replace `/home/vision` with `/home/eunseop`.
+---
+
+### 3. Run MANUS glove bridge
+
+Use two terminals. Keep the MANUS publisher running in terminal 1, then start
+the bridge in terminal 2.
+
+Terminal 1:
+
+```bash
+cd ~/dualarm_ws
+source ~/manus_ws/install/setup.bash
+source install/setup.bash
+
+ros2 run manus_ros2 manus_data_publisher
+```
+
+Terminal 2:
+
+```bash
+cd ~/dualarm_ws
+source ~/manus_ws/install/setup.bash
+source install/setup.bash
+
+ros2 run manus_hand_control aidin_hand_control --ros-args \
+  -p auto_set_forcecon_mode:=true \
+  -p forcecon_arm_mode:=inverse \
+  -p forcecon_hand_mode:=forward
+```
+
+MANUS topic checks:
+
+```bash
+cd ~/dualarm_ws
+source ~/manus_ws/install/setup.bash
+source install/setup.bash
+
+ros2 topic list | grep manus
+ros2 topic echo /manus_glove_0
+ros2 topic hz /forward_hand_joint_targets
+```
+
+Print incoming MANUS values:
+
+```bash
+cd ~/dualarm_ws
+source ~/manus_ws/install/setup.bash
+source install/setup.bash
+
+ros2 run manus_hand_control aidin_hand_control --ros-args \
+  -p print_manus_input:=true \
+  -p print_interval_s:=0.5
+```
 
 ---
 
-### 3. Change control mode
+### 4. Change control mode
 
 #### RBY1 arm inverse + hand forward
 
@@ -520,6 +579,19 @@ Force unit:
 
 ```text
 N
+```
+
+Isaac Sim hand force Script Node source:
+
+```text
+src/dualarm_forcecon/scripts/aidin_hand_force_sensor.py
+```
+
+After build, the installed copy is under:
+
+```bash
+ros2 pkg prefix dualarm_forcecon
+# <prefix>/share/dualarm_forcecon/scripts/aidin_hand_force_sensor.py
 ```
 
 Frame:

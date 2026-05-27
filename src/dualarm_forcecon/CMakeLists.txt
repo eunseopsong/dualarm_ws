@@ -9,6 +9,7 @@ endif()
 # Dependencies
 # ------------------------------------------------------------------------------
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -44,6 +45,7 @@ ament_target_dependencies(dualarm_forcecon_node
   geometry_msgs
   dualarm_forcecon_interfaces
   dualarm_kinematics
+  ament_index_cpp
 )
 
 target_link_libraries(dualarm_forcecon_node
@@ -71,6 +73,11 @@ install(
   DESTINATION share/${PROJECT_NAME}/yaml
 )
 
+install(
+  FILES scripts/aidin_hand_force_sensor.py
+  DESTINATION share/${PROJECT_NAME}/scripts
+)
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/launch")
   install(
     DIRECTORY launch/
@@ -90,6 +97,7 @@ ament_export_dependencies(
   geometry_msgs
   dualarm_forcecon_interfaces
   dualarm_kinematics
+  ament_index_cpp
 )
 
 ament_package()

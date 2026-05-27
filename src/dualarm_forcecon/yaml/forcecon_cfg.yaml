@@ -19,7 +19,7 @@ kinematics:
   #     -p robot_profile_id:=1
   #
   #   Select by direct YAML path:
-  #     -p kinematics_cfg_yaml:=/absolute/path/to/robot_kinematics.yaml
+  #     -p kinematics_cfg_yaml:=package://dualarm_kinematics/config/rby1_kinematics.yaml
   #
   # Selection priority in C++:
   #   1) ROS parameter kinematics_cfg_yaml
@@ -32,15 +32,15 @@ kinematics:
   profiles:
     - id: 0
       name: doosan_dualarm
-      config_yaml: /home/eunseop/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml
+      config_yaml: package://dualarm_kinematics/config/doosan_dualarm_kinematics.yaml
 
     - id: 1
       name: rby1
-      config_yaml: /home/eunseop/dualarm_ws/src/dualarm_kinematics/config/rby1_kinematics.yaml
+      config_yaml: package://dualarm_kinematics/config/rby1_kinematics.yaml
 
   # Backward-compatible fallback.
   # Normally not used when active_robot_id/profiles are valid.
-  config_yaml: /home/eunseop/dualarm_ws/src/dualarm_kinematics/config/doosan_dualarm_kinematics.yaml
+  config_yaml: package://dualarm_kinematics/config/doosan_dualarm_kinematics.yaml
 
 
 # ============================================================================
