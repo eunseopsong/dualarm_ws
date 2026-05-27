@@ -1395,6 +1395,9 @@ void DualArmForceControl::ControlLoop()
 
         if (!wheel_cmd.name.empty()) {
             wheel_command_pub_->publish(wheel_cmd);
+            if (wheel_command_topic_ != "/isaac_joint_command") {
+                joint_command_pub_->publish(wheel_cmd);
+            }
         }
     }
 }
