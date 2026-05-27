@@ -744,11 +744,13 @@ void DualArmForceControl::HandContactForceCallback(
         return;
     }
 
-    auto assign_one_hand = [&](Eigen::Matrix<double,5,1>& raw_contact_mat,
-                               Eigen::Matrix<double,5,3>& F_sensor_mat,
-                               Eigen::Matrix<double,5,3>& F_wrist_mat,
-                               Eigen::Matrix<double,5,3>& F_hand_cur,
-                               int msg_offset)
+    Eigen::Matrix<double,5,3> left_raw;
+    Eigen::Matrix<double,5,3> right_raw;
+    left_raw.setZero();
+    right_raw.setZero();
+
+    auto read_one_hand = [&](Eigen::Matrix<double,5,3>& F_raw,
+                             int msg_offset)
     {
         for (int finger = 0; finger < 5; ++finger) {
             Eigen::Vector3d f_xyz;
@@ -761,6 +763,34 @@ void DualArmForceControl::HandContactForceCallback(
                 f_xyz(axis) = v;
             }
 
+            F_raw.row(finger) = f_xyz.transpose();
+        }
+    };
+
+    read_one_hand(left_raw, 0);
+    read_one_hand(right_raw, 15);
+
+    if (!hand_force_offset_initialized_) {
+        f_l_hand_force_offset_ = left_raw;
+        f_r_hand_force_offset_ = right_raw;
+        hand_force_offset_initialized_ = true;
+
+        RCLCPP_INFO(
+            node_ ? node_->get_logger() : rclcpp::get_logger("dualarm_forcecon"),
+            "[HandForce] latched startup force offset; current hand force is zero-referenced");
+    }
+
+    auto assign_one_hand = [](const Eigen::Matrix<double,5,3>& F_raw,
+                              const Eigen::Matrix<double,5,3>& F_offset,
+                              Eigen::Matrix<double,5,1>& raw_contact_mat,
+                              Eigen::Matrix<double,5,3>& F_sensor_mat,
+                              Eigen::Matrix<double,5,3>& F_wrist_mat,
+                              Eigen::Matrix<double,5,3>& F_hand_cur)
+    {
+        const Eigen::Matrix<double,5,3> F_corrected = F_raw - F_offset;
+
+        for (int finger = 0; finger < 5; ++finger) {
+            const Eigen::Vector3d f_xyz = F_corrected.row(finger).transpose();
             raw_contact_mat(finger, 0) = f_xyz.norm();
             F_sensor_mat.row(finger) = f_xyz.transpose();
             F_wrist_mat.row(finger) = f_xyz.transpose();
@@ -768,17 +798,19 @@ void DualArmForceControl::HandContactForceCallback(
         }
     };
 
-    assign_one_hand(raw_l_hand_contact_,
+    assign_one_hand(left_raw,
+                    f_l_hand_force_offset_,
+                    raw_l_hand_contact_,
                     f_l_hand_sensor_c_,
                     f_l_hand_wrist_c_,
-                    f_l_hand_c_,
-                    0);
+                    f_l_hand_c_);
 
-    assign_one_hand(raw_r_hand_contact_,
+    assign_one_hand(right_raw,
+                    f_r_hand_force_offset_,
+                    raw_r_hand_contact_,
                     f_r_hand_sensor_c_,
                     f_r_hand_wrist_c_,
-                    f_r_hand_c_,
-                    15);
+                    f_r_hand_c_);
 }
 
 void DualArmForceControl::PublishHandForceMonitor()

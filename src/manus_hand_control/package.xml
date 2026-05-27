@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>manus_hand_control</name>
+  <version>0.0.0</version>
+  <description>MANUS glove to AIDIN hand command bridge for dualarm_forcecon.</description>
+
+  <maintainer email="eunseop@example.com">eunseop</maintainer>
+  <license>TODO: License declaration</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>manus_ros2_msgs</exec_depend>
+  <exec_depend>dualarm_forcecon_interfaces</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

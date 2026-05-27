@@ -255,6 +255,11 @@ private:
     Eigen::Matrix<double,5,3> f_l_hand_c_;
     Eigen::Matrix<double,5,3> f_r_hand_c_;
 
+    // Constant startup bias latched from the first valid hand-force sample.
+    bool hand_force_offset_initialized_{false};
+    Eigen::Matrix<double,5,3> f_l_hand_force_offset_;
+    Eigen::Matrix<double,5,3> f_r_hand_force_offset_;
+
     // desired target force in HAND BASE frame
     Eigen::Matrix<double,5,3> f_l_hand_t_;
     Eigen::Matrix<double,5,3> f_r_hand_t_;

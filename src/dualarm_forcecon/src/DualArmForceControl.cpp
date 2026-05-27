@@ -505,6 +505,9 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     f_l_hand_c_.setZero(); f_r_hand_c_.setZero();
     f_l_hand_t_.setZero(); f_r_hand_t_.setZero();
+    hand_force_offset_initialized_ = false;
+    f_l_hand_force_offset_.setZero();
+    f_r_hand_force_offset_.setZero();
 
     x_l_hand_c_.setZero();   x_r_hand_c_.setZero();
     x_l_hand_d_.setZero();   x_r_hand_d_.setZero();
