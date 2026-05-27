@@ -70,8 +70,7 @@ the bridge in terminal 2.
 Terminal 1:
 
 ```bash
-cd ~/dualarm_ws
-source ~/manus_ws/install/setup.bash
+cd ~/manus_ws
 source install/setup.bash
 
 ros2 run manus_ros2 manus_data_publisher
@@ -80,21 +79,16 @@ ros2 run manus_ros2 manus_data_publisher
 Terminal 2:
 
 ```bash
-cd ~/dualarm_ws
-source ~/manus_ws/install/setup.bash
+cd ~/manus_ws
 source install/setup.bash
 
-ros2 run manus_hand_control aidin_hand_control --ros-args \
-  -p auto_set_forcecon_mode:=true \
-  -p forcecon_arm_mode:=inverse \
-  -p forcecon_hand_mode:=forward
+ros2 run manus_hand aidin_hand_control
 ```
 
 MANUS topic checks:
 
 ```bash
-cd ~/dualarm_ws
-source ~/manus_ws/install/setup.bash
+cd ~/manus_ws
 source install/setup.bash
 
 ros2 topic list | grep manus
@@ -105,11 +99,10 @@ ros2 topic hz /forward_hand_joint_targets
 Print incoming MANUS values:
 
 ```bash
-cd ~/dualarm_ws
-source ~/manus_ws/install/setup.bash
+cd ~/manus_ws
 source install/setup.bash
 
-ros2 run manus_hand_control aidin_hand_control --ros-args \
+ros2 run manus_hand aidin_hand_control --ros-args \
   -p print_manus_input:=true \
   -p print_interval_s:=0.5
 ```
