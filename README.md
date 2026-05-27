@@ -487,7 +487,7 @@ ros2 topic pub -r 20 /cmd_vel geometry_msgs/msg/Twist \
 Stop:
 
 ```bash
-ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
+ros2 topic pub --r 20 /cmd_vel geometry_msgs/msg/Twist \
 "{linear: {x: 0.0}, angular: {z: 0.0}}"
 ```
 
