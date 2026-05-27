@@ -451,6 +451,16 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
                 kin_cfg_.left_arm_tip_link.c_str(), kin_cfg_.right_arm_tip_link.c_str(),
                 kin_cfg_.leftArmDof(), kin_cfg_.rightArmDof(), static_cast<int>(kin_cfg_.hand_enabled));
 
+    std::string wheel_command_topic_default = "/isaac_wheel_commands";
+    if (root && root["mobile_base"]) {
+        readScalar(root["mobile_base"], "wheel_command_topic", wheel_command_topic_default);
+    }
+    wheel_command_topic_ = node_->declare_parameter<std::string>(
+        "wheel_command_topic", wheel_command_topic_default);
+    if (wheel_command_topic_.empty()) {
+        wheel_command_topic_ = "/isaac_wheel_commands";
+    }
+
     // -------------------------
     // ROS IF
     // -------------------------
@@ -506,6 +516,9 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     joint_command_pub_ = node_->create_publisher<sensor_msgs::msg::JointState>(
         "/isaac_joint_command", 10);
+
+    wheel_command_pub_ = node_->create_publisher<sensor_msgs::msg::JointState>(
+        wheel_command_topic_, 10);
 
     hand_force_current_monitor_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>(
         "/hand_force_current_monitor", 10);
@@ -838,7 +851,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
 
     RCLCPP_INFO(
         node_->get_logger(),
-        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d hand_runtime_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms wheel_radius=%.3f m wheel_base=%.3f m max_wheel=%.2f rad/s torso_max_speed=%.2f rad/s torso_upright_hold=%d torso_joints=%zu",
+        "[StartupHold] fixed_joint_hold_enabled=%d fixed_hand_hold_enabled=%d arm_home_hold_enabled=%d hand_runtime_enabled=%d profile=%s rby1_cmd_step=%.4f rad rby1_cart_step=%.4f m control_period=%.2f ms wheel_topic=%s wheel_radius=%.3f m wheel_base=%.3f m max_wheel=%.2f rad/s torso_max_speed=%.2f rad/s torso_upright_hold=%d torso_joints=%zu",
         static_cast<int>(startup_fixed_joint_hold_enabled_),
         static_cast<int>(startup_fixed_hand_hold_enabled_),
         static_cast<int>(startup_arm_home_hold_enabled_),
@@ -847,6 +860,7 @@ DualArmForceControl::DualArmForceControl(std::shared_ptr<rclcpp::Node> node)
         rby1_arm_max_cmd_step_rad_,
         rby1_arm_servo_max_cart_step_m_,
         safe_control_loop_period_ms,
+        wheel_command_topic_.c_str(),
         wheel_radius_m_,
         wheel_base_m_,
         max_wheel_speed_rad_s_,
@@ -1380,7 +1394,7 @@ void DualArmForceControl::ControlLoop()
         }
 
         if (!wheel_cmd.name.empty()) {
-            joint_command_pub_->publish(wheel_cmd);
+            wheel_command_pub_->publish(wheel_cmd);
         }
     }
 }

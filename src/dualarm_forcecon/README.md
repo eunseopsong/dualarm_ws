@@ -4,7 +4,7 @@ ROS 2 Humble control node for dual-arm, hand, torso hold, and RBY1 wheel command
 
 ## RBY1 Wheel Commands
 
-Run `dualarm_forcecon_node` and send base velocity commands through `/cmd_vel`. Do not publish wheel-only commands directly to `/isaac_joint_command`, because that bypasses the full-body hold command for torso/head/arms/hands.
+Run `dualarm_forcecon_node` and send base velocity commands through `/cmd_vel`. Wheel velocity commands are published to `/isaac_wheel_commands` by default, while the body hold command remains on `/isaac_joint_command`.
 
 While a wheel command is active, `dualarm_forcecon_node` also publishes the configured `torso_*` upright position targets from `yaml/forcecon_cfg.yaml` so the torso is held vertical during forward/backward motion.
 
@@ -60,4 +60,4 @@ ros2 topic pub --once /forward_aux_joint_targets sensor_msgs/msg/JointState \
 
 In the current Isaac setup, positive `/cmd_vel.linear.x` is forward because `mobile_base.invert_wheel_velocity_command` is set to `true` in `yaml/forcecon_cfg.yaml`.
 
-The `/cmd_vel` command is converted to `left_wheel` and `right_wheel` velocity commands using `mobile_base` parameters in `yaml/forcecon_cfg.yaml`. The torso upright target is configured by `mobile_base.torso_upright_joint_names` and `mobile_base.torso_upright_positions`. Waist left/right uses `torso_5`; if the visual direction is opposite in Isaac, swap the signs of `+/-1.5708`. For torso commands, `velocity` is used as the max position speed in rad/s. Smaller values such as 0.5 move slower; default is 2.0.
+The `/cmd_vel` command is converted to `left_wheel` and `right_wheel` velocity commands using `mobile_base` parameters in `yaml/forcecon_cfg.yaml`. The wheel command topic is configurable with `mobile_base.wheel_command_topic`. The torso upright target is configured by `mobile_base.torso_upright_joint_names` and `mobile_base.torso_upright_positions`. Waist left/right uses `torso_5`; if the visual direction is opposite in Isaac, swap the signs of `+/-1.5708`. For torso commands, `velocity` is used as the max position speed in rad/s. Smaller values such as 0.5 move slower; default is 2.0.

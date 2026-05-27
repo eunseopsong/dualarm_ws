@@ -124,6 +124,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr hand_force_xyz_sub_;
 
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr wheel_command_pub_;
 
     // Monitor publishers
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr hand_force_current_monitor_pub_;
@@ -199,6 +200,7 @@ private:
     // RBY1 mobile-base command extension.
     // /cmd_vel is converted to left_wheel/right_wheel velocity commands while
     // the normal consolidated command continues holding torso/head/arms/hands.
+    std::string wheel_command_topic_ = "/isaac_wheel_commands";
     double cmd_vel_linear_x_ = 0.0;
     double cmd_vel_angular_z_ = 0.0;
     rclcpp::Time cmd_vel_stamp_;

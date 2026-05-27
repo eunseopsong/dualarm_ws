@@ -87,6 +87,7 @@ command_publish:
 # non-wheel body hold command so torso/head/arms/hands are not dropped.
 # ============================================================================
 mobile_base:
+  wheel_command_topic: /isaac_wheel_commands
   wheel_radius_m: 0.1
   wheel_base_m: 0.53
   max_wheel_speed_rad_s: 10.0

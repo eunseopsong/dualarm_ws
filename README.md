@@ -520,6 +520,9 @@ Do not publish wheel-only commands directly to /isaac_joint_command.
 While /cmd_vel is active, dualarm_forcecon also publishes the configured
 torso_* upright position targets so the torso stays vertical during driving.
 
+Wheel velocity commands are published to /isaac_wheel_commands.
+This topic is configurable with mobile_base.wheel_command_topic.
+
 In the current Isaac setup, positive /cmd_vel.linear.x is forward because
 mobile_base.invert_wheel_velocity_command is true in forcecon_cfg.yaml.
 
